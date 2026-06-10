@@ -187,7 +187,7 @@ CREATE TABLE dbo.REF_MATCHCONFIDENCE
     ConfidenceRank        INT NOT NULL,
     [Description]         NVARCHAR(128) NOT NULL,
     IsActive              BIT NOT NULL DEFAULT 1,
-    CreationDate          DATETIME2(0) NOT NULL DEFAULT SYSDATETIME(),
+    CreatedDate           DATETIME2(0) NOT NULL DEFAULT SYSDATETIME(),
     UpdatedDate           DATETIME2(0) NOT NULL DEFAULT SYSDATETIME()
 );
 

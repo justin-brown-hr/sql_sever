@@ -138,8 +138,8 @@ BEGIN TRY
     ) AS s(Code, Name, RankVal, Descr)
     ON t.MatchConfidenceCode = s.Code
     WHEN NOT MATCHED THEN
-        INSERT (MatchConfidenceCode, MatchConfidenceName, ConfidenceRank, [Description])
-        VALUES (s.Code, s.Name, s.RankVal, s.Descr);
+        INSERT (MatchConfidenceCode, MatchConfidenceName, ConfidenceRank, [Description], CreatedDate, UpdatedDate)
+        VALUES (s.Code, s.Name, s.RankVal, s.Descr, @Now, @Now);
 
     IF NOT EXISTS (SELECT 1 FROM dbo.REF_BUILDINGTYPE)
         INSERT INTO dbo.REF_BUILDINGTYPE (BuildingTypeCode, BuildingTypeName, [Description], IsResidential, IsActive)

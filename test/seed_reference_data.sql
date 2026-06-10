@@ -56,13 +56,13 @@ VALUES
 
 /* REF_MATCHCONFIDENCE */
 IF NOT EXISTS (SELECT 1 FROM dbo.REF_MATCHCONFIDENCE)
-INSERT INTO dbo.REF_MATCHCONFIDENCE (MatchConfidenceCode, MatchConfidenceName, ConfidenceRank, [Description])
+INSERT INTO dbo.REF_MATCHCONFIDENCE (MatchConfidenceCode, MatchConfidenceName, ConfidenceRank, [Description], CreatedDate, UpdatedDate)
 VALUES
-(N'HIGH',     N'High',     100, N'Very reliable'),
-(N'MEDIUM',   N'Medium',    75, N'Likely'),
-(N'LOW',      N'Low',       55, N'Uncertain'),
-(N'VERIFIED', N'Verified', 110, N'Human verified'),
-(N'NONE',     N'None',       0, N'No confidence assigned');
+(N'HIGH',     N'High',     100, N'Very reliable', SYSDATETIME(), SYSDATETIME()),
+(N'MEDIUM',   N'Medium',    75, N'Likely',         SYSDATETIME(), SYSDATETIME()),
+(N'LOW',      N'Low',       55, N'Uncertain',      SYSDATETIME(), SYSDATETIME()),
+(N'VERIFIED', N'Verified', 110, N'Human verified', SYSDATETIME(), SYSDATETIME()),
+(N'NONE',     N'None',       0, N'No confidence assigned', SYSDATETIME(), SYSDATETIME());
 
 /* REF_BUILDINGTYPE */
 IF NOT EXISTS (SELECT 1 FROM dbo.REF_BUILDINGTYPE)
