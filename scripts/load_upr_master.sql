@@ -102,44 +102,44 @@ BEGIN TRY
 
     MERGE dbo.REF_SOURCESYSTEM AS t
     USING (VALUES
-        (N'ADDRESS_MASTER', N'Address Master',      N'Incoming AddressMaster'),
-        (N'KDAT',           N'KDAT',                N'Incoming SDAT/KDAT'),
-        (N'eProperty',      N'eProperty',            N'Licensing property'),
-        (N'CASE',           N'CASE',                N'Enforcement case'),
-        (N'MPDU',           N'MPDU',                N'MPDU development'),
-        (N'MULTIFAMILY',    N'Multifamily loans',   N'Multifamily loan address')
-    ) AS s(Code, Name, Descr)
+        (N'ADDRESS_MASTER', N'Address Master',      N'Incoming AddressMaster',      @Now, @Now),
+        (N'KDAT',           N'KDAT',                N'Incoming SDAT/KDAT',          @Now, @Now),
+        (N'eProperty',      N'eProperty',            N'Licensing property',          @Now, @Now),
+        (N'CASE',           N'CASE',                N'Enforcement case',            @Now, @Now),
+        (N'MPDU',           N'MPDU',                N'MPDU development',            @Now, @Now),
+        (N'MULTIFAMILY',    N'Multifamily loans',   N'Multifamily loan address',    @Now, @Now)
+    ) AS s(Code, Name, Descr, CreatedDate, UpdatedDate)
     ON t.SourceSystemCode = s.Code
     WHEN NOT MATCHED THEN
         INSERT (SourceSystemCode, SourceSystemName, [Description], CreatedDate, UpdatedDate)
-        VALUES (s.Code, s.Name, s.Descr, @Now, @Now);
+        VALUES (s.Code, s.Name, s.Descr, s.CreatedDate, s.UpdatedDate);
 
     MERGE dbo.REF_MATCHMETHOD AS t
     USING (VALUES
-        (N'ParcelID',          N'Parcel match',        N'Exact parcel'),
-        (N'SDATAccount',       N'Tax/Account match',   N'Exact account / tax id'),
-        (N'AddressExact',      N'Exact address',       N'Exact normalized match'),
-        (N'AddressNormalized', N'Normalized address',  N'Normalized composite'),
-        (N'GISProximity',      N'GIS proximity',       N'Coordinate proximity'),
-        (N'Manual',            N'Manual',              N'Steward confirmed')
-    ) AS s(Code, Name, Descr)
+        (N'ParcelID',          N'Parcel match',        N'Exact parcel',              @Now, @Now),
+        (N'SDATAccount',       N'Tax/Account match',   N'Exact account / tax id',    @Now, @Now),
+        (N'AddressExact',      N'Exact address',       N'Exact normalized match',    @Now, @Now),
+        (N'AddressNormalized', N'Normalized address',  N'Normalized composite',      @Now, @Now),
+        (N'GISProximity',      N'GIS proximity',       N'Coordinate proximity',      @Now, @Now),
+        (N'Manual',            N'Manual',              N'Steward confirmed',         @Now, @Now)
+    ) AS s(Code, Name, Descr, CreatedDate, UpdatedDate)
     ON t.MatchMethodCode = s.Code
     WHEN NOT MATCHED THEN
         INSERT (MatchMethodCode, MatchMethodName, [Description], CreatedDate, UpdatedDate)
-        VALUES (s.Code, s.Name, s.Descr, @Now, @Now);
+        VALUES (s.Code, s.Name, s.Descr, s.CreatedDate, s.UpdatedDate);
 
     MERGE dbo.REF_MATCHCONFIDENCE AS t
     USING (VALUES
-        (N'HIGH',     N'High',     100, N'Very reliable'),
-        (N'MEDIUM',   N'Medium',    75, N'Likely'),
-        (N'LOW',      N'Low',       55, N'Uncertain'),
-        (N'VERIFIED', N'Verified', 110, N'Human verified'),
-        (N'NONE',     N'None',       0, N'No confidence assigned')
-    ) AS s(Code, Name, RankVal, Descr)
+        (N'HIGH',     N'High',     100, N'Very reliable',     @Now, @Now),
+        (N'MEDIUM',   N'Medium',    75, N'Likely',            @Now, @Now),
+        (N'LOW',      N'Low',       55, N'Uncertain',         @Now, @Now),
+        (N'VERIFIED', N'Verified', 110, N'Human verified',    @Now, @Now),
+        (N'NONE',     N'None',       0, N'No confidence assigned', @Now, @Now)
+    ) AS s(Code, Name, RankVal, Descr, CreatedDate, UpdatedDate)
     ON t.MatchConfidenceCode = s.Code
     WHEN NOT MATCHED THEN
         INSERT (MatchConfidenceCode, MatchConfidenceName, ConfidenceRank, [Description], CreatedDate, UpdatedDate)
-        VALUES (s.Code, s.Name, s.RankVal, s.Descr, @Now, @Now);
+        VALUES (s.Code, s.Name, s.RankVal, s.Descr, s.CreatedDate, s.UpdatedDate);
 
     IF NOT EXISTS (SELECT 1 FROM dbo.REF_BUILDINGTYPE)
         INSERT INTO dbo.REF_BUILDINGTYPE (BuildingTypeCode, BuildingTypeName, [Description], IsResidential, IsActive)
