@@ -111,8 +111,8 @@ BEGIN TRY
     ) AS s(Code, Name, Descr)
     ON t.SourceSystemCode = s.Code
     WHEN NOT MATCHED THEN
-        INSERT (SourceSystemCode, SourceSystemName, [Description])
-        VALUES (s.Code, s.Name, s.Descr);
+        INSERT (SourceSystemCode, SourceSystemName, [Description], CreatedDate, UpdatedDate)
+        VALUES (s.Code, s.Name, s.Descr, @Now, @Now);
 
     MERGE dbo.REF_MATCHMETHOD AS t
     USING (VALUES
@@ -125,8 +125,8 @@ BEGIN TRY
     ) AS s(Code, Name, Descr)
     ON t.MatchMethodCode = s.Code
     WHEN NOT MATCHED THEN
-        INSERT (MatchMethodCode, MatchMethodName, [Description])
-        VALUES (s.Code, s.Name, s.Descr);
+        INSERT (MatchMethodCode, MatchMethodName, [Description], CreatedDate, UpdatedDate)
+        VALUES (s.Code, s.Name, s.Descr, @Now, @Now);
 
     MERGE dbo.REF_MATCHCONFIDENCE AS t
     USING (VALUES
