@@ -117,10 +117,11 @@ SELECT Scenario, Expected, Actual,
 FROM @checks
 ORDER BY Scenario;
 
-DECLARE @fail INT = (SELECT COUNT(*) FROM @checks WHERE Pass = 0);
+DECLARE @fail    INT = (SELECT COUNT(*) FROM @checks WHERE Pass = 0);
+DECLARE @passed  INT = (SELECT COUNT(*) FROM @checks WHERE Pass = 1);
+DECLARE @total   INT = (SELECT COUNT(*) FROM @checks);
 PRINT N'';
-PRINT N'Tests passed: ' + CAST((SELECT COUNT(*) FROM @checks WHERE Pass = 1) AS NVARCHAR(10))
-    + N' / ' + CAST((SELECT COUNT(*) FROM @checks) AS NVARCHAR(10));
+PRINT N'Tests passed: ' + CAST(@passed AS NVARCHAR(10)) + N' / ' + CAST(@total AS NVARCHAR(10));
 
 IF @fail > 0
     PRINT N'*** ' + CAST(@fail AS NVARCHAR(10)) + N' scenario check(s) FAILED ***';
