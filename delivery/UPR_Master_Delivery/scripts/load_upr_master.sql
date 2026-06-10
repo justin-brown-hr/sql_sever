@@ -192,9 +192,9 @@ BEGIN TRY
             WHEN N'MIXED USE'             THEN N'MIXED'
             ELSE NULLIF(UPPER(LTRIM(RTRIM(ma.LUCategory))), N'')
         END,
-        OwnerName            = NULL,
-        YearBuilt            = NULL,
-        DwellingUnits        = NULL,
+        OwnerName            = CAST(NULL AS NVARCHAR(200)),
+        YearBuilt            = CAST(NULL AS INT),
+        DwellingUnits        = CAST(NULL AS INT),
         NormalizedAddress    = UPPER(LTRIM(RTRIM(CONCAT(
             ISNULL(CONVERT(NVARCHAR(20), ma.StreetNumber), N''), N' ',
             ISNULL(UPPER(LTRIM(RTRIM(ma.StreetName))), N''), N' ',
@@ -227,7 +227,8 @@ BEGIN TRY
     INTO #MA
     FROM dbo.AddressMaster ma;
 
-    INSERT INTO @Stats VALUES (N'AddressMaster rows read', (SELECT COUNT(*) FROM #MA));
+    INSERT INTO @Stats (Metric, Cnt)
+    SELECT N'AddressMaster rows read', COUNT(*) FROM #MA;
 
     /* ========================================================================
        3. NORMALIZE SDAT  (per client spec example)
@@ -262,11 +263,11 @@ BEGIN TRY
         ZipCode              = LEFT(NULLIF(LTRIM(RTRIM(s.PremisesZipCode)), N''), 10),
         Latitude             = NULL,
         Longitude            = NULL,
-        PropertyTypeRaw      = NULL,
-        PropertyType         = CASE WHEN ISNULL(s.DwellingUnits, 0) > 1 THEN N'MULTI' ELSE N'SF' END,
-        OwnerName            = NULLIF(LTRIM(RTRIM(s.Owner)), N''),
-        YearBuilt            = s.YearBuilt,
-        DwellingUnits        = s.DwellingUnits,
+        PropertyTypeRaw      = CAST(NULL AS NVARCHAR(50)),
+        PropertyType         = CASE WHEN ISNULL(TRY_CONVERT(INT, s.DwellingUnits), 0) > 1 THEN N'MULTI' ELSE N'SF' END,
+        OwnerName            = NULLIF(LTRIM(RTRIM(CAST(s.Owner AS NVARCHAR(200)))), N''),
+        YearBuilt            = TRY_CONVERT(INT, s.YearBuilt),
+        DwellingUnits        = TRY_CONVERT(INT, s.DwellingUnits),
         NormalizedAddress    = UPPER(LTRIM(RTRIM(CONCAT(
             ISNULL(s.PremisesNumber, N''), N' ',
             ISNULL(UPPER(LTRIM(RTRIM(s.PremisesStreetName))), N''), N' ',
@@ -299,7 +300,8 @@ BEGIN TRY
     INTO #SDAT
     FROM dbo.SDAT s;
 
-    INSERT INTO @Stats VALUES (N'SDAT rows read', (SELECT COUNT(*) FROM #SDAT));
+    INSERT INTO @Stats (Metric, Cnt)
+    SELECT N'SDAT rows read', COUNT(*) FROM #SDAT;
 
     /* ========================================================================
        4. MATCH AddressMaster <-> SDAT on Account + Normalized Address
@@ -324,9 +326,9 @@ BEGIN TRY
             COALESCE(ma.Latitude, sd.Latitude)                 AS Latitude,
             COALESCE(ma.Longitude, sd.Longitude)               AS Longitude,
             COALESCE(ma.PropertyType, sd.PropertyType)         AS PropertyType,
-            sd.OwnerName,
-            sd.YearBuilt,
-            sd.DwellingUnits,
+            CAST(sd.OwnerName AS NVARCHAR(200))                AS OwnerName,
+            CAST(sd.YearBuilt AS INT)                          AS YearBuilt,
+            CAST(sd.DwellingUnits AS INT)                      AS DwellingUnits,
             COALESCE(ma.NormalizedAddress, sd.NormalizedAddress)         AS NormalizedAddress,
             COALESCE(ma.NormalizedFullAddress, sd.NormalizedFullAddress) AS NormalizedFullAddress,
             CASE WHEN ma.HasRequiredAddress = 1 AND sd.HasRequiredAddress = 1 THEN 1
@@ -345,11 +347,14 @@ BEGIN TRY
     ),
     MAOnly AS (
         SELECT
-            ma.MasterAddressID, NULL AS KdatRecordID,
+            ma.MasterAddressID, CAST(NULL AS INT) AS KdatRecordID,
             ma.MasterAddressAccount, ma.SDATAccountNumber, ma.ParcelID,
             ma.StreetNumber, ma.StreetName, ma.StreetSuffix, ma.StreetType, ma.UnitNumber,
             ma.City, ma.[State], ma.ZipCode, ma.Latitude, ma.Longitude,
-            ma.PropertyType, ma.OwnerName, ma.YearBuilt, ma.DwellingUnits,
+            ma.PropertyType,
+            CAST(ma.OwnerName AS NVARCHAR(200))                AS OwnerName,
+            CAST(ma.YearBuilt AS INT)                          AS YearBuilt,
+            CAST(ma.DwellingUnits AS INT)                      AS DwellingUnits,
             ma.NormalizedAddress, ma.NormalizedFullAddress, ma.HasRequiredAddress,
             N'ADDRESS_MASTER' AS MatchSource, N'MEDIUM' AS IncomingMatchConfidence,
             N'AddressNormalized' AS IncomingMatchMethod
@@ -360,11 +365,14 @@ BEGIN TRY
     ),
     SDATOnly AS (
         SELECT
-            NULL AS MasterAddressID, sd.KdatRecordID,
+            CAST(NULL AS INT) AS MasterAddressID, sd.KdatRecordID,
             sd.MasterAddressAccount, sd.SDATAccountNumber, sd.ParcelID,
             sd.StreetNumber, sd.StreetName, sd.StreetSuffix, sd.StreetType, sd.UnitNumber,
             sd.City, sd.[State], sd.ZipCode, sd.Latitude, sd.Longitude,
-            sd.PropertyType, sd.OwnerName, sd.YearBuilt, sd.DwellingUnits,
+            sd.PropertyType,
+            CAST(sd.OwnerName AS NVARCHAR(200))                AS OwnerName,
+            CAST(sd.YearBuilt AS INT)                          AS YearBuilt,
+            CAST(sd.DwellingUnits AS INT)                      AS DwellingUnits,
             sd.NormalizedAddress, sd.NormalizedFullAddress, sd.HasRequiredAddress,
             N'KDAT' AS MatchSource, N'MEDIUM' AS IncomingMatchConfidence,
             N'AddressNormalized' AS IncomingMatchMethod
@@ -377,7 +385,8 @@ BEGIN TRY
     UNION ALL SELECT * FROM MAOnly
     UNION ALL SELECT * FROM SDATOnly;
 
-    INSERT INTO @Stats VALUES (N'Unified work rows', (SELECT COUNT(*) FROM #Work));
+    INSERT INTO @Stats (Metric, Cnt)
+    SELECT N'Unified work rows', COUNT(*) FROM #Work;
 
     /* ========================================================================
        5. UPSERT UPROPERTYRECORD (idempotent - no duplicates)
@@ -460,7 +469,8 @@ BEGIN TRY
                  ELSE 3 END
     ) x;
 
-    INSERT INTO @Stats VALUES (N'UPROPERTYRECORD total', (SELECT COUNT(*) FROM dbo.UPROPERTYRECORD));
+    INSERT INTO @Stats (Metric, Cnt)
+    SELECT N'UPROPERTYRECORD total', COUNT(*) FROM dbo.UPROPERTYRECORD;
 
     /* Status history for newly created UPR records only (idempotent re-runs) */
     INSERT INTO dbo.UPR_STATUSHISTORY (
