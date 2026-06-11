@@ -179,19 +179,20 @@ BEGIN TRY
         END,
         UnitNumber           = NULLIF(LTRIM(RTRIM(ma.Unit)), N''),
         City                 = NULLIF(UPPER(LTRIM(RTRIM(ma.City))), N''),
+        /* AddressMaster has no State column — assign MD once; do not add a second [State] line */
         [State]              = @DefaultState,
         ZipCode              = LEFT(NULLIF(LTRIM(RTRIM(ma.ZipCode)), N''), 10),
         Latitude             = TRY_CONVERT(DECIMAL(10,6), ma.YCoordinate),
         Longitude            = TRY_CONVERT(DECIMAL(10,6), ma.XCoordinate),
-        PropertyTypeRaw      = NULLIF(UPPER(LTRIM(RTRIM(ma.LUCategory))), N''),
-        PropertyType         = CASE UPPER(LTRIM(RTRIM(ma.LUCategory)))
+        PropertyTypeRaw      = NULLIF(UPPER(LTRIM(RTRIM(ma.PropertyType))), N''),
+        PropertyType         = CASE UPPER(LTRIM(RTRIM(ma.PropertyType)))
             WHEN N'CONDOMINIUM'           THEN N'CONDO'
             WHEN N'MULTI-FAMILY'          THEN N'MULTI'
             WHEN N'SINGLE FAMILY DETACHED'THEN N'SF'
             WHEN N'VACANT'                THEN N'LAND'
             WHEN N'TOWNHOUSE'             THEN N'TH'
             WHEN N'MIXED USE'             THEN N'MIXED'
-            ELSE NULLIF(UPPER(LTRIM(RTRIM(ma.LUCategory))), N'')
+            ELSE NULLIF(UPPER(LTRIM(RTRIM(ma.PropertyType))), N'')
         END,
         OwnerName            = CAST(NULL AS NVARCHAR(200)),
         YearBuilt            = CAST(NULL AS INT),
@@ -260,6 +261,7 @@ BEGIN TRY
         END,
         UnitNumber           = NULLIF(LTRIM(RTRIM(s.CondoUnit)), N''),
         City                 = NULLIF(UPPER(LTRIM(RTRIM(s.PremisesCity))), N''),
+        /* [State] defined only once in #SDAT — PremisesState if present, else @DefaultState */
         [State]              = COALESCE(NULLIF(UPPER(LTRIM(RTRIM(s.PremisesState))), N''), @DefaultState),
         ZipCode              = LEFT(NULLIF(LTRIM(RTRIM(s.PremisesZipCode)), N''), 10),
         Latitude             = CAST(NULL AS DECIMAL(10,6)),

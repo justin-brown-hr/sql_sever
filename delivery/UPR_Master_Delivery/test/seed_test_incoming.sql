@@ -19,7 +19,7 @@ GO
 /* AddressMaster - 100 records */
 INSERT INTO dbo.AddressMaster
     (MasterAddressID, Account, ParcelNumber, StreetNumber, StreetName, StreetSuffix, StreetType, Unit,
-     FullAddress, City, ZipCode, LUCategory, XCoordinate, YCoordinate)
+     FullAddress, City, ZipCode, PropertyType, XCoordinate, YCoordinate)
 VALUES
 (101, N'10001001', N'P101', N'123', N'MAIN', NULL, N'STREET', NULL, N'123 MAIN STREET', N'ROCKVILLE', N'20850', N'Multi-Family', -77.150000, 39.080000),
 (102, N'20002002', N'P202', N'500', N'OAK', NULL, N'LN', NULL, N'500 oak ln', N'SILVER SPRING', N'20910', N'Single Family Detached', NULL, NULL),

@@ -60,7 +60,7 @@ CREATE TABLE dbo.AddressMaster
     FullAddress       NVARCHAR(200) NULL,
     City              NVARCHAR(100) NULL,
     ZipCode           NVARCHAR(10)  NULL,
-    LUCategory        NVARCHAR(50)  NULL,
+    PropertyType      NVARCHAR(50)  NULL,
     XCoordinate       DECIMAL(10,6) NULL,
     YCoordinate       DECIMAL(10,6) NULL
 );
