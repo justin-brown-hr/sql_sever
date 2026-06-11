@@ -7,7 +7,8 @@
   Reference data, AuditLog).
 
   Minimal fixes applied to client's script (structure unchanged):
-    - PropertyType (not LUCategory), KdatRecordID alias, State = @DefaultState
+    - MA uses LUCategory (not PropertyType); SD has no PropertyType
+    - State/Lat/Long NULL or defaulted; UPROPERTYRECORDS uses PropertyTypeCode
     - UNION column alignment, UPropertyRecordsID typos, external XREF table names
   Lat/long remain commented out per client's production script.
 ================================================================================
@@ -177,17 +178,18 @@ BEGIN TRY
         City                 = NULLIF(UPPER(LTRIM(RTRIM(ma.City))), N''),
         [State]              = @DefaultState,
         ZipCode              = LEFT(NULLIF(LTRIM(RTRIM(ma.ZipCode)), N''), 10),
-        Latitude             = TRY_CONVERT(DECIMAL(10,6), ma.XCoordinate),
-        Longitude            = TRY_CONVERT(DECIMAL(10,6), ma.YCoordinate),
-        PropertyTypeRaw      = NULLIF(UPPER(LTRIM(RTRIM(ma.PropertyType))), N''),
-        PropertyType         = CASE UPPER(LTRIM(RTRIM(ma.PropertyType)))
+        /* MA has XCoordinate/YCoordinate but SD does not — NULL coords in temp table */
+        Latitude             = CAST(NULL AS DECIMAL(10,6)),
+        Longitude            = CAST(NULL AS DECIMAL(10,6)),
+        PropertyTypeRaw      = NULLIF(UPPER(LTRIM(RTRIM(ma.LUCategory))), N''),
+        PropertyType         = CASE UPPER(LTRIM(RTRIM(ma.LUCategory)))
             WHEN N'CONDOMINIUM'           THEN N'CONDO'
             WHEN N'MULTI-FAMILY'          THEN N'MULTI'
             WHEN N'SINGLE FAMILY DETACHED'THEN N'SF'
             WHEN N'VACANT'                THEN N'LAND'
             WHEN N'TOWNHOUSE'             THEN N'TH'
             WHEN N'MIXED USE'             THEN N'MIXED'
-            ELSE NULLIF(UPPER(LTRIM(RTRIM(ma.PropertyType))), N'')
+            ELSE NULLIF(UPPER(LTRIM(RTRIM(ma.LUCategory))), N'')
         END,
         OwnerName            = CAST(NULL AS NVARCHAR(200)),
         YearBuilt            = CAST(NULL AS INT),
@@ -358,8 +360,8 @@ BEGIN TRY
         COALESCE(ma.City, sd.City),
         COALESCE(sd.[State], @DefaultState),
         COALESCE(ma.ZipCode, sd.ZipCode),
-        ma.Latitude,
-        ma.Longitude,
+        CAST(NULL AS DECIMAL(10,6)),
+        CAST(NULL AS DECIMAL(10,6)),
         COALESCE(ma.PropertyType, sd.PropertyType),
         CAST(sd.OwnerName AS NVARCHAR(200)),
         CAST(sd.YearBuilt AS INT),
@@ -390,7 +392,9 @@ BEGIN TRY
     SELECT
         ma.MasterAddressID, NULL, ma.MasterAddressAccount, ma.SDATAccountNumber, ma.ParcelID,
         ma.StreetNumber, ma.StreetName, ma.StreetSuffix, ma.StreetType, ma.UnitNumber,
-        ma.City, ma.[State], ma.ZipCode, ma.Latitude, ma.Longitude, ma.PropertyType,
+        ma.City, ma.[State], ma.ZipCode,
+        CAST(NULL AS DECIMAL(10,6)), CAST(NULL AS DECIMAL(10,6)),
+        ma.PropertyType,
         CAST(ma.OwnerName AS NVARCHAR(200)),
         CAST(ma.YearBuilt AS INT),
         CAST(ma.DwellingUnits AS INT),
@@ -488,21 +492,19 @@ BEGIN TRY
         tgt.Owner             = COALESCE(tgt.Owner, src.OwnerName),
         --tgt.Latitude          = COALESCE(tgt.Latitude, src.Latitude),
         --tgt.Longitude         = COALESCE(tgt.Longitude, src.Longitude),
-        tgt.PropertyType      = COALESCE(tgt.PropertyType, src.PropertyType),
+        tgt.PropertyTypeCode  = COALESCE(tgt.PropertyTypeCode, src.PropertyType),
         tgt.UpdatedDate       = @Now,
         tgt.UpdatedBy         = @RunUser
     WHEN NOT MATCHED AND src.rn = 1 THEN INSERT (
         SDATAccountNumber, ParcelID, PropertyName, Owner,
         StreetNumber, StreetName, StreetSuffix, StreetType, UnitNumber,
-        City, ZipCode, NormalizedAddress, NormalizedFullAddress,
-        --Latitude, Longitude,
-        PropertyType, StatusCode, IsActive,
+        City, [State], ZipCode, NormalizedAddress, NormalizedFullAddress,
+        PropertyTypeCode, StatusCode, IsActive,
         CreatedDate, CreatedBy, UpdatedDate, UpdatedBy
     ) VALUES (
         src.SDATAccountNumber, src.ParcelID, NULL, src.OwnerName,
         src.StreetNumber, src.StreetName, src.StreetSuffix, src.StreetType, src.UnitNumber,
-        src.City, src.ZipCode, src.NormalizedAddress, src.NormalizedFullAddress,
-       -- src.Latitude, src.Longitude,
+        src.City, src.[State], src.ZipCode, src.NormalizedAddress, src.NormalizedFullAddress,
         src.PropertyType, N'ACTIVE', 1,
         @Now, @RunUser, @Now, @RunUser
     );
@@ -536,14 +538,14 @@ BEGIN TRY
     INSERT INTO dbo.UPR_STATUSHISTORY (
         UPropertyRecordsID, SDATAccountNumber, OldStatusCode, NewStatusCode,
         ChangeReason, ParcelID, Owner, StreetNumber, StreetName, StreetType,
-        City, ZipCode, PropertyType, ChangeSource, ChangedBy, ChangedDate
+        City, ZipCode, PropertyTypeCode, ChangeSource, ChangedBy, ChangedDate
     )
     SELECT
         m.UPropertyRecordsID, upr.SDATAccountNumber,
         NULL, upr.StatusCode,
         N'Initial load - new UPR record',
         upr.ParcelID, upr.Owner, upr.StreetNumber, upr.StreetName, upr.StreetType,
-        upr.City, upr.ZipCode, upr.PropertyType,
+        upr.City, upr.ZipCode, upr.PropertyTypeCode,
         N'UPR_LOAD', @RunUser, @Now
     FROM #UPRMap m
     INNER JOIN dbo.UPROPERTYRECORDS upr ON upr.UPropertyRecordsID = m.UPropertyRecordsID
@@ -782,8 +784,8 @@ BEGIN TRY
         upr.NormalizedFullAddress,
         N'ACTIVE', 1, @Now, @Now, @RunUser, @RunUser
     FROM dbo.UPROPERTYRECORDS upr
-    INNER JOIN dbo.REF_PROPERTYTYPE pt ON pt.PropertyTypeCode = upr.PropertyType
-    WHERE upr.PropertyType IN (N'CONDO', N'APT')
+    INNER JOIN dbo.REF_PROPERTYTYPE pt ON pt.PropertyTypeCode = upr.PropertyTypeCode
+    WHERE upr.PropertyTypeCode IN (N'CONDO', N'APT')
       AND pt.AllowsBuildings = 1 AND pt.AllowsUnits = 1
       AND NOT EXISTS (
           SELECT 1 FROM dbo.Building b
@@ -801,12 +803,12 @@ BEGIN TRY
         b.BuildingID,
        --COALESCE(NULLIF(upr.UnitNumber, N''), N'U1'),
         upr.SDATAccountNumber,
-        CASE upr.PropertyType WHEN N'CONDO' THEN N'COND' ELSE N'APT' END,
+        CASE upr.PropertyTypeCode WHEN N'CONDO' THEN N'COND' ELSE N'APT' END,
         N'ACTIVE', 0, 1, @Now, @Now  --@RunUser, @RunUser
     FROM dbo.UPROPERTYRECORDS upr
     INNER JOIN dbo.Building b ON b.UPropertyRecordsID = upr.UPropertyRecordsID AND b.BuildingCode = N'MAIN'
-    INNER JOIN dbo.REF_PROPERTYTYPE pt ON pt.PropertyTypeCode = upr.PropertyType
-    WHERE upr.PropertyType IN (N'CONDO', N'APT')
+    INNER JOIN dbo.REF_PROPERTYTYPE pt ON pt.PropertyTypeCode = upr.PropertyTypeCode
+    WHERE upr.PropertyTypeCode IN (N'CONDO', N'APT')
       AND pt.AllowsBuildings = 1 AND pt.AllowsUnits = 1
       AND NOT EXISTS (
           SELECT 1 FROM dbo.Unit u
