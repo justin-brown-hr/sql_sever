@@ -59,11 +59,10 @@ CREATE TABLE dbo.AddressMaster
     Unit              NVARCHAR(20)  NULL,
     FullAddress       NVARCHAR(200) NULL,
     City              NVARCHAR(100) NULL,
-    [State]           CHAR(2)       NULL,
     ZipCode           NVARCHAR(10)  NULL,
     LUCategory        NVARCHAR(50)  NULL,
-    Latitude          DECIMAL(10,6) NULL,
-    Longitude         DECIMAL(10,6) NULL
+    XCoordinate       DECIMAL(10,6) NULL,
+    YCoordinate       DECIMAL(10,6) NULL
 );
 
 CREATE TABLE dbo.SDAT

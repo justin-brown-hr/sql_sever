@@ -73,8 +73,9 @@ GO
 SET NOCOUNT ON;
 SET XACT_ABORT ON;
 
-DECLARE @RunUser NVARCHAR(100) = SUSER_SNAME();
-DECLARE @Now     DATETIME2(0)  = SYSDATETIME();
+DECLARE @RunUser      NVARCHAR(100) = SUSER_SNAME();
+DECLARE @Now          DATETIME2(0)  = SYSDATETIME();
+DECLARE @DefaultState CHAR(2)       = N'MD';
 
 /* Processing statistics */
 DECLARE @Stats TABLE (Metric NVARCHAR(100) NOT NULL, Cnt INT NOT NULL);
@@ -178,10 +179,10 @@ BEGIN TRY
         END,
         UnitNumber           = NULLIF(LTRIM(RTRIM(ma.Unit)), N''),
         City                 = NULLIF(UPPER(LTRIM(RTRIM(ma.City))), N''),
-        [State]              = COALESCE(NULLIF(UPPER(LTRIM(RTRIM(ma.[State]))), N''), N'MD'),
+        [State]              = @DefaultState,
         ZipCode              = LEFT(NULLIF(LTRIM(RTRIM(ma.ZipCode)), N''), 10),
-        Latitude             = TRY_CONVERT(DECIMAL(10,6), ma.Latitude),
-        Longitude            = TRY_CONVERT(DECIMAL(10,6), ma.Longitude),
+        Latitude             = TRY_CONVERT(DECIMAL(10,6), ma.YCoordinate),
+        Longitude            = TRY_CONVERT(DECIMAL(10,6), ma.XCoordinate),
         PropertyTypeRaw      = NULLIF(UPPER(LTRIM(RTRIM(ma.LUCategory))), N''),
         PropertyType         = CASE UPPER(LTRIM(RTRIM(ma.LUCategory)))
             WHEN N'CONDOMINIUM'           THEN N'CONDO'
@@ -259,10 +260,10 @@ BEGIN TRY
         END,
         UnitNumber           = NULLIF(LTRIM(RTRIM(s.CondoUnit)), N''),
         City                 = NULLIF(UPPER(LTRIM(RTRIM(s.PremisesCity))), N''),
-        [State]              = COALESCE(NULLIF(UPPER(LTRIM(RTRIM(s.PremisesState))), N''), N'MD'),
+        [State]              = COALESCE(NULLIF(UPPER(LTRIM(RTRIM(s.PremisesState))), N''), @DefaultState),
         ZipCode              = LEFT(NULLIF(LTRIM(RTRIM(s.PremisesZipCode)), N''), 10),
-        Latitude             = NULL,
-        Longitude            = NULL,
+        Latitude             = CAST(NULL AS DECIMAL(10,6)),
+        Longitude            = CAST(NULL AS DECIMAL(10,6)),
         PropertyTypeRaw      = CAST(NULL AS NVARCHAR(50)),
         PropertyType         = CASE WHEN ISNULL(TRY_CONVERT(INT, s.DwellingUnits), 0) > 1 THEN N'MULTI' ELSE N'SF' END,
         OwnerName            = NULLIF(LTRIM(RTRIM(CAST(s.Owner AS NVARCHAR(200)))), N''),
@@ -321,10 +322,10 @@ BEGIN TRY
             COALESCE(ma.StreetType, sd.StreetType)             AS StreetType,
             COALESCE(ma.UnitNumber, sd.UnitNumber)             AS UnitNumber,
             COALESCE(ma.City, sd.City)                         AS City,
-            COALESCE(ma.[State], sd.[State])                   AS [State],
+            COALESCE(ma.[State], sd.[State], @DefaultState)    AS [State],
             COALESCE(ma.ZipCode, sd.ZipCode)                   AS ZipCode,
-            COALESCE(ma.Latitude, sd.Latitude)                 AS Latitude,
-            COALESCE(ma.Longitude, sd.Longitude)               AS Longitude,
+            ma.Latitude                                        AS Latitude,
+            ma.Longitude                                       AS Longitude,
             COALESCE(ma.PropertyType, sd.PropertyType)         AS PropertyType,
             CAST(sd.OwnerName AS NVARCHAR(200))                AS OwnerName,
             CAST(sd.YearBuilt AS INT)                          AS YearBuilt,
