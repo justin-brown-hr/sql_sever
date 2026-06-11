@@ -311,6 +311,7 @@ BEGIN TRY
        ======================================================================== */
     IF OBJECT_ID('tempdb..#Work') IS NOT NULL DROP TABLE #Work;
 
+    /* ma = #MA, sd = #SDAT (temp tables). Coords are already Latitude/Longitude in #MA — not XCoordinate/YCoordinate */
     ;WITH Matched AS (
         SELECT
             ma.MasterAddressID,
