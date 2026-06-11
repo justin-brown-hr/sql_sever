@@ -3,19 +3,14 @@
   UPR Master Load Script
   SQL Server 2016+
 
-  Loads AddressMaster + SDAT, normalizes addresses, populates UPROPERTYRECORD
-  and all related tables (XREF, Review_Q, StatusHistory, Contact, Building/Unit,
-  Reference data, AuditLog).  Wrapped in a transaction for safe re-runs.
+  Single version for client UPRDB_Test + DHCA source tables.
+  Local test: change USE to UPR_Master; sources to dbo.MASTERADDRESS / dbo.SDAT.
 
-  Run order:
-    1. ddl/01_create_schema.sql
-    2. ddl/02_normalize_functions.sql
-    3. test/seed_reference_data.sql   (optional - this script seeds refs too)
-    4. test/seed_test_incoming.sql
-    5. THIS SCRIPT
+  Loads MasterAddress + SDAT, normalizes addresses, populates UPROPERTYRECORDS
+  and related tables.  Wrapped in a transaction for safe re-runs.
 ================================================================================
 */
-USE UPR_Master;
+USE UPRDB_Test;
 GO
 
 /* ---- Inline normalization functions (self-contained single script) ---- */
@@ -103,31 +98,31 @@ BEGIN TRY
 
     MERGE dbo.REF_SOURCESYSTEM AS t
     USING (VALUES
-        (N'ADDRESS_MASTER', N'Address Master',      N'Incoming AddressMaster',      @Now, @Now),
-        (N'KDAT',           N'KDAT',                N'Incoming SDAT/KDAT',          @Now, @Now),
-        (N'eProperty',      N'eProperty',            N'Licensing property',          @Now, @Now),
-        (N'CASE',           N'CASE',                N'Enforcement case',            @Now, @Now),
-        (N'MPDU',           N'MPDU',                N'MPDU development',            @Now, @Now),
-        (N'MULTIFAMILY',    N'Multifamily loans',   N'Multifamily loan address',    @Now, @Now)
-    ) AS s(Code, Name, Descr, CreatedDate, UpdatedDate)
+        (N'ADDRESS_MASTER', N'Address Master',      N'Incoming AddressMaster'),
+        (N'KDAT',           N'KDAT',                N'Incoming SDAT/KDAT'),
+        (N'eProperty',      N'eProperty',            N'Licensing property'),
+        (N'CASE',           N'CASE',                N'Enforcement case'),
+        (N'MPDU',           N'MPDU',                N'MPDU development'),
+        (N'MULTIFAMILY',    N'Multifamily loans',   N'Multifamily loan address')
+    ) AS s(Code, Name, Descr)
     ON t.SourceSystemCode = s.Code
     WHEN NOT MATCHED THEN
-        INSERT (SourceSystemCode, SourceSystemName, [Description], CreatedDate, UpdatedDate)
-        VALUES (s.Code, s.Name, s.Descr, s.CreatedDate, s.UpdatedDate);
+        INSERT (SourceSystemCode, SourceSystemName, [Description])
+        VALUES (s.Code, s.Name, s.Descr);
 
     MERGE dbo.REF_MATCHMETHOD AS t
     USING (VALUES
-        (N'ParcelID',          N'Parcel match',        N'Exact parcel',              @Now, @Now),
-        (N'SDATAccount',       N'Tax/Account match',   N'Exact account / tax id',    @Now, @Now),
-        (N'AddressExact',      N'Exact address',       N'Exact normalized match',    @Now, @Now),
-        (N'AddressNormalized', N'Normalized address',  N'Normalized composite',      @Now, @Now),
-        (N'GISProximity',      N'GIS proximity',       N'Coordinate proximity',      @Now, @Now),
-        (N'Manual',            N'Manual',              N'Steward confirmed',         @Now, @Now)
-    ) AS s(Code, Name, Descr, CreatedDate, UpdatedDate)
+        (N'ParcelID',          N'Parcel match',        N'Exact parcel'),
+        (N'SDATAccount',       N'Tax/Account match',   N'Exact account / tax id'),
+        (N'AddressExact',      N'Exact address',       N'Exact normalized match'),
+        (N'AddressNormalized', N'Normalized address',  N'Normalized composite'),
+        (N'GISProximity',      N'GIS proximity',       N'Coordinate proximity'),
+        (N'Manual',            N'Manual',              N'Steward confirmed')
+    ) AS s(Code, Name, Descr)
     ON t.MatchMethodCode = s.Code
     WHEN NOT MATCHED THEN
-        INSERT (MatchMethodCode, MatchMethodName, [Description], CreatedDate, UpdatedDate)
-        VALUES (s.Code, s.Name, s.Descr, s.CreatedDate, s.UpdatedDate);
+        INSERT (MatchMethodCode, MatchMethodName, [Description])
+        VALUES (s.Code, s.Name, s.Descr);
 
     MERGE dbo.REF_MATCHCONFIDENCE AS t
     USING (VALUES
@@ -136,11 +131,11 @@ BEGIN TRY
         (N'LOW',      N'Low',       55, N'Uncertain',         @Now, @Now),
         (N'VERIFIED', N'Verified', 110, N'Human verified',    @Now, @Now),
         (N'NONE',     N'None',       0, N'No confidence assigned', @Now, @Now)
-    ) AS s(Code, Name, RankVal, Descr, CreatedDate, UpdatedDate)
+    ) AS s(Code, Name, RankVal, Descr, CreationDate, UpdatedDate)
     ON t.MatchConfidenceCode = s.Code
     WHEN NOT MATCHED THEN
-        INSERT (MatchConfidenceCode, MatchConfidenceName, ConfidenceRank, [Description], CreatedDate, UpdatedDate)
-        VALUES (s.Code, s.Name, s.RankVal, s.Descr, s.CreatedDate, s.UpdatedDate);
+        INSERT (MatchConfidenceCode, MatchConfidenceName, ConfidenceRank, [Description], CreationDate, UpdatedDate)
+        VALUES (s.Code, s.Name, s.RankVal, s.Descr, s.CreationDate, s.UpdatedDate);
 
     IF NOT EXISTS (SELECT 1 FROM dbo.REF_BUILDINGTYPE)
         INSERT INTO dbo.REF_BUILDINGTYPE (BuildingTypeCode, BuildingTypeName, [Description], IsResidential, IsActive)
@@ -182,8 +177,8 @@ BEGIN TRY
         /* AddressMaster has no State column — assign MD once; do not add a second [State] line */
         [State]              = @DefaultState,
         ZipCode              = LEFT(NULLIF(LTRIM(RTRIM(ma.ZipCode)), N''), 10),
-        Latitude             = TRY_CONVERT(DECIMAL(10,6), ma.YCoordinate),
-        Longitude            = TRY_CONVERT(DECIMAL(10,6), ma.XCoordinate),
+        Latitude             = TRY_CONVERT(DECIMAL(10,6), ma.XCoordinate),
+        Longitude            = TRY_CONVERT(DECIMAL(10,6), ma.YCoordinate),
         PropertyTypeRaw      = NULLIF(UPPER(LTRIM(RTRIM(ma.PropertyType))), N''),
         PropertyType         = CASE UPPER(LTRIM(RTRIM(ma.PropertyType)))
             WHEN N'CONDOMINIUM'           THEN N'CONDO'
@@ -227,7 +222,7 @@ BEGIN TRY
             ELSE 1
         END
     INTO #MA
-    FROM dbo.MASTERADDRESS ma;
+    FROM DHCA_Internal.dbo.MasterAddress ma;
 
     INSERT INTO @Stats (Metric, Cnt)
     SELECT N'AddressMaster rows read', COUNT(*) FROM #MA;
@@ -301,7 +296,7 @@ BEGIN TRY
             ELSE 1
         END
     INTO #SDAT
-    FROM dbo.SDAT s;
+    FROM DHCA_Internal.dbo.RealPropertyTaxInformation s;
 
     INSERT INTO @Stats (Metric, Cnt)
     SELECT N'SDAT rows read', COUNT(*) FROM #SDAT;
@@ -393,12 +388,12 @@ BEGIN TRY
     SELECT N'Unified work rows', COUNT(*) FROM #Work;
 
     /* ========================================================================
-       5. UPSERT UPROPERTYRECORD (idempotent - no duplicates)
+       5. UPSERT UPROPERTYRECORDS (idempotent - no duplicates)
        ======================================================================== */
     IF OBJECT_ID('tempdb..#UPRMap') IS NOT NULL DROP TABLE #UPRMap;
     CREATE TABLE #UPRMap (
         WorkKey               INT IDENTITY(1,1) PRIMARY KEY,
-        UPropertyRecordID     INT NULL,
+        UPropertyRecordsID     INT NULL,
         MasterAddressID       INT NULL,
         KdatRecordID          INT NULL,
         MatchSource           NVARCHAR(30) NOT NULL,
@@ -409,7 +404,7 @@ BEGIN TRY
         NormalizedFullAddress NVARCHAR(300) NOT NULL
     );
 
-    MERGE dbo.UPROPERTYRECORD AS tgt
+    MERGE dbo.UPROPERTYRECORDS AS tgt
     USING (
         SELECT
             w.MasterAddressID, w.KdatRecordID, w.MatchSource, w.HasRequiredAddress,
@@ -434,14 +429,14 @@ BEGIN TRY
         tgt.Owner             = COALESCE(tgt.Owner, src.OwnerName),
         tgt.Latitude          = COALESCE(tgt.Latitude, src.Latitude),
         tgt.Longitude         = COALESCE(tgt.Longitude, src.Longitude),
-        tgt.PropertyType      = COALESCE(tgt.PropertyType, src.PropertyType),
+        tgt.PropertyTypeCode  = COALESCE(tgt.PropertyTypeCode, src.PropertyType),
         tgt.UpdatedDate       = @Now,
         tgt.UpdatedBy         = @RunUser
     WHEN NOT MATCHED AND src.rn = 1 THEN INSERT (
         SDATAccountNumber, ParcelID, PropertyName, Owner,
         StreetNumber, StreetName, StreetSuffix, StreetType, UnitNumber,
         City, [State], ZipCode, NormalizedAddress, NormalizedFullAddress,
-        Latitude, Longitude, PropertyType, StatusCode, IsActive,
+        Latitude, Longitude, PropertyTypeCode, StatusCode, IsActive,
         CreatedDate, CreatedBy, UpdatedDate, UpdatedBy
     ) VALUES (
         src.SDATAccountNumber, src.ParcelID, NULL, src.OwnerName,
@@ -452,18 +447,18 @@ BEGIN TRY
     );
 
     DECLARE @UprInserted INT = @@ROWCOUNT;
-    INSERT INTO @Stats VALUES (N'UPROPERTYRECORD merge actions', @UprInserted);
+    INSERT INTO @Stats VALUES (N'UPROPERTYRECORDS merge actions', @UprInserted);
 
     /* Map work rows to UPR IDs (one UPR per work row, priority: account > parcel > address) */
-    INSERT INTO #UPRMap (UPropertyRecordID, MasterAddressID, KdatRecordID, MatchSource, IsNew, HasRequiredAddress, SDATAccountNumber, ParcelID, NormalizedFullAddress)
+    INSERT INTO #UPRMap (UPropertyRecordsID, MasterAddressID, KdatRecordID, MatchSource, IsNew, HasRequiredAddress, SDATAccountNumber, ParcelID, NormalizedFullAddress)
     SELECT
-        x.UPropertyRecordID, w.MasterAddressID, w.KdatRecordID, w.MatchSource,
+        x.UPropertyRecordsID, w.MasterAddressID, w.KdatRecordID, w.MatchSource,
         CASE WHEN x.CreatedDate >= @Now THEN 1 ELSE 0 END,
         w.HasRequiredAddress, w.SDATAccountNumber, w.ParcelID, w.NormalizedFullAddress
     FROM #Work w
     CROSS APPLY (
-        SELECT TOP 1 upr.UPropertyRecordID, upr.CreatedDate
-        FROM dbo.UPROPERTYRECORD upr
+        SELECT TOP 1 upr.UPropertyRecordsID, upr.CreatedDate
+        FROM dbo.UPROPERTYRECORDS upr
         WHERE (w.SDATAccountNumber IS NOT NULL AND upr.SDATAccountNumber = w.SDATAccountNumber)
            OR (w.ParcelID IS NOT NULL AND upr.ParcelID = w.ParcelID)
            OR (upr.NormalizedFullAddress = w.NormalizedFullAddress)
@@ -474,23 +469,23 @@ BEGIN TRY
     ) x;
 
     INSERT INTO @Stats (Metric, Cnt)
-    SELECT N'UPROPERTYRECORD total', COUNT(*) FROM dbo.UPROPERTYRECORD;
+    SELECT N'UPROPERTYRECORDS total', COUNT(*) FROM dbo.UPROPERTYRECORDS;
 
     /* Status history for newly created UPR records only (idempotent re-runs) */
     INSERT INTO dbo.UPR_STATUSHISTORY (
-        UPropertyRecordID, SDATAccountNumber, OldStatusCode, NewStatusCode,
+        UPropertyRecordsID, SDATAccountNumber, OldStatusCode, NewStatusCode,
         ChangeReason, ParcelID, Owner, StreetNumber, StreetName, StreetType,
-        City, [State], ZipCode, PropertyType, ChangeSource, ChangedBy, ChangedDate
+        City, ZipCode, PropertyTypeCode, ChangeSource, ChangedBy, ChangedDate
     )
     SELECT
-        m.UPropertyRecordID, upr.SDATAccountNumber,
+        m.UPropertyRecordsID, upr.SDATAccountNumber,
         NULL, upr.StatusCode,
         N'Initial load - new UPR record',
         upr.ParcelID, upr.Owner, upr.StreetNumber, upr.StreetName, upr.StreetType,
-        upr.City, upr.[State], upr.ZipCode, upr.PropertyType,
+        upr.City, upr.ZipCode, upr.PropertyTypeCode,
         N'UPR_LOAD', @RunUser, @Now
     FROM #UPRMap m
-    INNER JOIN dbo.UPROPERTYRECORD upr ON upr.UPropertyRecordID = m.UPropertyRecordID
+    INNER JOIN dbo.UPROPERTYRECORDS upr ON upr.UPropertyRecordsID = m.UPropertyRecordsID
     WHERE m.IsNew = 1;
 
     INSERT INTO @Stats VALUES (N'UPR_STATUSHISTORY written', @@ROWCOUNT);
@@ -498,41 +493,41 @@ BEGIN TRY
     /* ========================================================================
        6. WRITE INCOMING SOURCE XREF (AddressMaster / SDAT)
        ======================================================================== */
-    INSERT INTO dbo.UPROPERTYRECORD_XREF (
-        UPropertyRecordID, SourceSystem, SourceRecordID, SourceEntityType,
+    INSERT INTO dbo.UPROPERTYRECORDS_XREF (
+        UPropertyRecordsID, SourceSystem, SourceRecordID, SourceEntityType,
         MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus,
         IsActive, EffectiveStartDate, CreatedDate, UpdatedDate, CreatedBy
     )
     SELECT
-        m.UPropertyRecordID, N'ADDRESS_MASTER', CONVERT(VARCHAR(100), m.MasterAddressID), N'MasterAddress',
+        m.UPropertyRecordsID, N'ADDRESS_MASTER', CONVERT(VARCHAR(100), m.MasterAddressID), N'MasterAddress',
         N'AddressNormalized', N'MATCH', N'HIGH', N'PROCESSED',
         1, @Now, @Now, @Now, @RunUser
     FROM #UPRMap m
     WHERE m.MasterAddressID IS NOT NULL
       AND NOT EXISTS (
-          SELECT 1 FROM dbo.UPROPERTYRECORD_XREF x
-          WHERE x.UPropertyRecordID = m.UPropertyRecordID
+          SELECT 1 FROM dbo.UPROPERTYRECORDS_XREF x
+          WHERE x.UPropertyRecordsID = m.UPropertyRecordsID
             AND x.SourceSystem = N'ADDRESS_MASTER'
             AND x.SourceRecordID = CONVERT(VARCHAR(100), m.MasterAddressID)
       );
 
     INSERT INTO @Stats VALUES (N'XREF ADDRESS_MASTER written', @@ROWCOUNT);
 
-    INSERT INTO dbo.UPROPERTYRECORD_XREF (
-        UPropertyRecordID, SourceSystem, SourceRecordID, SourceEntityType,
+    INSERT INTO dbo.UPROPERTYRECORDS_XREF (
+        UPropertyRecordsID, SourceSystem, SourceRecordID, SourceEntityType,
         MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus,
         IsActive, EffectiveStartDate, CreatedDate, UpdatedDate, CreatedBy
     )
     SELECT
-        m.UPropertyRecordID, N'KDAT', sd.SourceRecordID, N'SDATProperty',
+        m.UPropertyRecordsID, N'KDAT', sd.SourceRecordID, N'SDATProperty',
         N'AddressNormalized', N'MATCH', N'HIGH', N'PROCESSED',
         1, @Now, @Now, @Now, @RunUser
     FROM #UPRMap m
     INNER JOIN #SDAT sd ON sd.KdatRecordID = m.KdatRecordID
     WHERE m.KdatRecordID IS NOT NULL
       AND NOT EXISTS (
-          SELECT 1 FROM dbo.UPROPERTYRECORD_XREF x
-          WHERE x.UPropertyRecordID = m.UPropertyRecordID
+          SELECT 1 FROM dbo.UPROPERTYRECORDS_XREF x
+          WHERE x.UPropertyRecordsID = m.UPropertyRecordsID
             AND x.SourceSystem = N'KDAT'
             AND x.SourceRecordID = sd.SourceRecordID
       );
@@ -546,7 +541,7 @@ BEGIN TRY
     IF OBJECT_ID('tempdb..#ExtMatch') IS NOT NULL DROP TABLE #ExtMatch;
 
     CREATE TABLE #ExtMatch (
-        UPropertyRecordID INT NOT NULL,
+        UPropertyRecordsID INT NOT NULL,
         SourceSystem      VARCHAR(30) NOT NULL,
         SourceRecordID    VARCHAR(100) NOT NULL,
         SourceEntityType  VARCHAR(50) NOT NULL,
@@ -572,34 +567,34 @@ BEGIN TRY
     SELECT N'eProperty', CONVERT(VARCHAR(100), ep.PropertyID), N'Property', ep.TaxID,
         dbo.fn_UPR_NormalizeAddressLine(ep.StreetAddress),
         dbo.fn_UPR_NormalizeFullAddressLine(ep.StreetAddress, ep.City, ep.ZipCode)
-    FROM dbo.eProperty ep;
+    FROM DHCA_LicensingAndRegistration.dbo.Property ep;
 
     INSERT INTO #ExtAddr
-    SELECT N'CASE', CONVERT(VARCHAR(100), c.CaseID), N'Case', NULL,
+    SELECT N'CASE', CONVERT(VARCHAR(100), c.CaseNumber), N'Case', NULL,
         dbo.fn_UPR_NormalizeAddressLine(c.StreetAddress),
         dbo.fn_UPR_NormalizeFullAddressLine(c.StreetAddress, c.City, c.ZipCode)
-    FROM dbo.[Case] c;
+    FROM DHCA_OLTA.dbo.[Case] c;
 
     INSERT INTO #ExtAddr
     SELECT N'MPDU', CONVERT(VARCHAR(100), mp.DevelopmentID), N'Development', NULL,
         dbo.fn_UPR_NormalizeAddressLine(mp.StreetAddress),
         dbo.fn_UPR_NormalizeFullAddressLine(mp.StreetAddress, mp.City, mp.ZipCode)
-    FROM dbo.MPDU mp;
+    FROM DHCA_MPDU.dbo.Development mp;
 
     INSERT INTO #ExtAddr
     SELECT N'MULTIFAMILY', CONVERT(VARCHAR(100), mf.AddressID), N'MultifamilyLoan', NULL,
         dbo.fn_UPR_NormalizeAddressLine(CONCAT(mf.StreetNumber, N' ', mf.StreetName, N' ', mf.StreetType)),
         dbo.fn_UPR_NormalizeFullAddressLine(CONCAT(mf.StreetNumber, N' ', mf.StreetName, N' ', mf.StreetType), mf.City, mf.ZipCode)
-    FROM dbo.MultifamilyLoanAddress mf
+    FROM DHCA_MultifamilyLoans.dbo.Address mf
     WHERE mf.DeletedInd = 0;
 
     INSERT INTO #ExtMatch
     SELECT DISTINCT
-        m.UPropertyRecordID, ea.SourceSystem, ea.SourceRecordID, ea.SourceEntityType,
+        m.UPropertyRecordsID, ea.SourceSystem, ea.SourceRecordID, ea.SourceEntityType,
         CASE
             WHEN m.SDATAccountNumber IS NOT NULL AND m.SDATAccountNumber = ea.TaxOrAccount THEN N'SDATAccount'
             WHEN m.ParcelID IS NOT NULL AND EXISTS (
-                SELECT 1 FROM dbo.eProperty ep2
+                SELECT 1 FROM DHCA_LicensingAndRegistration.dbo.Property ep2
                 WHERE CONVERT(VARCHAR(100), ep2.PropertyID) = ea.SourceRecordID
                   AND ep2.TaxID = m.ParcelID
             ) THEN N'ParcelID'
@@ -613,25 +608,25 @@ BEGIN TRY
         N'PROCESSED',
         CONCAT(N'Matched to ', ea.SourceSystem)
     FROM #UPRMap m
-    INNER JOIN dbo.UPROPERTYRECORD upr ON upr.UPropertyRecordID = m.UPropertyRecordID
+    INNER JOIN dbo.UPROPERTYRECORDS upr ON upr.UPropertyRecordsID = m.UPropertyRecordsID
     INNER JOIN #ExtAddr ea
         ON (m.SDATAccountNumber IS NOT NULL AND ea.TaxOrAccount IS NOT NULL AND m.SDATAccountNumber = ea.TaxOrAccount)
         OR ea.NormAddress = upr.NormalizedAddress
         OR ea.NormFullAddress = upr.NormalizedFullAddress;
 
-    INSERT INTO dbo.UPROPERTYRECORD_XREF (
-        UPropertyRecordID, SourceSystem, SourceRecordID, SourceEntityType,
+    INSERT INTO dbo.UPROPERTYRECORDS_XREF (
+        UPropertyRecordsID, SourceSystem, SourceRecordID, SourceEntityType,
         MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus,
         IsActive, EffectiveStartDate, Notes, CreatedDate, UpdatedDate, CreatedBy
     )
     SELECT
-        e.UPropertyRecordID, e.SourceSystem, e.SourceRecordID, e.SourceEntityType,
+        e.UPropertyRecordsID, e.SourceSystem, e.SourceRecordID, e.SourceEntityType,
         e.MatchMethodCode, e.MatchResult, e.MatchConfidence, e.ProcessingStatus,
         1, @Now, e.Notes, @Now, @Now, @RunUser
     FROM #ExtMatch e
     WHERE NOT EXISTS (
-        SELECT 1 FROM dbo.UPROPERTYRECORD_XREF x
-        WHERE x.UPropertyRecordID = e.UPropertyRecordID
+        SELECT 1 FROM dbo.UPROPERTYRECORDS_XREF x
+        WHERE x.UPropertyRecordsID = e.UPropertyRecordsID
           AND x.SourceSystem = e.SourceSystem
           AND x.SourceRecordID = e.SourceRecordID
     );
@@ -641,13 +636,13 @@ BEGIN TRY
     /* ========================================================================
        8. REVIEW QUEUE - no external match OR insufficient address data
        ======================================================================== */
-    /* Insufficient address data - includes rows that never reached UPROPERTYRECORD */
-    INSERT INTO dbo.UPROPERTYMATCHREVIEW_Q (
-        UPropertyRecordID, IncomingSourceSystem, NormalizedIncomingAddress,
+    /* Insufficient address data - includes rows that never reached UPROPERTYRECORDS */
+    INSERT INTO dbo.UPRMATCHREVIEW_Q (
+        UPropertyRecordsID, IncomingSourceSystem, NormalizedIncomingAddress,
         ParcelID, SDATAccountNumber, ReasonForNoMatch, ReviewStatus
     )
     SELECT
-        m.UPropertyRecordID,
+        m.UPropertyRecordsID,
         w.MatchSource,
         COALESCE(w.NormalizedFullAddress, w.NormalizedAddress, N'UNKNOWN'),
         w.ParcelID,
@@ -660,19 +655,19 @@ BEGIN TRY
         OR (w.KdatRecordID IS NOT NULL AND m.KdatRecordID = w.KdatRecordID)
     WHERE w.HasRequiredAddress = 0
       AND NOT EXISTS (
-          SELECT 1 FROM dbo.UPROPERTYMATCHREVIEW_Q q
+          SELECT 1 FROM dbo.UPRMATCHREVIEW_Q q
           WHERE q.SDATAccountNumber = w.SDATAccountNumber
             AND q.ReasonForNoMatch = N'INSUFFICIENT_DATA'
       );
 
     INSERT INTO @Stats VALUES (N'Review_Q insufficient data', @@ROWCOUNT);
 
-    INSERT INTO dbo.UPROPERTYMATCHREVIEW_Q (
-        UPropertyRecordID, IncomingSourceSystem, NormalizedIncomingAddress,
+    INSERT INTO dbo.UPRMATCHREVIEW_Q (
+        UPropertyRecordsID, IncomingSourceSystem, NormalizedIncomingAddress,
         ParcelID, SDATAccountNumber, ReasonForNoMatch, ReviewStatus
     )
     SELECT
-        m.UPropertyRecordID,
+        m.UPropertyRecordsID,
         m.MatchSource,
         m.NormalizedFullAddress,
         m.ParcelID,
@@ -681,10 +676,10 @@ BEGIN TRY
         N'PENDING_REVIEW'
     FROM #UPRMap m
     WHERE m.HasRequiredAddress = 1
-      AND NOT EXISTS (SELECT 1 FROM #ExtMatch e WHERE e.UPropertyRecordID = m.UPropertyRecordID)
+      AND NOT EXISTS (SELECT 1 FROM #ExtMatch e WHERE e.UPropertyRecordsID = m.UPropertyRecordsID)
       AND NOT EXISTS (
-          SELECT 1 FROM dbo.UPROPERTYMATCHREVIEW_Q q
-          WHERE q.UPropertyRecordID = m.UPropertyRecordID
+          SELECT 1 FROM dbo.UPRMATCHREVIEW_Q q
+          WHERE q.UPropertyRecordsID = m.UPropertyRecordsID
             AND q.ReasonForNoMatch = N'NO_ADDRESS_MATCH'
       );
 
@@ -699,15 +694,15 @@ BEGIN TRY
     WHERE w.OwnerName IS NOT NULL
       AND NOT EXISTS (SELECT 1 FROM dbo.CONTACT c WHERE c.OrganizationName = w.OwnerName);
 
-    INSERT INTO dbo.PROPERTYCONTACT (UPropertyRecordID, ContactID, ContactRoleCode, EffectiveStartDate, IsActive)
-    SELECT m.UPropertyRecordID, c.ContactID, N'OWNER', @Now, 1
+    INSERT INTO dbo.PROPERTYCONTACT (UPropertyRecordsID, ContactID, ContactRoleCode, EffectiveStartDate, IsActive)
+    SELECT m.UPropertyRecordsID, c.ContactID, N'OWNER', @Now, 1
     FROM #UPRMap m
     INNER JOIN #Work w ON (w.MasterAddressID = m.MasterAddressID OR w.KdatRecordID = m.KdatRecordID)
     INNER JOIN dbo.CONTACT c ON c.OrganizationName = w.OwnerName
     WHERE w.OwnerName IS NOT NULL
       AND NOT EXISTS (
           SELECT 1 FROM dbo.PROPERTYCONTACT pc
-          WHERE pc.UPropertyRecordID = m.UPropertyRecordID AND pc.ContactID = c.ContactID
+          WHERE pc.UPropertyRecordsID = m.UPropertyRecordsID AND pc.ContactID = c.ContactID
       );
 
     INSERT INTO @Stats VALUES (N'PROPERTYCONTACT owners written', @@ROWCOUNT);
@@ -716,46 +711,46 @@ BEGIN TRY
        10. CONDO / APT - Building + Unit when REF_PROPERTYTYPE allows
        ======================================================================== */
     INSERT INTO dbo.Building (
-        UPropertyRecordID, BuildingCode, BuildingName, BuildingTypeCode,
+        UPropertyRecordsID, BuildingCode, BuildingName, BuildingTypeCode,
         BuildingAddress, StatusCode, IsActive, CreatedDate, UpdatedDate, CreatedBy, UpdatedBy
     )
     SELECT
-        upr.UPropertyRecordID,
+        upr.UPropertyRecordsID,
         N'MAIN',
-        CONCAT(N'Building ', upr.UPropertyRecordID),
+        CONCAT(N'Building ', upr.UPropertyRecordsID),
         N'MAIN',
         upr.NormalizedFullAddress,
         N'ACTIVE', 1, @Now, @Now, @RunUser, @RunUser
-    FROM dbo.UPROPERTYRECORD upr
-    INNER JOIN dbo.REF_PROPERTYTYPE pt ON pt.PropertyTypeCode = upr.PropertyType
-    WHERE upr.PropertyType IN (N'CONDO', N'APT')
+    FROM dbo.UPROPERTYRECORDS upr
+    INNER JOIN dbo.REF_PROPERTYTYPE pt ON pt.PropertyTypeCode = upr.PropertyTypeCode
+    WHERE upr.PropertyTypeCode IN (N'CONDO', N'APT')
       AND pt.AllowsBuildings = 1 AND pt.AllowsUnits = 1
       AND NOT EXISTS (
           SELECT 1 FROM dbo.Building b
-          WHERE b.UPropertyRecordID = upr.UPropertyRecordID AND b.BuildingCode = N'MAIN'
+          WHERE b.UPropertyRecordsID = upr.UPropertyRecordsID AND b.BuildingCode = N'MAIN'
       );
 
     INSERT INTO @Stats VALUES (N'Buildings created', @@ROWCOUNT);
 
     INSERT INTO dbo.Unit (
-        UPropertyRecordID, BuildingID, UnitNumber, SDATAccountNumber,
+        UPropertyRecordsID, BuildingID, UnitNumber, SDATAccountNumber,
         UnitTypeCode, UnitStatusCode, IsMPDU, IsActive, CreatedDate, UpdatedDate, CreatedBy, UpdatedBy
     )
     SELECT
-        upr.UPropertyRecordID,
+        upr.UPropertyRecordsID,
         b.BuildingID,
         COALESCE(NULLIF(upr.UnitNumber, N''), N'U1'),
         upr.SDATAccountNumber,
-        CASE upr.PropertyType WHEN N'CONDO' THEN N'COND' ELSE N'APT' END,
+        CASE upr.PropertyTypeCode WHEN N'CONDO' THEN N'COND' ELSE N'APT' END,
         N'ACTIVE', 0, 1, @Now, @Now, @RunUser, @RunUser
-    FROM dbo.UPROPERTYRECORD upr
-    INNER JOIN dbo.Building b ON b.UPropertyRecordID = upr.UPropertyRecordID AND b.BuildingCode = N'MAIN'
-    INNER JOIN dbo.REF_PROPERTYTYPE pt ON pt.PropertyTypeCode = upr.PropertyType
-    WHERE upr.PropertyType IN (N'CONDO', N'APT')
+    FROM dbo.UPROPERTYRECORDS upr
+    INNER JOIN dbo.Building b ON b.UPropertyRecordsID = upr.UPropertyRecordsID AND b.BuildingCode = N'MAIN'
+    INNER JOIN dbo.REF_PROPERTYTYPE pt ON pt.PropertyTypeCode = upr.PropertyTypeCode
+    WHERE upr.PropertyTypeCode IN (N'CONDO', N'APT')
       AND pt.AllowsBuildings = 1 AND pt.AllowsUnits = 1
       AND NOT EXISTS (
           SELECT 1 FROM dbo.Unit u
-          WHERE u.UPropertyRecordID = upr.UPropertyRecordID
+          WHERE u.UPropertyRecordsID = upr.UPropertyRecordsID
             AND u.BuildingID = b.BuildingID
       );
 
@@ -765,19 +760,19 @@ BEGIN TRY
        11. AUDIT LOG
        ======================================================================== */
     INSERT INTO dbo.AuditLog (EntityName, EntityKey, OperationType, ChangedBy, ChangedDate, ChangeSummary)
-    SELECT N'UPROPERTYRECORD', CONVERT(NVARCHAR(200), UPropertyRecordID), N'INSERT', @RunUser, @Now,
+    SELECT N'UPROPERTYRECORDS', CONVERT(NVARCHAR(200), UPropertyRecordsID), N'INSERT', @RunUser, @Now,
            N'UPR load - record created'
-    FROM dbo.UPROPERTYRECORD WHERE CreatedDate >= @Now;
+    FROM dbo.UPROPERTYRECORDS WHERE CreatedDate >= @Now;
 
     INSERT INTO dbo.AuditLog (EntityName, EntityKey, OperationType, ChangedBy, ChangedDate, ChangeSummary)
-    SELECT N'UPROPERTYRECORD_XREF', CONVERT(NVARCHAR(200), UPropertyRecord_XrefID), N'INSERT', @RunUser, @Now,
+    SELECT N'UPROPERTYRECORDS_XREF', CONVERT(NVARCHAR(200), UPropertyRecord_XrefID), N'INSERT', @RunUser, @Now,
            CONCAT(N'XREF: ', SourceSystem, N'/', SourceRecordID, N' ', MatchResult)
-    FROM dbo.UPROPERTYRECORD_XREF WHERE CreatedDate >= @Now;
+    FROM dbo.UPROPERTYRECORDS_XREF WHERE CreatedDate >= @Now;
 
     INSERT INTO dbo.AuditLog (EntityName, EntityKey, OperationType, ChangedBy, ChangedDate, ChangeSummary)
-    SELECT N'UPROPERTYMATCHREVIEW_Q', CONVERT(NVARCHAR(200), UPRMatchReviewID), N'INSERT', @RunUser, @Now,
+    SELECT N'UPRMATCHREVIEW_Q', CONVERT(NVARCHAR(200), UPRMatchReviewID), N'INSERT', @RunUser, @Now,
            CONCAT(N'Review: ', ReasonForNoMatch)
-    FROM dbo.UPROPERTYMATCHREVIEW_Q WHERE ProcessingTimestamp >= @Now;
+    FROM dbo.UPRMATCHREVIEW_Q WHERE ProcessingTimestamp >= @Now;
 
     INSERT INTO @Stats VALUES (N'AuditLog entries written', @@ROWCOUNT);
 
