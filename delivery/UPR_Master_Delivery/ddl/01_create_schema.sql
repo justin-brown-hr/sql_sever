@@ -47,39 +47,50 @@ GO
 /* ============================================================================
    INCOMING / STAGING TABLES
    ============================================================================ */
-CREATE TABLE dbo.AddressMaster
+CREATE TABLE dbo.AddressMaster  /* client: MASTERADDRESS */
 (
-    MasterAddressID   INT           NOT NULL PRIMARY KEY,
-    Account           NVARCHAR(50)  NULL,
-    ParcelNumber      NVARCHAR(50)  NULL,
-    StreetNumber      NVARCHAR(20)  NULL,
-    StreetName        NVARCHAR(100) NULL,
-    StreetSuffix      NVARCHAR(20)  NULL,
-    StreetType        NVARCHAR(20)  NULL,
-    Unit              NVARCHAR(20)  NULL,
-    FullAddress       NVARCHAR(200) NULL,
-    City              NVARCHAR(100) NULL,
-    ZipCode           NVARCHAR(10)  NULL,
-    PropertyType      NVARCHAR(50)  NULL,
-    XCoordinate       DECIMAL(10,6) NULL,
-    YCoordinate       DECIMAL(10,6) NULL
+    MasterAddressID       INT           NOT NULL PRIMARY KEY,
+    AddressStatus         INT           NULL,
+    AddressType           INT           NULL,
+    AddressDate           DATETIME      NULL,
+    StreetNumber          INT           NULL,
+    StreetSuffix          NVARCHAR(3)   NULL,
+    StreetName            NVARCHAR(22)  NULL,
+    StreetType            NCHAR(4)      NULL,
+    StreetSuffixDirection NCHAR(2)      NULL,
+    Unit                  NCHAR(6)      NULL,
+    XCoordinate           INT           NULL,
+    YCoordinate           INT           NULL,
+    FullAddress           NVARCHAR(50)  NULL,
+    City                  NVARCHAR(22)  NULL,
+    ZipCode               NCHAR(10)     NULL,
+    Comments              NVARCHAR(MAX) NULL,
+    Account               NCHAR(8)      NULL,
+    ParcelNumber          NCHAR(3)      NULL,
+    PropertyType          NCHAR(35)     NULL
 );
 
-CREATE TABLE dbo.SDAT
+CREATE TABLE dbo.SDAT  /* client real table — no PK, no KdatRecordID, no CondoUnit */
 (
-    KdatRecordID        INT           NOT NULL PRIMARY KEY,
-    AccountNumber       NVARCHAR(50)  NULL,
-    Parcel              NVARCHAR(50)  NULL,
-    Owner               NVARCHAR(200) NULL,
-    DwellingUnits       INT           NULL,
-    PremisesNumber      NVARCHAR(20)  NULL,
-    PremisesStreetName  NVARCHAR(100) NULL,
-    PremisesStreetType  NVARCHAR(20)  NULL,
-    PremisesCity        NVARCHAR(100) NULL,
-    PremisesState       CHAR(2)       NULL,
-    PremisesZipCode     NVARCHAR(10)  NULL,
-    YearBuilt           INT           NULL,
-    CondoUnit           NVARCHAR(20)  NULL
+    AccountNumber        NVARCHAR(MAX) NULL,
+    Lot                  NVARCHAR(MAX) NULL,
+    Block                NVARCHAR(MAX) NULL,
+    Parcel               NVARCHAR(MAX) NULL,
+    TownCode             NVARCHAR(MAX) NULL,
+    GeneralZone          NVARCHAR(MAX) NULL,
+    PropertyParcelCode   NVARCHAR(MAX) NULL,
+    OwnerOccupancyCode   NVARCHAR(MAX) NULL,
+    DwellingUnits        INT           NULL,
+    Owner                NVARCHAR(MAX) NULL,
+    TransferDate         DATETIME      NULL,
+    YearBuilt            INT           NULL,
+    PremisesNumber       NVARCHAR(MAX) NULL,
+    PremisesDirection    NVARCHAR(MAX) NULL,
+    PremisesStreetName   NVARCHAR(MAX) NULL,
+    PremisesStreetType   NVARCHAR(MAX) NULL,
+    PremisesCity         NVARCHAR(MAX) NULL,
+    PremisesState        NVARCHAR(MAX) NULL,
+    PremisesZipCode      NVARCHAR(MAX) NULL
 );
 
 /* ============================================================================

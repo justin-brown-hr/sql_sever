@@ -151,7 +151,7 @@ BEGIN TRY
         VALUES (N'APT', N'Apartment unit', N'Apartment'), (N'COND', N'Condo unit', N'Condominium unit');
 
     /* ========================================================================
-       2. NORMALIZE AddressMaster  (per client spec example)
+       2. NORMALIZE AddressMaster / MASTERADDRESS  (client real columns)
        ======================================================================== */
     IF OBJECT_ID('tempdb..#MA') IS NOT NULL DROP TABLE #MA;
 
@@ -233,14 +233,21 @@ BEGIN TRY
     SELECT N'AddressMaster rows read', COUNT(*) FROM #MA;
 
     /* ========================================================================
-       3. NORMALIZE SDAT  (per client spec example)
+       3. NORMALIZE SDAT  (client real table — no KdatRecordID; assign row id in #SDAT)
        ======================================================================== */
     IF OBJECT_ID('tempdb..#SDAT') IS NOT NULL DROP TABLE #SDAT;
 
     SELECT
-        s.KdatRecordID,
+        KdatRecordID         = ROW_NUMBER() OVER (
+            ORDER BY s.AccountNumber, s.Parcel, s.PremisesNumber, s.PremisesStreetName
+        ),
         SourceSystem         = N'KDAT',
-        SourceRecordID       = CONVERT(VARCHAR(100), s.KdatRecordID),
+        SourceRecordID       = LEFT(CONCAT(
+            ISNULL(LTRIM(RTRIM(s.AccountNumber)), N''), N'|',
+            ISNULL(LTRIM(RTRIM(s.Parcel)), N''), N'|',
+            ISNULL(LTRIM(RTRIM(s.PremisesNumber)), N''), N'|',
+            ISNULL(UPPER(LTRIM(RTRIM(s.PremisesStreetName))), N'')
+        ), 100),
         SourceEntityType     = N'SDATProperty',
         MasterAddressAccount = NULL,
         SDATAccountNumber    = NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(50), s.AccountNumber))), N''),
@@ -259,7 +266,7 @@ BEGIN TRY
             WHEN N'PLACE'  THEN N'PL'  WHEN N'PL'  THEN N'PL'
             ELSE NULLIF(UPPER(LTRIM(RTRIM(s.PremisesStreetType))), N'')
         END,
-        UnitNumber           = NULLIF(LTRIM(RTRIM(s.CondoUnit)), N''),
+        UnitNumber           = CAST(NULL AS NVARCHAR(20)),
         City                 = NULLIF(UPPER(LTRIM(RTRIM(s.PremisesCity))), N''),
         /* [State] defined only once in #SDAT — PremisesState if present, else @DefaultState */
         [State]              = COALESCE(NULLIF(UPPER(LTRIM(RTRIM(s.PremisesState))), N''), @DefaultState),
@@ -524,16 +531,17 @@ BEGIN TRY
         IsActive, EffectiveStartDate, CreatedDate, UpdatedDate, CreatedBy
     )
     SELECT
-        m.UPropertyRecordID, N'KDAT', CONVERT(VARCHAR(100), m.KdatRecordID), N'SDATProperty',
+        m.UPropertyRecordID, N'KDAT', sd.SourceRecordID, N'SDATProperty',
         N'AddressNormalized', N'MATCH', N'HIGH', N'PROCESSED',
         1, @Now, @Now, @Now, @RunUser
     FROM #UPRMap m
+    INNER JOIN #SDAT sd ON sd.KdatRecordID = m.KdatRecordID
     WHERE m.KdatRecordID IS NOT NULL
       AND NOT EXISTS (
           SELECT 1 FROM dbo.UPROPERTYRECORD_XREF x
           WHERE x.UPropertyRecordID = m.UPropertyRecordID
             AND x.SourceSystem = N'KDAT'
-            AND x.SourceRecordID = CONVERT(VARCHAR(100), m.KdatRecordID)
+            AND x.SourceRecordID = sd.SourceRecordID
       );
 
     INSERT INTO @Stats VALUES (N'XREF KDAT written', @@ROWCOUNT);
