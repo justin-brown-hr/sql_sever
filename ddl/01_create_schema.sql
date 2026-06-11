@@ -33,6 +33,7 @@ IF OBJECT_ID(N'dbo.MPDU', N'U') IS NOT NULL DROP TABLE dbo.MPDU;
 IF OBJECT_ID(N'dbo.[Case]', N'U') IS NOT NULL DROP TABLE dbo.[Case];
 IF OBJECT_ID(N'dbo.eProperty', N'U') IS NOT NULL DROP TABLE dbo.eProperty;
 IF OBJECT_ID(N'dbo.SDAT', N'U') IS NOT NULL DROP TABLE dbo.SDAT;
+IF OBJECT_ID(N'dbo.MASTERADDRESS', N'U') IS NOT NULL DROP TABLE dbo.MASTERADDRESS;
 IF OBJECT_ID(N'dbo.AddressMaster', N'U') IS NOT NULL DROP TABLE dbo.AddressMaster;
 IF OBJECT_ID(N'dbo.REF_MATCHCONFIDENCE', N'U') IS NOT NULL DROP TABLE dbo.REF_MATCHCONFIDENCE;
 IF OBJECT_ID(N'dbo.REF_MATCHMETHOD', N'U') IS NOT NULL DROP TABLE dbo.REF_MATCHMETHOD;
@@ -47,7 +48,7 @@ GO
 /* ============================================================================
    INCOMING / STAGING TABLES
    ============================================================================ */
-CREATE TABLE dbo.AddressMaster  /* client: MASTERADDRESS */
+CREATE TABLE dbo.MASTERADDRESS
 (
     MasterAddressID       INT           NOT NULL PRIMARY KEY,
     AddressStatus         INT           NULL,
@@ -70,8 +71,9 @@ CREATE TABLE dbo.AddressMaster  /* client: MASTERADDRESS */
     PropertyType          NCHAR(35)     NULL
 );
 
-CREATE TABLE dbo.SDAT  /* client real table — no PK, no KdatRecordID, no CondoUnit */
+CREATE TABLE dbo.SDAT
 (
+    RealPropertyTaxInformationID INT           NOT NULL PRIMARY KEY,
     AccountNumber        NVARCHAR(MAX) NULL,
     Lot                  NVARCHAR(MAX) NULL,
     Block                NVARCHAR(MAX) NULL,

@@ -7,7 +7,7 @@
   Run in SSMS: File -> Open -> this file -> Execute (F5)
 
   Steps for real-data test:
-    1. Load YOUR data into dbo.AddressMaster and dbo.SDAT
+    1. Load YOUR data into dbo.MASTERADDRESS and dbo.SDAT
     2. Run scripts/load_upr_master.sql
     3. Run THIS script to review results
 ================================================================================
@@ -50,7 +50,7 @@ SELECT
         ELSE N''
     END AS Description
 FROM (
-    SELECT N'AddressMaster (incoming)'     AS TableName, COUNT(*) AS RecordCount FROM dbo.AddressMaster
+    SELECT N'AddressMaster (incoming)'     AS TableName, COUNT(*) AS RecordCount FROM dbo.MASTERADDRESS
     UNION ALL SELECT N'SDAT (incoming)',              COUNT(*) FROM dbo.SDAT
     UNION ALL SELECT N'UPROPERTYRECORD (master)',    COUNT(*) FROM dbo.UPROPERTYRECORD
     UNION ALL SELECT N'UPROPERTYRECORD_XREF',        COUNT(*) FROM dbo.UPROPERTYRECORD_XREF
@@ -112,7 +112,7 @@ DECLARE @checks TABLE (
     Pass            BIT           NOT NULL
 );
 
-DECLARE @maCnt   INT = (SELECT COUNT(*) FROM dbo.AddressMaster);
+DECLARE @maCnt   INT = (SELECT COUNT(*) FROM dbo.MASTERADDRESS);
 DECLARE @sdatCnt INT = (SELECT COUNT(*) FROM dbo.SDAT);
 DECLARE @uprCnt  INT = (SELECT COUNT(*) FROM dbo.UPROPERTYRECORD);
 DECLARE @xrefMa  INT = (SELECT COUNT(*) FROM dbo.UPROPERTYRECORD_XREF WHERE SourceSystem = N'ADDRESS_MASTER');

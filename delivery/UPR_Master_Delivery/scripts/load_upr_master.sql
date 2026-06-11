@@ -227,27 +227,20 @@ BEGIN TRY
             ELSE 1
         END
     INTO #MA
-    FROM dbo.AddressMaster ma;
+    FROM dbo.MASTERADDRESS ma;
 
     INSERT INTO @Stats (Metric, Cnt)
     SELECT N'AddressMaster rows read', COUNT(*) FROM #MA;
 
     /* ========================================================================
-       3. NORMALIZE SDAT  (client real table — no KdatRecordID; assign row id in #SDAT)
+       3. NORMALIZE SDAT  (RealPropertyTaxInformationID = client PK)
        ======================================================================== */
     IF OBJECT_ID('tempdb..#SDAT') IS NOT NULL DROP TABLE #SDAT;
 
     SELECT
-        KdatRecordID         = ROW_NUMBER() OVER (
-            ORDER BY s.AccountNumber, s.Parcel, s.PremisesNumber, s.PremisesStreetName
-        ),
+        KdatRecordID         = s.RealPropertyTaxInformationID,
         SourceSystem         = N'KDAT',
-        SourceRecordID       = LEFT(CONCAT(
-            ISNULL(LTRIM(RTRIM(s.AccountNumber)), N''), N'|',
-            ISNULL(LTRIM(RTRIM(s.Parcel)), N''), N'|',
-            ISNULL(LTRIM(RTRIM(s.PremisesNumber)), N''), N'|',
-            ISNULL(UPPER(LTRIM(RTRIM(s.PremisesStreetName))), N'')
-        ), 100),
+        SourceRecordID       = CONVERT(VARCHAR(100), s.RealPropertyTaxInformationID),
         SourceEntityType     = N'SDATProperty',
         MasterAddressAccount = NULL,
         SDATAccountNumber    = NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(50), s.AccountNumber))), N''),
