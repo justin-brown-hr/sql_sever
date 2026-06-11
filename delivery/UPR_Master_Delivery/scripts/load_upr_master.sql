@@ -256,10 +256,11 @@ BEGIN TRY
         END,
         UnitNumber           = CAST(NULL AS NVARCHAR(20)),
         City                 = NULLIF(UPPER(LTRIM(RTRIM(s.PremisesCity))), N''),
+        /* [State] only once — do not add a second [State] line below */
         [State]              = COALESCE(NULLIF(UPPER(LTRIM(RTRIM(s.PremisesState))), N''), @DefaultState),
         ZipCode              = LEFT(NULLIF(LTRIM(RTRIM(s.PremisesZipCode)), N''), 10),
-        Latitude             = NULL,
-        Longitude            = NULL,
+        Latitude             = CAST(NULL AS DECIMAL(10,6)),
+        Longitude            = CAST(NULL AS DECIMAL(10,6)),
         PropertyTypeRaw      = CAST(NULL AS NVARCHAR(50)),
         PropertyType         = CASE WHEN ISNULL(TRY_CONVERT(INT, s.DwellingUnits), 0) > 1 THEN N'MULTI' ELSE N'SF' END,
         OwnerName            = NULLIF(LTRIM(RTRIM(CAST(s.Owner AS NVARCHAR(200)))), N''),
@@ -302,87 +303,144 @@ BEGIN TRY
 
     /* ========================================================================
        4. MATCH AddressMaster <-> SDAT on Account + Normalized Address
+       Uses explicit #Work table + INSERT (no UNION — avoids column-count errors)
        ======================================================================== */
     IF OBJECT_ID('tempdb..#Work') IS NOT NULL DROP TABLE #Work;
 
-    ;WITH Matched AS (
-        SELECT
-            ma.MasterAddressID,
-            sd.KdatRecordID,
-            ma.MasterAddressAccount,
-            COALESCE(sd.SDATAccountNumber, ma.SDATAccountNumber) AS SDATAccountNumber,
-            COALESCE(sd.ParcelID, ma.ParcelID)                 AS ParcelID,
-            COALESCE(ma.StreetNumber, sd.StreetNumber)         AS StreetNumber,
-            COALESCE(ma.StreetName, sd.StreetName)             AS StreetName,
-            ma.StreetSuffix,
-            COALESCE(ma.StreetType, sd.StreetType)             AS StreetType,
-            COALESCE(ma.UnitNumber, sd.UnitNumber)             AS UnitNumber,
-            COALESCE(ma.City, sd.City)                         AS City,
-            COALESCE(sd.[State], @DefaultState)                AS [State],
-            COALESCE(ma.ZipCode, sd.ZipCode)                   AS ZipCode,
-            --COALESCE(ma.XCoordinate, sd.Latitude)              AS Latitude,
-            --COALESCE(ma.YCoordinate, sd.Longitude)             AS Longitude,
-            COALESCE(ma.PropertyType, sd.PropertyType)         AS PropertyType,
-            CAST(sd.OwnerName AS NVARCHAR(200))                AS OwnerName,
-            CAST(sd.YearBuilt AS INT)                          AS YearBuilt,
-            CAST(sd.DwellingUnits AS INT)                      AS DwellingUnits,
-            COALESCE(ma.NormalizedAddress, sd.NormalizedAddress)         AS NormalizedAddress,
-            COALESCE(ma.NormalizedFullAddress, sd.NormalizedFullAddress) AS NormalizedFullAddress,
-            CASE WHEN ma.HasRequiredAddress = 1 AND sd.HasRequiredAddress = 1 THEN 1
-                 WHEN ma.HasRequiredAddress = 1 OR sd.HasRequiredAddress = 1 THEN 1
-                 ELSE 0 END AS HasRequiredAddress,
-            N'BOTH' AS MatchSource,
-            N'HIGH' AS IncomingMatchConfidence,
-            N'AddressNormalized' AS IncomingMatchMethod
-        FROM #MA ma
-        INNER JOIN #SDAT sd
-            ON ma.MasterAddressAccount = sd.SDATAccountNumber
-           AND (
-                ma.NormalizedAddress = sd.NormalizedAddress
-                OR ma.NormalizedFullAddress = sd.NormalizedFullAddress
-           )
-    ),
-    MAOnly AS (
-        SELECT
-            ma.MasterAddressID, CAST(NULL AS INT) AS KdatRecordID,
-            ma.MasterAddressAccount, ma.SDATAccountNumber, ma.ParcelID,
-            ma.StreetNumber, ma.StreetName, ma.StreetSuffix, ma.StreetType, ma.UnitNumber,
-            ma.City, ma.[State], ma.ZipCode, 
-            --ma.Latitude, ma.Longitude,
-            ma.PropertyType,
-            CAST(ma.OwnerName AS NVARCHAR(200))                AS OwnerName,
-            CAST(ma.YearBuilt AS INT)                          AS YearBuilt,
-            CAST(ma.DwellingUnits AS INT)                      AS DwellingUnits,
-            ma.NormalizedAddress, ma.NormalizedFullAddress, ma.HasRequiredAddress,
-            N'ADDRESS_MASTER' AS MatchSource, N'MEDIUM' AS IncomingMatchConfidence,
-            N'AddressNormalized' AS IncomingMatchMethod
-        FROM #MA ma
-        WHERE NOT EXISTS (
-            SELECT 1 FROM Matched m WHERE m.MasterAddressID = ma.MasterAddressID
-        )
-    ),
-    SDATOnly AS (
-        SELECT
-            CAST(NULL AS INT) AS MasterAddressID, sd.KdatRecordID,
-            sd.MasterAddressAccount, sd.SDATAccountNumber, sd.ParcelID,
-            sd.StreetNumber, sd.StreetName, sd.StreetSuffix, sd.StreetType, sd.UnitNumber,
-            sd.City, sd.[State], sd.ZipCode,
-            --sd.Latitude, sd.Longitude,
-            sd.PropertyType,
-            CAST(sd.OwnerName AS NVARCHAR(200))                AS OwnerName,
-            CAST(sd.YearBuilt AS INT)                          AS YearBuilt,
-            CAST(sd.DwellingUnits AS INT)                      AS DwellingUnits,
-            sd.NormalizedAddress, sd.NormalizedFullAddress, sd.HasRequiredAddress,
-            N'KDAT' AS MatchSource, N'MEDIUM' AS IncomingMatchConfidence,
-            N'AddressNormalized' AS IncomingMatchMethod
-        FROM #SDAT sd
-        WHERE NOT EXISTS (
-            SELECT 1 FROM Matched m WHERE m.KdatRecordID = sd.KdatRecordID
-        )
+    CREATE TABLE #Work (
+        MasterAddressID         INT            NULL,
+        KdatRecordID              INT            NULL,
+        MasterAddressAccount      NVARCHAR(50)   NULL,
+        SDATAccountNumber         NVARCHAR(50)   NULL,
+        ParcelID                  NVARCHAR(50)   NULL,
+        StreetNumber              NVARCHAR(20)   NULL,
+        StreetName                NVARCHAR(150)  NULL,
+        StreetSuffix              NVARCHAR(20)   NULL,
+        StreetType                NVARCHAR(20)   NULL,
+        UnitNumber                NVARCHAR(20)   NULL,
+        City                      NVARCHAR(100)  NULL,
+        [State]                   CHAR(2)        NOT NULL,
+        ZipCode                   NVARCHAR(10)   NULL,
+        Latitude                  DECIMAL(10,6)  NULL,
+        Longitude                 DECIMAL(10,6)  NULL,
+        PropertyType              NVARCHAR(50)   NULL,
+        OwnerName                 NVARCHAR(200)  NULL,
+        YearBuilt                 INT            NULL,
+        DwellingUnits             INT            NULL,
+        NormalizedAddress         NVARCHAR(200)  NOT NULL,
+        NormalizedFullAddress     NVARCHAR(300)  NOT NULL,
+        HasRequiredAddress        BIT            NOT NULL,
+        MatchSource               NVARCHAR(30)   NOT NULL,
+        IncomingMatchConfidence   NVARCHAR(30)   NOT NULL,
+        IncomingMatchMethod       NVARCHAR(30)   NOT NULL
+    );
+
+    /* 4a. Matched — MA + SDAT same account and address */
+    INSERT INTO #Work (
+        MasterAddressID, KdatRecordID, MasterAddressAccount, SDATAccountNumber, ParcelID,
+        StreetNumber, StreetName, StreetSuffix, StreetType, UnitNumber,
+        City, [State], ZipCode, Latitude, Longitude, PropertyType,
+        OwnerName, YearBuilt, DwellingUnits,
+        NormalizedAddress, NormalizedFullAddress, HasRequiredAddress,
+        MatchSource, IncomingMatchConfidence, IncomingMatchMethod
     )
-    SELECT * INTO #Work FROM Matched
-    UNION ALL SELECT * FROM MAOnly
-    UNION ALL SELECT * FROM SDATOnly;
+    SELECT
+        ma.MasterAddressID,
+        sd.KdatRecordID,
+        ma.MasterAddressAccount,
+        COALESCE(sd.SDATAccountNumber, ma.SDATAccountNumber),
+        COALESCE(sd.ParcelID, ma.ParcelID),
+        COALESCE(ma.StreetNumber, sd.StreetNumber),
+        COALESCE(ma.StreetName, sd.StreetName),
+        ma.StreetSuffix,
+        COALESCE(ma.StreetType, sd.StreetType),
+        COALESCE(ma.UnitNumber, sd.UnitNumber),
+        COALESCE(ma.City, sd.City),
+        COALESCE(sd.[State], @DefaultState),
+        COALESCE(ma.ZipCode, sd.ZipCode),
+        ma.Latitude,
+        ma.Longitude,
+        COALESCE(ma.PropertyType, sd.PropertyType),
+        CAST(sd.OwnerName AS NVARCHAR(200)),
+        CAST(sd.YearBuilt AS INT),
+        CAST(sd.DwellingUnits AS INT),
+        COALESCE(ma.NormalizedAddress, sd.NormalizedAddress),
+        COALESCE(ma.NormalizedFullAddress, sd.NormalizedFullAddress),
+        CASE WHEN ma.HasRequiredAddress = 1 AND sd.HasRequiredAddress = 1 THEN 1
+             WHEN ma.HasRequiredAddress = 1 OR sd.HasRequiredAddress = 1 THEN 1
+             ELSE 0 END,
+        N'BOTH', N'HIGH', N'AddressNormalized'
+    FROM #MA ma
+    INNER JOIN #SDAT sd
+        ON ma.MasterAddressAccount = sd.SDATAccountNumber
+       AND (
+            ma.NormalizedAddress = sd.NormalizedAddress
+            OR ma.NormalizedFullAddress = sd.NormalizedFullAddress
+       );
+
+    /* 4b. AddressMaster only — no SDAT match */
+    INSERT INTO #Work (
+        MasterAddressID, KdatRecordID, MasterAddressAccount, SDATAccountNumber, ParcelID,
+        StreetNumber, StreetName, StreetSuffix, StreetType, UnitNumber,
+        City, [State], ZipCode, Latitude, Longitude, PropertyType,
+        OwnerName, YearBuilt, DwellingUnits,
+        NormalizedAddress, NormalizedFullAddress, HasRequiredAddress,
+        MatchSource, IncomingMatchConfidence, IncomingMatchMethod
+    )
+    SELECT
+        ma.MasterAddressID, NULL, ma.MasterAddressAccount, ma.SDATAccountNumber, ma.ParcelID,
+        ma.StreetNumber, ma.StreetName, ma.StreetSuffix, ma.StreetType, ma.UnitNumber,
+        ma.City, ma.[State], ma.ZipCode, ma.Latitude, ma.Longitude, ma.PropertyType,
+        CAST(ma.OwnerName AS NVARCHAR(200)),
+        CAST(ma.YearBuilt AS INT),
+        CAST(ma.DwellingUnits AS INT),
+        ma.NormalizedAddress, ma.NormalizedFullAddress, ma.HasRequiredAddress,
+        N'ADDRESS_MASTER', N'MEDIUM', N'AddressNormalized'
+    FROM #MA ma
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM #MA ma2
+        INNER JOIN #SDAT sd
+            ON ma2.MasterAddressAccount = sd.SDATAccountNumber
+           AND (
+                ma2.NormalizedAddress = sd.NormalizedAddress
+                OR ma2.NormalizedFullAddress = sd.NormalizedFullAddress
+           )
+        WHERE ma2.MasterAddressID = ma.MasterAddressID
+    );
+
+    /* 4c. SDAT only — no AddressMaster match */
+    INSERT INTO #Work (
+        MasterAddressID, KdatRecordID, MasterAddressAccount, SDATAccountNumber, ParcelID,
+        StreetNumber, StreetName, StreetSuffix, StreetType, UnitNumber,
+        City, [State], ZipCode, Latitude, Longitude, PropertyType,
+        OwnerName, YearBuilt, DwellingUnits,
+        NormalizedAddress, NormalizedFullAddress, HasRequiredAddress,
+        MatchSource, IncomingMatchConfidence, IncomingMatchMethod
+    )
+    SELECT
+        NULL, sd.KdatRecordID, sd.MasterAddressAccount, sd.SDATAccountNumber, sd.ParcelID,
+        sd.StreetNumber, sd.StreetName, sd.StreetSuffix, sd.StreetType, sd.UnitNumber,
+        sd.City, sd.[State], sd.ZipCode,
+        CAST(NULL AS DECIMAL(10,6)), CAST(NULL AS DECIMAL(10,6)),
+        sd.PropertyType,
+        CAST(sd.OwnerName AS NVARCHAR(200)),
+        CAST(sd.YearBuilt AS INT),
+        CAST(sd.DwellingUnits AS INT),
+        sd.NormalizedAddress, sd.NormalizedFullAddress, sd.HasRequiredAddress,
+        N'KDAT', N'MEDIUM', N'AddressNormalized'
+    FROM #SDAT sd
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM #MA ma
+        INNER JOIN #SDAT sd2
+            ON ma.MasterAddressAccount = sd2.SDATAccountNumber
+           AND (
+                ma.NormalizedAddress = sd2.NormalizedAddress
+                OR ma.NormalizedFullAddress = sd2.NormalizedFullAddress
+           )
+        WHERE sd2.KdatRecordID = sd.KdatRecordID
+    );
 
     INSERT INTO @Stats (Metric, Cnt)
     SELECT N'Unified work rows', COUNT(*) FROM #Work;
