@@ -381,8 +381,8 @@ BEGIN TRY
         ma.City, ma.[State], ma.ZipCode,
         CONVERT(NVARCHAR(50), ma.PropertyType),
         CONVERT(NVARCHAR(200), ma.OwnerName),
-        TRY_CONVERT(INT, ma.YearBuilt),
-        TRY_CONVERT(INT, ma.DwellingUnits),
+        CAST(NULL AS INT),  /* MA has no YearBuilt */
+        CAST(NULL AS INT),  /* MA has no DwellingUnits — use sd in matched/SDAT-only rows */
         ma.NormalizedStreetAddress, ma.NormalizedFullAddress, ma.HasRequiredAddress,
         N'ADDRESS_MASTER', N'MEDIUM', N'AddressNormalized'
     FROM #MA ma

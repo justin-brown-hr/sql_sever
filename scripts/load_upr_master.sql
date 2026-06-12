@@ -350,8 +350,8 @@ BEGIN TRY
         COALESCE(ma.ZipCode, sd.ZipCode),
         CONVERT(NVARCHAR(50), COALESCE(ma.PropertyType, sd.PropertyType)),
         CONVERT(NVARCHAR(200), sd.OwnerName),
-        TRY_CONVERT(INT, sd.YearBuilt),
-        TRY_CONVERT(INT, sd.DwellingUnits),
+        TRY_CONVERT(INT, sd.YearBuilt),        /* SDAT only — not ma */
+        TRY_CONVERT(INT, sd.DwellingUnits),    /* SDAT only — not ma */
         COALESCE(ma.NormalizedStreetAddress, sd.NormalizedStreetAddress),
         COALESCE(ma.NormalizedFullAddress, sd.NormalizedFullAddress),
         CASE WHEN ma.HasRequiredAddress = 1 AND sd.HasRequiredAddress = 1 THEN 1
@@ -381,8 +381,8 @@ BEGIN TRY
         ma.City, ma.[State], ma.ZipCode,
         CONVERT(NVARCHAR(50), ma.PropertyType),
         CONVERT(NVARCHAR(200), ma.OwnerName),
-        TRY_CONVERT(INT, ma.YearBuilt),
-        TRY_CONVERT(INT, ma.DwellingUnits),
+        CAST(NULL AS INT),  /* MA has no YearBuilt */
+        CAST(NULL AS INT),  /* MA has no DwellingUnits — use sd in matched/SDAT-only rows */
         ma.NormalizedStreetAddress, ma.NormalizedFullAddress, ma.HasRequiredAddress,
         N'ADDRESS_MASTER', N'MEDIUM', N'AddressNormalized'
     FROM #MA ma
