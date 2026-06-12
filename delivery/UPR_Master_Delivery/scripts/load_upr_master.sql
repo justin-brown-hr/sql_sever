@@ -249,7 +249,7 @@ BEGIN TRY
             WHEN N'PLACE'  THEN N'PL'  WHEN N'PL'  THEN N'PL'
             ELSE NULLIF(UPPER(LTRIM(RTRIM(s.PremisesStreetType))), N'')
         END,
-        Unit            = CAST(NULL AS NVARCHAR(20)),
+        Unit            = CAST(NULL AS NVARCHAR(20)),  /* SDAT source has no Unit column */
         City                 = NULLIF(UPPER(LTRIM(RTRIM(s.PremisesCity))), N''),
         /* [State] only once — do not add a second [State] line below */
         [State]              = COALESCE(NULLIF(UPPER(LTRIM(RTRIM(s.PremisesState))), N''), @DefaultState),
@@ -344,14 +344,14 @@ BEGIN TRY
         COALESCE(ma.StreetNumber, sd.StreetNumber),
         COALESCE(ma.StreetName, sd.StreetName),
         COALESCE(ma.StreetType, sd.StreetType),
-        COALESCE(ma.Unit, sd.Unit),
+        ma.Unit,  /* SDAT has no Unit — MA only */
         COALESCE(ma.City, sd.City),
         COALESCE(sd.[State], @DefaultState),
         COALESCE(ma.ZipCode, sd.ZipCode),
         CONVERT(NVARCHAR(50), COALESCE(ma.PropertyType, sd.PropertyType)),
         CONVERT(NVARCHAR(200), sd.OwnerName),
-        TRY_CONVERT(INT, sd.YearBuilt),
-        TRY_CONVERT(INT, sd.DwellingUnits),
+        TRY_CONVERT(INT, sd.YearBuilt),        /* SDAT only — not ma */
+        TRY_CONVERT(INT, sd.DwellingUnits),    /* SDAT only — not ma */
         COALESCE(ma.NormalizedStreetAddress, sd.NormalizedStreetAddress),
         COALESCE(ma.NormalizedFullAddress, sd.NormalizedFullAddress),
         CASE WHEN ma.HasRequiredAddress = 1 AND sd.HasRequiredAddress = 1 THEN 1
@@ -409,7 +409,8 @@ BEGIN TRY
     )
     SELECT
         NULL, sd.KdatRecordID, sd.MasterAddressAccount, sd.SDATAccountNumber, sd.ParcelID,
-        sd.StreetNumber, sd.StreetName, sd.StreetType, sd.Unit,
+        sd.StreetNumber, sd.StreetName, sd.StreetType,
+        CAST(NULL AS NVARCHAR(20)),  /* SDAT has no Unit */
         sd.City, sd.[State], sd.ZipCode,
         CONVERT(NVARCHAR(50), sd.PropertyType),
         CONVERT(NVARCHAR(200), sd.OwnerName),
