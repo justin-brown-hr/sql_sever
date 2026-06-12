@@ -189,6 +189,7 @@ BEGIN TRY
             WHEN N'VACANT'                THEN N'LAND'
             WHEN N'TOWNHOUSE'             THEN N'TH'
             WHEN N'MIXED USE'             THEN N'MIXED'
+            WHEN N'C'                     THEN N'CONDO'
             ELSE NULLIF(UPPER(LTRIM(RTRIM(ma.LUCategory))), N'')
         END,
         OwnerName            = CAST(NULL AS NVARCHAR(200)),
@@ -337,7 +338,8 @@ BEGIN TRY
         IncomingMatchMethod       NVARCHAR(30)   NOT NULL
     );
 
-    /* 4a. Matched — MA + SDAT same account and address */
+    /* 4a. Matched — MA + SDAT same account and address
+       IMPORTANT: do not comment out or rename columns in INSERT list — causes Msg 245 */
     INSERT INTO #Work (
         MasterAddressID, KdatRecordID, MasterAddressAccount, SDATAccountNumber, ParcelID,
         StreetNumber, StreetName, StreetSuffix, StreetType, UnitNumber,
@@ -362,10 +364,10 @@ BEGIN TRY
         COALESCE(ma.ZipCode, sd.ZipCode),
         CAST(NULL AS DECIMAL(10,6)),
         CAST(NULL AS DECIMAL(10,6)),
-        COALESCE(ma.PropertyType, sd.PropertyType),
-        CAST(sd.OwnerName AS NVARCHAR(200)),
-        CAST(sd.YearBuilt AS INT),
-        CAST(sd.DwellingUnits AS INT),
+        CONVERT(NVARCHAR(50), COALESCE(ma.PropertyType, sd.PropertyType)),
+        CONVERT(NVARCHAR(200), sd.OwnerName),
+        TRY_CONVERT(INT, sd.YearBuilt),
+        TRY_CONVERT(INT, sd.DwellingUnits),
         COALESCE(ma.NormalizedAddress, sd.NormalizedAddress),
         COALESCE(ma.NormalizedFullAddress, sd.NormalizedFullAddress),
         CASE WHEN ma.HasRequiredAddress = 1 AND sd.HasRequiredAddress = 1 THEN 1
@@ -394,10 +396,10 @@ BEGIN TRY
         ma.StreetNumber, ma.StreetName, ma.StreetSuffix, ma.StreetType, ma.UnitNumber,
         ma.City, ma.[State], ma.ZipCode,
         CAST(NULL AS DECIMAL(10,6)), CAST(NULL AS DECIMAL(10,6)),
-        ma.PropertyType,
-        CAST(ma.OwnerName AS NVARCHAR(200)),
-        CAST(ma.YearBuilt AS INT),
-        CAST(ma.DwellingUnits AS INT),
+        CONVERT(NVARCHAR(50), ma.PropertyType),
+        CONVERT(NVARCHAR(200), ma.OwnerName),
+        TRY_CONVERT(INT, ma.YearBuilt),
+        TRY_CONVERT(INT, ma.DwellingUnits),
         ma.NormalizedAddress, ma.NormalizedFullAddress, ma.HasRequiredAddress,
         N'ADDRESS_MASTER', N'MEDIUM', N'AddressNormalized'
     FROM #MA ma
@@ -427,10 +429,10 @@ BEGIN TRY
         sd.StreetNumber, sd.StreetName, sd.StreetSuffix, sd.StreetType, sd.UnitNumber,
         sd.City, sd.[State], sd.ZipCode,
         CAST(NULL AS DECIMAL(10,6)), CAST(NULL AS DECIMAL(10,6)),
-        sd.PropertyType,
-        CAST(sd.OwnerName AS NVARCHAR(200)),
-        CAST(sd.YearBuilt AS INT),
-        CAST(sd.DwellingUnits AS INT),
+        CONVERT(NVARCHAR(50), sd.PropertyType),
+        CONVERT(NVARCHAR(200), sd.OwnerName),
+        TRY_CONVERT(INT, sd.YearBuilt),
+        TRY_CONVERT(INT, sd.DwellingUnits),
         sd.NormalizedAddress, sd.NormalizedFullAddress, sd.HasRequiredAddress,
         N'KDAT', N'MEDIUM', N'AddressNormalized'
     FROM #SDAT sd
