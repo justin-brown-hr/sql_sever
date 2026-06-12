@@ -457,18 +457,33 @@ BEGIN TRY
         SELECT
             w.MasterAddressID, w.KdatRecordID, w.MatchSource, w.HasRequiredAddress,
             w.SDATAccountNumber, w.ParcelID,
+            /* UPR.SDATAccountNumber is NOT NULL — derive key when source account is missing */
+            EffectiveSDATAccountNumber = COALESCE(
+                NULLIF(w.SDATAccountNumber, N''),
+                NULLIF(w.ParcelID, N''),
+                CASE WHEN w.MasterAddressID IS NOT NULL
+                     THEN CONCAT(N'MA-', CONVERT(NVARCHAR(20), w.MasterAddressID)) END,
+                CASE WHEN w.KdatRecordID IS NOT NULL
+                     THEN CONCAT(N'KDAT-', CONVERT(NVARCHAR(20), w.KdatRecordID)) END,
+                CONCAT(N'ADDR-', CONVERT(NVARCHAR(20), ABS(CHECKSUM(w.NormalizedFullAddress))))
+            ),
             w.StreetNumber, w.StreetName, w.StreetType,
             w.City, w.[State], w.ZipCode, w.NormalizedStreetAddress, w.NormalizedFullAddress,
             w.PropertyType, w.OwnerName,
             ROW_NUMBER() OVER (
-                PARTITION BY COALESCE(w.SDATAccountNumber, w.ParcelID, w.NormalizedFullAddress)
+                PARTITION BY COALESCE(
+                    NULLIF(w.SDATAccountNumber, N''),
+                    NULLIF(w.ParcelID, N''),
+                    w.NormalizedFullAddress
+                )
                 ORDER BY CASE w.MatchSource WHEN N'BOTH' THEN 1 WHEN N'KDAT' THEN 2 ELSE 3 END
             ) AS rn
         FROM #Work w
         WHERE w.HasRequiredAddress = 1
     ) AS src
     ON (
-        (tgt.SDATAccountNumber = src.SDATAccountNumber AND src.SDATAccountNumber IS NOT NULL)
+        tgt.SDATAccountNumber = src.EffectiveSDATAccountNumber
+        OR (tgt.SDATAccountNumber = src.SDATAccountNumber AND src.SDATAccountNumber IS NOT NULL)
         OR (tgt.ParcelID = src.ParcelID AND src.ParcelID IS NOT NULL)
         OR (tgt.NormalizedFullAddress = src.NormalizedFullAddress)
     )
@@ -487,7 +502,7 @@ BEGIN TRY
         PropertyTypeCode, StatusCode, IsActive,
         CreatedDate, CreatedBy, UpdatedDate, UpdatedBy
     ) VALUES (
-        src.SDATAccountNumber, src.ParcelID, NULL, src.OwnerName,
+        src.EffectiveSDATAccountNumber, src.ParcelID, NULL, src.OwnerName,
         src.StreetNumber, src.StreetName, src.StreetType,
         src.City, src.[State], src.ZipCode, src.NormalizedStreetAddress, src.NormalizedFullAddress,
         src.PropertyType, N'ACTIVE', 1,
@@ -507,13 +522,31 @@ BEGIN TRY
     CROSS APPLY (
         SELECT TOP 1 upr.UPropertyRecordsID, upr.CreatedDate
         FROM dbo.UPROPERTYRECORDS upr
-        WHERE (w.SDATAccountNumber IS NOT NULL AND upr.SDATAccountNumber = w.SDATAccountNumber)
+        WHERE upr.SDATAccountNumber = COALESCE(
+                  NULLIF(w.SDATAccountNumber, N''),
+                  NULLIF(w.ParcelID, N''),
+                  CASE WHEN w.MasterAddressID IS NOT NULL
+                       THEN CONCAT(N'MA-', CONVERT(NVARCHAR(20), w.MasterAddressID)) END,
+                  CASE WHEN w.KdatRecordID IS NOT NULL
+                       THEN CONCAT(N'KDAT-', CONVERT(NVARCHAR(20), w.KdatRecordID)) END,
+                  CONCAT(N'ADDR-', CONVERT(NVARCHAR(20), ABS(CHECKSUM(w.NormalizedFullAddress))))
+              )
+           OR (w.SDATAccountNumber IS NOT NULL AND upr.SDATAccountNumber = w.SDATAccountNumber)
            OR (w.ParcelID IS NOT NULL AND upr.ParcelID = w.ParcelID)
            OR (upr.NormalizedFullAddress = w.NormalizedFullAddress)
         ORDER BY
-            CASE WHEN w.SDATAccountNumber IS NOT NULL AND upr.SDATAccountNumber = w.SDATAccountNumber THEN 1
-                 WHEN w.ParcelID IS NOT NULL AND upr.ParcelID = w.ParcelID THEN 2
-                 ELSE 3 END
+            CASE WHEN upr.SDATAccountNumber = COALESCE(
+                      NULLIF(w.SDATAccountNumber, N''),
+                      NULLIF(w.ParcelID, N''),
+                      CASE WHEN w.MasterAddressID IS NOT NULL
+                           THEN CONCAT(N'MA-', CONVERT(NVARCHAR(20), w.MasterAddressID)) END,
+                      CASE WHEN w.KdatRecordID IS NOT NULL
+                           THEN CONCAT(N'KDAT-', CONVERT(NVARCHAR(20), w.KdatRecordID)) END,
+                      CONCAT(N'ADDR-', CONVERT(NVARCHAR(20), ABS(CHECKSUM(w.NormalizedFullAddress))))
+                  ) THEN 1
+                 WHEN w.SDATAccountNumber IS NOT NULL AND upr.SDATAccountNumber = w.SDATAccountNumber THEN 2
+                 WHEN w.ParcelID IS NOT NULL AND upr.ParcelID = w.ParcelID THEN 3
+                 ELSE 4 END
     ) x;
 
     INSERT INTO @Stats (Metric, Cnt)
