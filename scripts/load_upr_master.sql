@@ -6,7 +6,7 @@
   and all related tables (XREF, Review_Q, StatusHistory, Contact, Building/Unit,
   Reference data, AuditLog).
 
-  Based on client script: MA source Unit → UPROPERTYRECORDS.UnitNumber; no StreetSuffix,
+  MA Unit held in #Work/#UPRMap only — loaded to dbo.Unit (UPR has no unit column).
   LUCategory, PropertyTypeCode, NormalizedStreetAddress, NULL lat/long.
 ================================================================================
 */
@@ -448,7 +448,8 @@ BEGIN TRY
         HasRequiredAddress    BIT NOT NULL,
         SDATAccountNumber     NVARCHAR(50) NULL,
         ParcelID              NVARCHAR(50) NULL,
-        NormalizedFullAddress NVARCHAR(300) NOT NULL
+        NormalizedFullAddress NVARCHAR(300) NOT NULL,
+        Unit                  NVARCHAR(20) NULL  /* MA only — dbo.Unit, not UPR */
     );
 
     MERGE dbo.UPROPERTYRECORDS AS tgt
@@ -456,7 +457,7 @@ BEGIN TRY
         SELECT
             w.MasterAddressID, w.KdatRecordID, w.MatchSource, w.HasRequiredAddress,
             w.SDATAccountNumber, w.ParcelID,
-            w.StreetNumber, w.StreetName, w.StreetType, w.Unit,
+            w.StreetNumber, w.StreetName, w.StreetType,
             w.City, w.[State], w.ZipCode, w.NormalizedStreetAddress, w.NormalizedFullAddress,
             w.PropertyType, w.OwnerName,
             ROW_NUMBER() OVER (
@@ -477,18 +478,17 @@ BEGIN TRY
         --tgt.Latitude          = COALESCE(tgt.Latitude, src.Latitude),
         --tgt.Longitude         = COALESCE(tgt.Longitude, src.Longitude),
         tgt.PropertyTypeCode  = COALESCE(tgt.PropertyTypeCode, src.PropertyType),
-        tgt.UnitNumber        = COALESCE(tgt.UnitNumber, src.Unit),  /* MA only; SDAT has no Unit */
         tgt.UpdatedDate       = @Now,
         tgt.UpdatedBy         = @RunUser
     WHEN NOT MATCHED AND src.rn = 1 THEN INSERT (
         SDATAccountNumber, ParcelID, PropertyName, Owner,
-        StreetNumber, StreetName, StreetType, UnitNumber,
+        StreetNumber, StreetName, StreetType,
         City, [State], ZipCode, NormalizedStreetAddress, NormalizedFullAddress,
         PropertyTypeCode, StatusCode, IsActive,
         CreatedDate, CreatedBy, UpdatedDate, UpdatedBy
     ) VALUES (
         src.SDATAccountNumber, src.ParcelID, NULL, src.OwnerName,
-        src.StreetNumber, src.StreetName, src.StreetType, src.Unit,
+        src.StreetNumber, src.StreetName, src.StreetType,
         src.City, src.[State], src.ZipCode, src.NormalizedStreetAddress, src.NormalizedFullAddress,
         src.PropertyType, N'ACTIVE', 1,
         @Now, @RunUser, @Now, @RunUser
@@ -498,11 +498,11 @@ BEGIN TRY
     INSERT INTO @Stats VALUES (N'UPROPERTYRECORD merge actions', @UprInserted);
 
     /* Map work rows to UPR IDs (one UPR per work row, priority: account > parcel > address) */
-    INSERT INTO #UPRMap (UPropertyRecordsID, MasterAddressID, KdatRecordID, MatchSource, IsNew, HasRequiredAddress, SDATAccountNumber, ParcelID, NormalizedFullAddress)
+    INSERT INTO #UPRMap (UPropertyRecordsID, MasterAddressID, KdatRecordID, MatchSource, IsNew, HasRequiredAddress, SDATAccountNumber, ParcelID, NormalizedFullAddress, Unit)
     SELECT
         x.UPropertyRecordsID, w.MasterAddressID, w.KdatRecordID, w.MatchSource,
         CASE WHEN x.CreatedDate >= @Now THEN 1 ELSE 0 END,
-        w.HasRequiredAddress, w.SDATAccountNumber, w.ParcelID, w.NormalizedFullAddress
+        w.HasRequiredAddress, w.SDATAccountNumber, w.ParcelID, w.NormalizedFullAddress, w.Unit
     FROM #Work w
     CROSS APPLY (
         SELECT TOP 1 upr.UPropertyRecordsID, upr.CreatedDate
@@ -780,17 +780,18 @@ BEGIN TRY
     INSERT INTO @Stats VALUES (N'Buildings created', @@ROWCOUNT);
 
     INSERT INTO dbo.Unit (
-        UPropertyRecordsID, BuildingID, SDATAccountNumber, --UnitNumber
+        UPropertyRecordsID, BuildingID, UnitNumber, SDATAccountNumber,
         UnitTypeCode, UnitStatusCode, IsMPDU, IsActive, CreatedDate, UpdatedDate
     )
     SELECT
         upr.UPropertyRecordsID,
         b.BuildingID,
-       --COALESCE(NULLIF(upr.UnitNumber, N''), N'U1'),
+        COALESCE(NULLIF(m.Unit, N''), N'U1'),  /* MA.Unit → dbo.Unit; UPR has no unit column */
         upr.SDATAccountNumber,
         CASE upr.PropertyTypeCode WHEN N'CONDO' THEN N'COND' ELSE N'APT' END,
-        N'ACTIVE', 0, 1, @Now, @Now  --@RunUser, @RunUser
+        N'ACTIVE', 0, 1, @Now, @Now
     FROM dbo.UPROPERTYRECORDS upr
+    INNER JOIN #UPRMap m ON m.UPropertyRecordsID = upr.UPropertyRecordsID
     INNER JOIN dbo.Building b ON b.UPropertyRecordsID = upr.UPropertyRecordsID AND b.BuildingCode = N'MAIN'
     INNER JOIN dbo.REF_PROPERTYTYPE pt ON pt.PropertyTypeCode = upr.PropertyTypeCode
     WHERE upr.PropertyTypeCode IN (N'CONDO', N'APT')
