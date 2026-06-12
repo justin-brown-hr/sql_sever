@@ -174,11 +174,8 @@ BEGIN TRY
         City                 = NULLIF(UPPER(LTRIM(RTRIM(ma.City))), N''),
         [State]              = @DefaultState,
         ZipCode              = LEFT(NULLIF(LTRIM(RTRIM(ma.ZipCode)), N''), 10),
-        /* MA has XCoordinate/YCoordinate but SD does not — NULL coords in temp table */
-        Latitude             = CAST(NULL AS DECIMAL(10,6)),
-        Longitude            = CAST(NULL AS DECIMAL(10,6)),
         PropertyTypeRaw      = NULLIF(UPPER(LTRIM(RTRIM(ma.LUCategory))), N''),
-        PropertyType         = CASE UPPER(LTRIM(RTRIM(ma.LUCategory)))
+        PropertyType         = CONVERT(NVARCHAR(50), CASE UPPER(LTRIM(RTRIM(ma.LUCategory)))
             WHEN N'CONDOMINIUM'           THEN N'CONDO'
             WHEN N'MULTI-FAMILY'          THEN N'MULTI'
             WHEN N'SINGLE FAMILY DETACHED'THEN N'SF'
@@ -187,7 +184,7 @@ BEGIN TRY
             WHEN N'MIXED USE'             THEN N'MIXED'
             WHEN N'C'                     THEN N'CONDO'
             ELSE NULLIF(UPPER(LTRIM(RTRIM(ma.LUCategory))), N'')
-        END,
+        END),
         OwnerName            = CAST(NULL AS NVARCHAR(200)),
         YearBuilt            = CAST(NULL AS INT),
         DwellingUnits        = CAST(NULL AS INT),
@@ -232,7 +229,7 @@ BEGIN TRY
     IF OBJECT_ID('tempdb..#SDAT') IS NOT NULL DROP TABLE #SDAT;
 
     SELECT
-        KdatRecordID         = s.RealPropertyTaxInformationID,
+        KdatRecordID         = TRY_CONVERT(INT, s.RealPropertyTaxInformationID),
         SourceSystem         = N'KDAT',
         SourceRecordID       = CONVERT(VARCHAR(100), s.RealPropertyTaxInformationID),
         SourceEntityType     = N'SDATProperty',
@@ -257,10 +254,9 @@ BEGIN TRY
         /* [State] only once — do not add a second [State] line below */
         [State]              = COALESCE(NULLIF(UPPER(LTRIM(RTRIM(s.PremisesState))), N''), @DefaultState),
         ZipCode              = LEFT(NULLIF(LTRIM(RTRIM(s.PremisesZipCode)), N''), 10),
-        Latitude             = CAST(NULL AS DECIMAL(10,6)),
-        Longitude            = CAST(NULL AS DECIMAL(10,6)),
         PropertyTypeRaw      = CAST(NULL AS NVARCHAR(50)),
-        PropertyType         = CASE WHEN ISNULL(TRY_CONVERT(INT, s.DwellingUnits), 0) > 1 THEN N'MULTI' ELSE N'SF' END,
+        PropertyType         = CONVERT(NVARCHAR(50),
+            CASE WHEN ISNULL(TRY_CONVERT(INT, s.DwellingUnits), 0) > 1 THEN N'MULTI' ELSE N'SF' END),
         OwnerName            = NULLIF(LTRIM(RTRIM(CAST(s.Owner AS NVARCHAR(200)))), N''),
         YearBuilt            = TRY_CONVERT(INT, s.YearBuilt),
         DwellingUnits        = TRY_CONVERT(INT, s.DwellingUnits),
@@ -318,8 +314,6 @@ BEGIN TRY
         City                      NVARCHAR(100)  NULL,
         [State]                   CHAR(2)        NOT NULL,
         ZipCode                   NVARCHAR(10)   NULL,
-        Latitude                  DECIMAL(10,6)  NULL,
-        Longitude                 DECIMAL(10,6)  NULL,
         PropertyType              NVARCHAR(50)   NULL,
         OwnerName                 NVARCHAR(200)  NULL,
         YearBuilt                 INT            NULL,
@@ -336,7 +330,7 @@ BEGIN TRY
     INSERT INTO #Work (
         MasterAddressID, KdatRecordID, MasterAddressAccount, SDATAccountNumber, ParcelID,
         StreetNumber, StreetName, StreetType, Unit,
-        City, [State], ZipCode, Latitude, Longitude, PropertyType,
+        City, [State], ZipCode, PropertyType,
         OwnerName, YearBuilt, DwellingUnits,
         NormalizedStreetAddress, NormalizedFullAddress, HasRequiredAddress,
         MatchSource, IncomingMatchConfidence, IncomingMatchMethod
@@ -354,8 +348,6 @@ BEGIN TRY
         COALESCE(ma.City, sd.City),
         COALESCE(sd.[State], @DefaultState),
         COALESCE(ma.ZipCode, sd.ZipCode),
-        CAST(NULL AS DECIMAL(10,6)),
-        CAST(NULL AS DECIMAL(10,6)),
         CONVERT(NVARCHAR(50), COALESCE(ma.PropertyType, sd.PropertyType)),
         CONVERT(NVARCHAR(200), sd.OwnerName),
         TRY_CONVERT(INT, sd.YearBuilt),
@@ -378,7 +370,7 @@ BEGIN TRY
     INSERT INTO #Work (
         MasterAddressID, KdatRecordID, MasterAddressAccount, SDATAccountNumber, ParcelID,
         StreetNumber, StreetName, StreetType, Unit,
-        City, [State], ZipCode, Latitude, Longitude, PropertyType,
+        City, [State], ZipCode, PropertyType,
         OwnerName, YearBuilt, DwellingUnits,
         NormalizedStreetAddress, NormalizedFullAddress, HasRequiredAddress,
         MatchSource, IncomingMatchConfidence, IncomingMatchMethod
@@ -387,7 +379,6 @@ BEGIN TRY
         ma.MasterAddressID, NULL, ma.MasterAddressAccount, ma.SDATAccountNumber, ma.ParcelID,
         ma.StreetNumber, ma.StreetName, ma.StreetType, ma.Unit,
         ma.City, ma.[State], ma.ZipCode,
-        CAST(NULL AS DECIMAL(10,6)), CAST(NULL AS DECIMAL(10,6)),
         CONVERT(NVARCHAR(50), ma.PropertyType),
         CONVERT(NVARCHAR(200), ma.OwnerName),
         TRY_CONVERT(INT, ma.YearBuilt),
@@ -411,7 +402,7 @@ BEGIN TRY
     INSERT INTO #Work (
         MasterAddressID, KdatRecordID, MasterAddressAccount, SDATAccountNumber, ParcelID,
         StreetNumber, StreetName, StreetType, Unit,
-        City, [State], ZipCode, Latitude, Longitude, PropertyType,
+        City, [State], ZipCode, PropertyType,
         OwnerName, YearBuilt, DwellingUnits,
         NormalizedStreetAddress, NormalizedFullAddress, HasRequiredAddress,
         MatchSource, IncomingMatchConfidence, IncomingMatchMethod
@@ -420,7 +411,6 @@ BEGIN TRY
         NULL, sd.KdatRecordID, sd.MasterAddressAccount, sd.SDATAccountNumber, sd.ParcelID,
         sd.StreetNumber, sd.StreetName, sd.StreetType, sd.Unit,
         sd.City, sd.[State], sd.ZipCode,
-        CAST(NULL AS DECIMAL(10,6)), CAST(NULL AS DECIMAL(10,6)),
         CONVERT(NVARCHAR(50), sd.PropertyType),
         CONVERT(NVARCHAR(200), sd.OwnerName),
         TRY_CONVERT(INT, sd.YearBuilt),
