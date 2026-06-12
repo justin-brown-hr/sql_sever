@@ -6,7 +6,7 @@
   and all related tables (XREF, Review_Q, StatusHistory, Contact, Building/Unit,
   Reference data, AuditLog).
 
-  Based on client script: Unit (not UnitNumber), no StreetSuffix,
+  Based on client script: MA source Unit → UPROPERTYRECORDS.UnitNumber; no StreetSuffix,
   LUCategory, PropertyTypeCode, NormalizedStreetAddress, NULL lat/long.
 ================================================================================
 */
@@ -477,11 +477,12 @@ BEGIN TRY
         --tgt.Latitude          = COALESCE(tgt.Latitude, src.Latitude),
         --tgt.Longitude         = COALESCE(tgt.Longitude, src.Longitude),
         tgt.PropertyTypeCode  = COALESCE(tgt.PropertyTypeCode, src.PropertyType),
+        tgt.UnitNumber        = COALESCE(tgt.UnitNumber, src.Unit),  /* MA only; SDAT has no Unit */
         tgt.UpdatedDate       = @Now,
         tgt.UpdatedBy         = @RunUser
     WHEN NOT MATCHED AND src.rn = 1 THEN INSERT (
         SDATAccountNumber, ParcelID, PropertyName, Owner,
-        StreetNumber, StreetName, StreetType, Unit,
+        StreetNumber, StreetName, StreetType, UnitNumber,
         City, [State], ZipCode, NormalizedStreetAddress, NormalizedFullAddress,
         PropertyTypeCode, StatusCode, IsActive,
         CreatedDate, CreatedBy, UpdatedDate, UpdatedBy
