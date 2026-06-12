@@ -1,16 +1,13 @@
 /*
 ================================================================================
-  UPR Master Load Script — based on client's running version (UPRDB_Test)
+  UPR Master Load Script
   
   Loads AddressMaster + SDAT, normalizes addresses, populates UPROPERTYRECORDS
   and all related tables (XREF, Review_Q, StatusHistory, Contact, Building/Unit,
   Reference data, AuditLog).
 
-  Minimal fixes applied to client's script (structure unchanged):
-    - MA uses LUCategory (not PropertyType); SD has no PropertyType
-    - State/Lat/Long NULL or defaulted; UPROPERTYRECORDS uses PropertyTypeCode
-    - UNION column alignment, UPropertyRecordsID typos, external XREF table names
-  Lat/long remain commented out per client's production script.
+  Based on client script: Unit (not UnitNumber), no StreetSuffix,
+  LUCategory, PropertyTypeCode, NormalizedStreetAddress, NULL lat/long.
 ================================================================================
 */
 USE UPRDB_Test;
@@ -162,7 +159,6 @@ BEGIN TRY
         ParcelID             = NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(50), ma.ParcelNumber))), N''),
         StreetNumber         = NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(20), ma.StreetNumber))), N''),
         StreetName           = NULLIF(UPPER(LTRIM(RTRIM(ma.StreetName))), N''),
-        StreetSuffix         = NULLIF(UPPER(LTRIM(RTRIM(ma.StreetSuffix))), N''),
         StreetType           = CASE UPPER(LTRIM(RTRIM(ma.StreetType)))
             WHEN N'STREET' THEN N'ST'  WHEN N'ST' THEN N'ST'
             WHEN N'AVENUE' THEN N'AVE' WHEN N'AVE' THEN N'AVE'
@@ -174,7 +170,7 @@ BEGIN TRY
             WHEN N'PLACE'  THEN N'PL'  WHEN N'PL'  THEN N'PL'
             ELSE NULLIF(UPPER(LTRIM(RTRIM(ma.StreetType))), N'')
         END,
-        UnitNumber           = NULLIF(LTRIM(RTRIM(ma.Unit)), N''),
+        Unit                = NULLIF(LTRIM(RTRIM(ma.Unit)), N''),
         City                 = NULLIF(UPPER(LTRIM(RTRIM(ma.City))), N''),
         [State]              = @DefaultState,
         ZipCode              = LEFT(NULLIF(LTRIM(RTRIM(ma.ZipCode)), N''), 10),
@@ -195,7 +191,7 @@ BEGIN TRY
         OwnerName            = CAST(NULL AS NVARCHAR(200)),
         YearBuilt            = CAST(NULL AS INT),
         DwellingUnits        = CAST(NULL AS INT),
-        NormalizedAddress    = UPPER(LTRIM(RTRIM(CONCAT(
+        NormalizedStreetAddress    = UPPER(LTRIM(RTRIM(CONCAT(
             ISNULL(CONVERT(NVARCHAR(20), ma.StreetNumber), N''), N' ',
             ISNULL(UPPER(LTRIM(RTRIM(ma.StreetName))), N''), N' ',
             CASE UPPER(LTRIM(RTRIM(ma.StreetType)))
@@ -245,7 +241,6 @@ BEGIN TRY
         ParcelID             = NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(50), s.Parcel))), N''),
         StreetNumber         = NULLIF(LTRIM(RTRIM(s.PremisesNumber)), N''),
         StreetName           = NULLIF(UPPER(LTRIM(RTRIM(s.PremisesStreetName))), N''),
-        StreetSuffix         = NULL,
         StreetType           = CASE UPPER(LTRIM(RTRIM(s.PremisesStreetType)))
             WHEN N'STREET' THEN N'ST'  WHEN N'ST' THEN N'ST'
             WHEN N'AVENUE' THEN N'AVE' WHEN N'AVE' THEN N'AVE'
@@ -257,7 +252,7 @@ BEGIN TRY
             WHEN N'PLACE'  THEN N'PL'  WHEN N'PL'  THEN N'PL'
             ELSE NULLIF(UPPER(LTRIM(RTRIM(s.PremisesStreetType))), N'')
         END,
-        UnitNumber           = CAST(NULL AS NVARCHAR(20)),
+        Unit            = CAST(NULL AS NVARCHAR(20)),
         City                 = NULLIF(UPPER(LTRIM(RTRIM(s.PremisesCity))), N''),
         /* [State] only once — do not add a second [State] line below */
         [State]              = COALESCE(NULLIF(UPPER(LTRIM(RTRIM(s.PremisesState))), N''), @DefaultState),
@@ -269,7 +264,7 @@ BEGIN TRY
         OwnerName            = NULLIF(LTRIM(RTRIM(CAST(s.Owner AS NVARCHAR(200)))), N''),
         YearBuilt            = TRY_CONVERT(INT, s.YearBuilt),
         DwellingUnits        = TRY_CONVERT(INT, s.DwellingUnits),
-        NormalizedAddress    = UPPER(LTRIM(RTRIM(CONCAT(
+        NormalizedStreetAddress    = UPPER(LTRIM(RTRIM(CONCAT(
             ISNULL(s.PremisesNumber, N''), N' ',
             ISNULL(UPPER(LTRIM(RTRIM(s.PremisesStreetName))), N''), N' ',
             CASE UPPER(LTRIM(RTRIM(s.PremisesStreetType)))
@@ -318,9 +313,8 @@ BEGIN TRY
         ParcelID                  NVARCHAR(50)   NULL,
         StreetNumber              NVARCHAR(20)   NULL,
         StreetName                NVARCHAR(150)  NULL,
-        StreetSuffix              NVARCHAR(20)   NULL,
         StreetType                NVARCHAR(20)   NULL,
-        UnitNumber                NVARCHAR(20)   NULL,
+        Unit                        NVARCHAR(20)   NULL,
         City                      NVARCHAR(100)  NULL,
         [State]                   CHAR(2)        NOT NULL,
         ZipCode                   NVARCHAR(10)   NULL,
@@ -330,7 +324,7 @@ BEGIN TRY
         OwnerName                 NVARCHAR(200)  NULL,
         YearBuilt                 INT            NULL,
         DwellingUnits             INT            NULL,
-        NormalizedAddress         NVARCHAR(200)  NOT NULL,
+        NormalizedStreetAddress         NVARCHAR(200)  NOT NULL,
         NormalizedFullAddress     NVARCHAR(300)  NOT NULL,
         HasRequiredAddress        BIT            NOT NULL,
         MatchSource               NVARCHAR(30)   NOT NULL,
@@ -338,14 +332,13 @@ BEGIN TRY
         IncomingMatchMethod       NVARCHAR(30)   NOT NULL
     );
 
-    /* 4a. Matched — MA + SDAT same account and address
-       IMPORTANT: do not comment out or rename columns in INSERT list — causes Msg 245 */
+    /* 4a. Matched — MA + SDAT same account and address */
     INSERT INTO #Work (
         MasterAddressID, KdatRecordID, MasterAddressAccount, SDATAccountNumber, ParcelID,
-        StreetNumber, StreetName, StreetSuffix, StreetType, UnitNumber,
+        StreetNumber, StreetName, StreetType, Unit,
         City, [State], ZipCode, Latitude, Longitude, PropertyType,
         OwnerName, YearBuilt, DwellingUnits,
-        NormalizedAddress, NormalizedFullAddress, HasRequiredAddress,
+        NormalizedStreetAddress, NormalizedFullAddress, HasRequiredAddress,
         MatchSource, IncomingMatchConfidence, IncomingMatchMethod
     )
     SELECT
@@ -356,9 +349,8 @@ BEGIN TRY
         COALESCE(sd.ParcelID, ma.ParcelID),
         COALESCE(ma.StreetNumber, sd.StreetNumber),
         COALESCE(ma.StreetName, sd.StreetName),
-        ma.StreetSuffix,
         COALESCE(ma.StreetType, sd.StreetType),
-        COALESCE(ma.UnitNumber, sd.UnitNumber),
+        COALESCE(ma.Unit, sd.Unit),
         COALESCE(ma.City, sd.City),
         COALESCE(sd.[State], @DefaultState),
         COALESCE(ma.ZipCode, sd.ZipCode),
@@ -368,7 +360,7 @@ BEGIN TRY
         CONVERT(NVARCHAR(200), sd.OwnerName),
         TRY_CONVERT(INT, sd.YearBuilt),
         TRY_CONVERT(INT, sd.DwellingUnits),
-        COALESCE(ma.NormalizedAddress, sd.NormalizedAddress),
+        COALESCE(ma.NormalizedStreetAddress, sd.NormalizedStreetAddress),
         COALESCE(ma.NormalizedFullAddress, sd.NormalizedFullAddress),
         CASE WHEN ma.HasRequiredAddress = 1 AND sd.HasRequiredAddress = 1 THEN 1
              WHEN ma.HasRequiredAddress = 1 OR sd.HasRequiredAddress = 1 THEN 1
@@ -378,29 +370,29 @@ BEGIN TRY
     INNER JOIN #SDAT sd
         ON ma.MasterAddressAccount = sd.SDATAccountNumber
        AND (
-            ma.NormalizedAddress = sd.NormalizedAddress
+            ma.NormalizedStreetAddress = sd.NormalizedStreetAddress
             OR ma.NormalizedFullAddress = sd.NormalizedFullAddress
        );
 
     /* 4b. AddressMaster only — no SDAT match */
     INSERT INTO #Work (
         MasterAddressID, KdatRecordID, MasterAddressAccount, SDATAccountNumber, ParcelID,
-        StreetNumber, StreetName, StreetSuffix, StreetType, UnitNumber,
+        StreetNumber, StreetName, StreetType, Unit,
         City, [State], ZipCode, Latitude, Longitude, PropertyType,
         OwnerName, YearBuilt, DwellingUnits,
-        NormalizedAddress, NormalizedFullAddress, HasRequiredAddress,
+        NormalizedStreetAddress, NormalizedFullAddress, HasRequiredAddress,
         MatchSource, IncomingMatchConfidence, IncomingMatchMethod
     )
     SELECT
         ma.MasterAddressID, NULL, ma.MasterAddressAccount, ma.SDATAccountNumber, ma.ParcelID,
-        ma.StreetNumber, ma.StreetName, ma.StreetSuffix, ma.StreetType, ma.UnitNumber,
+        ma.StreetNumber, ma.StreetName, ma.StreetType, ma.Unit,
         ma.City, ma.[State], ma.ZipCode,
         CAST(NULL AS DECIMAL(10,6)), CAST(NULL AS DECIMAL(10,6)),
         CONVERT(NVARCHAR(50), ma.PropertyType),
         CONVERT(NVARCHAR(200), ma.OwnerName),
         TRY_CONVERT(INT, ma.YearBuilt),
         TRY_CONVERT(INT, ma.DwellingUnits),
-        ma.NormalizedAddress, ma.NormalizedFullAddress, ma.HasRequiredAddress,
+        ma.NormalizedStreetAddress, ma.NormalizedFullAddress, ma.HasRequiredAddress,
         N'ADDRESS_MASTER', N'MEDIUM', N'AddressNormalized'
     FROM #MA ma
     WHERE NOT EXISTS (
@@ -409,7 +401,7 @@ BEGIN TRY
         INNER JOIN #SDAT sd
             ON ma2.MasterAddressAccount = sd.SDATAccountNumber
            AND (
-                ma2.NormalizedAddress = sd.NormalizedAddress
+                ma2.NormalizedStreetAddress = sd.NormalizedStreetAddress
                 OR ma2.NormalizedFullAddress = sd.NormalizedFullAddress
            )
         WHERE ma2.MasterAddressID = ma.MasterAddressID
@@ -418,22 +410,22 @@ BEGIN TRY
     /* 4c. SDAT only — no AddressMaster match */
     INSERT INTO #Work (
         MasterAddressID, KdatRecordID, MasterAddressAccount, SDATAccountNumber, ParcelID,
-        StreetNumber, StreetName, StreetSuffix, StreetType, UnitNumber,
+        StreetNumber, StreetName, StreetType, Unit,
         City, [State], ZipCode, Latitude, Longitude, PropertyType,
         OwnerName, YearBuilt, DwellingUnits,
-        NormalizedAddress, NormalizedFullAddress, HasRequiredAddress,
+        NormalizedStreetAddress, NormalizedFullAddress, HasRequiredAddress,
         MatchSource, IncomingMatchConfidence, IncomingMatchMethod
     )
     SELECT
         NULL, sd.KdatRecordID, sd.MasterAddressAccount, sd.SDATAccountNumber, sd.ParcelID,
-        sd.StreetNumber, sd.StreetName, sd.StreetSuffix, sd.StreetType, sd.UnitNumber,
+        sd.StreetNumber, sd.StreetName, sd.StreetType, sd.Unit,
         sd.City, sd.[State], sd.ZipCode,
         CAST(NULL AS DECIMAL(10,6)), CAST(NULL AS DECIMAL(10,6)),
         CONVERT(NVARCHAR(50), sd.PropertyType),
         CONVERT(NVARCHAR(200), sd.OwnerName),
         TRY_CONVERT(INT, sd.YearBuilt),
         TRY_CONVERT(INT, sd.DwellingUnits),
-        sd.NormalizedAddress, sd.NormalizedFullAddress, sd.HasRequiredAddress,
+        sd.NormalizedStreetAddress, sd.NormalizedFullAddress, sd.HasRequiredAddress,
         N'KDAT', N'MEDIUM', N'AddressNormalized'
     FROM #SDAT sd
     WHERE NOT EXISTS (
@@ -442,7 +434,7 @@ BEGIN TRY
         INNER JOIN #SDAT sd2
             ON ma.MasterAddressAccount = sd2.SDATAccountNumber
            AND (
-                ma.NormalizedAddress = sd2.NormalizedAddress
+                ma.NormalizedStreetAddress = sd2.NormalizedStreetAddress
                 OR ma.NormalizedFullAddress = sd2.NormalizedFullAddress
            )
         WHERE sd2.KdatRecordID = sd.KdatRecordID
@@ -473,9 +465,8 @@ BEGIN TRY
         SELECT
             w.MasterAddressID, w.KdatRecordID, w.MatchSource, w.HasRequiredAddress,
             w.SDATAccountNumber, w.ParcelID,
-            w.StreetNumber, w.StreetName, w.StreetSuffix, w.StreetType, w.UnitNumber,
-            w.City, w.[State], w.ZipCode, w.NormalizedAddress, w.NormalizedFullAddress, 
-            --w.Latitude, w.Longitude,
+            w.StreetNumber, w.StreetName, w.StreetType, w.Unit,
+            w.City, w.[State], w.ZipCode, w.NormalizedStreetAddress, w.NormalizedFullAddress,
             w.PropertyType, w.OwnerName,
             ROW_NUMBER() OVER (
                 PARTITION BY COALESCE(w.SDATAccountNumber, w.ParcelID, w.NormalizedFullAddress)
@@ -499,14 +490,14 @@ BEGIN TRY
         tgt.UpdatedBy         = @RunUser
     WHEN NOT MATCHED AND src.rn = 1 THEN INSERT (
         SDATAccountNumber, ParcelID, PropertyName, Owner,
-        StreetNumber, StreetName, StreetSuffix, StreetType, UnitNumber,
-        City, [State], ZipCode, NormalizedAddress, NormalizedFullAddress,
+        StreetNumber, StreetName, StreetType, Unit,
+        City, [State], ZipCode, NormalizedStreetAddress, NormalizedFullAddress,
         PropertyTypeCode, StatusCode, IsActive,
         CreatedDate, CreatedBy, UpdatedDate, UpdatedBy
     ) VALUES (
         src.SDATAccountNumber, src.ParcelID, NULL, src.OwnerName,
-        src.StreetNumber, src.StreetName, src.StreetSuffix, src.StreetType, src.UnitNumber,
-        src.City, src.[State], src.ZipCode, src.NormalizedAddress, src.NormalizedFullAddress,
+        src.StreetNumber, src.StreetName, src.StreetType, src.Unit,
+        src.City, src.[State], src.ZipCode, src.NormalizedStreetAddress, src.NormalizedFullAddress,
         src.PropertyType, N'ACTIVE', 1,
         @Now, @RunUser, @Now, @RunUser
     );
@@ -559,7 +550,7 @@ BEGIN TRY
        6. WRITE INCOMING SOURCE XREF (AddressMaster / SDAT)
        ======================================================================== */
     INSERT INTO dbo.UPROPERTYRECORDS_XREF (
-        UPropertyRecordsID, SourceSystem, SourceRecordID, SourceEntityType,
+        UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
         MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus,
         IsActive, EffectiveStartDate, CreatedDate, UpdatedDate, CreatedBy
     )
@@ -572,14 +563,14 @@ BEGIN TRY
       AND NOT EXISTS (
           SELECT 1 FROM dbo.UPROPERTYRECORDS_XREF x
           WHERE x.UPropertyRecordsID = m.UPropertyRecordsID
-            AND x.SourceSystem = N'ADDRESS_MASTER'
+            AND x.SourceSystemCode = N'ADDRESS_MASTER'
             AND x.SourceRecordID = CONVERT(VARCHAR(100), m.MasterAddressID)
       );
 
     INSERT INTO @Stats VALUES (N'XREF ADDRESS_MASTER written', @@ROWCOUNT);
 
     INSERT INTO dbo.UPROPERTYRECORDS_XREF (
-        UPropertyRecordsID, SourceSystem, SourceRecordID, SourceEntityType,
+        UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
         MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus,
         IsActive, EffectiveStartDate, CreatedDate, UpdatedDate, CreatedBy
     )
@@ -592,7 +583,7 @@ BEGIN TRY
       AND NOT EXISTS (
           SELECT 1 FROM dbo.UPROPERTYRECORDS_XREF x
           WHERE x.UPropertyRecordsID = m.UPropertyRecordsID
-            AND x.SourceSystem = N'KDAT'
+            AND x.SourceSystemCode = N'KDAT'
             AND x.SourceRecordID = CONVERT(VARCHAR(100), m.KdatRecordID)
       );
 
@@ -606,7 +597,7 @@ BEGIN TRY
 
     CREATE TABLE #ExtMatch (
         UPropertyRecordsID INT NOT NULL,
-        SourceSystem      VARCHAR(30) NOT NULL,
+        SourceSystemCode      VARCHAR(30) NOT NULL,
         SourceRecordID    VARCHAR(100) NOT NULL,
         SourceEntityType  VARCHAR(50) NOT NULL,
         MatchMethodCode   VARCHAR(30) NOT NULL,
@@ -618,7 +609,7 @@ BEGIN TRY
 
     IF OBJECT_ID('tempdb..#ExtAddr') IS NOT NULL DROP TABLE #ExtAddr;
     CREATE TABLE #ExtAddr (
-        SourceSystem   VARCHAR(30)  NOT NULL,
+        SourceSystemCode   VARCHAR(30)  NOT NULL,
         SourceRecordID VARCHAR(100) NOT NULL,
         SourceEntityType VARCHAR(50) NOT NULL,
         TaxOrAccount   NVARCHAR(50) NULL,
@@ -627,7 +618,7 @@ BEGIN TRY
     );
 
     /* Normalize external addresses using same street-type rules */
-    INSERT INTO #ExtAddr (SourceSystem, SourceRecordID, SourceEntityType, TaxOrAccount, NormAddress, NormFullAddress)
+    INSERT INTO #ExtAddr (SourceSystemCode, SourceRecordID, SourceEntityType, TaxOrAccount, NormAddress, NormFullAddress)
     SELECT N'eProperty', CONVERT(VARCHAR(100), ep.PropertyID), N'Property', ep.TaxID,
         dbo.fn_UPR_NormalizeAddressLine(ep.StreetAddress),
         dbo.fn_UPR_NormalizeFullAddressLine(ep.StreetAddress, ep.City, ep.ZipCode)
@@ -654,7 +645,7 @@ BEGIN TRY
 
     INSERT INTO #ExtMatch
     SELECT DISTINCT
-        m.UPropertyRecordsID, ea.SourceSystem, ea.SourceRecordID, ea.SourceEntityType,
+        m.UPropertyRecordsID, ea.SourceSystemCode, ea.SourceRecordID, ea.SourceEntityType,
         CASE
             WHEN m.SDATAccountNumber IS NOT NULL AND m.SDATAccountNumber = ea.TaxOrAccount THEN N'SDATAccount'
             WHEN m.ParcelID IS NOT NULL AND EXISTS (
@@ -670,28 +661,28 @@ BEGIN TRY
             ELSE N'MEDIUM'
         END,
         N'PROCESSED',
-        CONCAT(N'Matched to ', ea.SourceSystem)
+        CONCAT(N'Matched to ', ea.SourceSystemCode)
     FROM #UPRMap m
     INNER JOIN dbo.UPROPERTYRECORDS upr ON upr.UPropertyRecordsID = m.UPropertyRecordsID
     INNER JOIN #ExtAddr ea
         ON (m.SDATAccountNumber IS NOT NULL AND ea.TaxOrAccount IS NOT NULL AND m.SDATAccountNumber = ea.TaxOrAccount)
-        OR ea.NormAddress = upr.NormalizedAddress
+        OR ea.NormAddress = upr.NormalizedStreetAddress
         OR ea.NormFullAddress = upr.NormalizedFullAddress;
 
     INSERT INTO dbo.UPROPERTYRECORDS_XREF (
-        UPropertyRecordsID, SourceSystem, SourceRecordID, SourceEntityType,
+        UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
         MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus,
         IsActive, EffectiveStartDate, Notes, CreatedDate, UpdatedDate, CreatedBy
     )
     SELECT
-        e.UPropertyRecordsID, e.SourceSystem, e.SourceRecordID, e.SourceEntityType,
+        e.UPropertyRecordsID, e.SourceSystemCode, e.SourceRecordID, e.SourceEntityType,
         e.MatchMethodCode, e.MatchResult, e.MatchConfidence, e.ProcessingStatus,
         1, @Now, e.Notes, @Now, @Now, @RunUser
     FROM #ExtMatch e
     WHERE NOT EXISTS (
         SELECT 1 FROM dbo.UPROPERTYRECORDS_XREF x
         WHERE x.UPropertyRecordsID = e.UPropertyRecordsID
-          AND x.SourceSystem = e.SourceSystem
+          AND x.SourceSystemCode = e.SourceSystemCode
           AND x.SourceRecordID = e.SourceRecordID
     );
 
@@ -708,7 +699,7 @@ BEGIN TRY
     SELECT
         m.UPropertyRecordsID,
         w.MatchSource,
-        COALESCE(w.NormalizedFullAddress, w.NormalizedAddress, N'UNKNOWN'),
+        COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress, N'UNKNOWN'),
         w.ParcelID,
         w.SDATAccountNumber,
         N'INSUFFICIENT_DATA',
@@ -830,7 +821,7 @@ BEGIN TRY
 
     INSERT INTO dbo.AuditLog (EntityName, EntityKey, OperationType, ChangedBy, ChangedDate, ChangeSummary)
     SELECT N'UPROPERTYRECORDS_XREF', CONVERT(NVARCHAR(200), UPropertyRecords_XrefID), N'INSERT', @RunUser, @Now,
-           CONCAT(N'XREF: ', SourceSystem, N'/', SourceRecordID, N' ', MatchResult)
+           CONCAT(N'XREF: ', SourceSystemCode, N'/', SourceRecordID, N' ', MatchResult)
     FROM dbo.UPROPERTYRECORDS_XREF WHERE CreatedDate >= @Now;
 
     INSERT INTO dbo.AuditLog (EntityName, EntityKey, OperationType, ChangedBy, ChangedDate, ChangeSummary)
@@ -887,4 +878,3 @@ BEGIN CATCH
     THROW;
 END CATCH;
 GO
-
