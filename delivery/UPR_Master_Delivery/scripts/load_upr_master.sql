@@ -8,7 +8,8 @@
 
   MA Unit held in #Work/#UPRMap only — loaded to dbo.Unit (UPR has no unit column).
   UPR NOT NULL columns per client DDL: SDATAccountNumber, StreetNumber, StreetName,
-  StreetType, City, ZipCode, NormalizedStreetAddress, NormalizedFullAddress, PropertyStatusCode.
+  StreetType, City, ZipCode, NormalizedStreetAddress, NormalizedFullAddress, PropertyStatusCode,
+  PropertyTypeCode (defaults to SF when source is blank).
 ================================================================================
 */
 USE UPRDB_Test;
@@ -176,15 +177,19 @@ BEGIN TRY
         [State]              = @DefaultState,
         ZipCode              = LEFT(NULLIF(LTRIM(RTRIM(ma.ZipCode)), N''), 10),
         PropertyTypeRaw      = NULLIF(UPPER(LTRIM(RTRIM(ma.LUCategory))), N''),
+        /* LUCategory → REF_PROPERTYTYPE.PropertyTypeCode (expand as client adds values) */
         PropertyType         = CONVERT(NVARCHAR(50), CASE UPPER(LTRIM(RTRIM(ma.LUCategory)))
-            WHEN N'CONDOMINIUM'           THEN N'CONDO'
-            WHEN N'MULTI-FAMILY'          THEN N'MULTI'
-            WHEN N'SINGLE FAMILY DETACHED'THEN N'SF'
-            WHEN N'VACANT'                THEN N'LAND'
-            WHEN N'TOWNHOUSE'             THEN N'TH'
-            WHEN N'MIXED USE'             THEN N'MIXED'
-            WHEN N'C'                     THEN N'CONDO'
-            ELSE NULLIF(UPPER(LTRIM(RTRIM(ma.LUCategory))), N'')
+            WHEN N'CONDOMINIUM'            THEN N'CONDO'
+            WHEN N'C'                      THEN N'CONDO'
+            WHEN N'MULTI-FAMILY'           THEN N'MULTI'
+            WHEN N'MULTI FAMILY'           THEN N'MULTI'
+            WHEN N'MULTIFAMILY'            THEN N'MULTI'
+            WHEN N'SINGLE FAMILY DETACHED' THEN N'SF'
+            WHEN N'SINGLE FAMILY ATTACHED' THEN N'SF'
+            WHEN N'VACANT'                 THEN N'LAND'
+            WHEN N'TOWNHOUSE'              THEN N'TH'
+            WHEN N'MIXED USE'              THEN N'MIXED'
+            ELSE N'SF'  /* unmapped LUCategory — default; send distinct values to expand mapping */
         END),
         OwnerName            = CAST(NULL AS NVARCHAR(200)),
         YearBuilt            = CAST(NULL AS INT),
@@ -491,7 +496,8 @@ BEGIN TRY
                     LEFT(COALESCE(NULLIF(LTRIM(RTRIM(w.ZipCode)), N''), N'00000'), 5)
                 )
             ),
-            w.[State], w.PropertyType, w.OwnerName,
+            w.[State], w.OwnerName,
+            EffectivePropertyType = COALESCE(NULLIF(LTRIM(RTRIM(w.PropertyType)), N''), N'SF'),
             ROW_NUMBER() OVER (
                 PARTITION BY COALESCE(
                     NULLIF(LTRIM(RTRIM(w.SDATAccountNumber)), N''),
@@ -514,7 +520,7 @@ BEGIN TRY
         tgt.Owner             = COALESCE(tgt.Owner, src.OwnerName),
         --tgt.Latitude          = COALESCE(tgt.Latitude, src.Latitude),
         --tgt.Longitude         = COALESCE(tgt.Longitude, src.Longitude),
-        tgt.PropertyTypeCode  = COALESCE(tgt.PropertyTypeCode, src.PropertyType),
+        tgt.PropertyTypeCode  = COALESCE(tgt.PropertyTypeCode, src.EffectivePropertyType),
         tgt.UpdatedDate       = @Now,
         tgt.UpdatedBy         = @RunUser
     WHEN NOT MATCHED AND src.rn = 1 THEN INSERT (
@@ -528,7 +534,7 @@ BEGIN TRY
         src.EffectiveStreetNumber, src.EffectiveStreetName, src.EffectiveStreetType,
         src.EffectiveCity, src.[State], src.EffectiveZipCode,
         src.EffectiveNormalizedStreetAddress, src.EffectiveNormalizedFullAddress,
-        src.PropertyType, N'ACTIVE', 1,
+        src.EffectivePropertyType, N'ACTIVE', 1,
         @Now, @RunUser, @Now, @RunUser
     );
 
