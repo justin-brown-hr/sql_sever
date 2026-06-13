@@ -7,7 +7,8 @@
   Reference data, AuditLog).
 
   MA Unit held in #Work/#UPRMap only — loaded to dbo.Unit (UPR has no unit column).
-  LUCategory, PropertyTypeCode, NormalizedStreetAddress, NULL lat/long.
+  UPR NOT NULL columns per client DDL: SDATAccountNumber, StreetNumber, StreetName,
+  StreetType, City, ZipCode, NormalizedStreetAddress, NormalizedFullAddress, PropertyStatusCode.
 ================================================================================
 */
 USE UPRDB_Test;
@@ -457,23 +458,44 @@ BEGIN TRY
         SELECT
             w.MasterAddressID, w.KdatRecordID, w.MatchSource, w.HasRequiredAddress,
             w.SDATAccountNumber, w.ParcelID,
-            /* UPR.SDATAccountNumber is NOT NULL — derive key when source account is missing */
+            /* Client UPROPERTYRECORDS — several columns NOT NULL; coalesce at insert */
             EffectiveSDATAccountNumber = COALESCE(
-                NULLIF(w.SDATAccountNumber, N''),
-                NULLIF(w.ParcelID, N''),
+                NULLIF(LTRIM(RTRIM(w.SDATAccountNumber)), N''),
+                NULLIF(LTRIM(RTRIM(w.ParcelID)), N''),
                 CASE WHEN w.MasterAddressID IS NOT NULL
                      THEN CONCAT(N'MA-', CONVERT(NVARCHAR(20), w.MasterAddressID)) END,
                 CASE WHEN w.KdatRecordID IS NOT NULL
                      THEN CONCAT(N'KDAT-', CONVERT(NVARCHAR(20), w.KdatRecordID)) END,
-                CONCAT(N'ADDR-', CONVERT(NVARCHAR(20), ABS(CHECKSUM(w.NormalizedFullAddress))))
+                CONCAT(N'ADDR-', CONVERT(NVARCHAR(20), ABS(CHECKSUM(
+                    COALESCE(NULLIF(w.NormalizedFullAddress, N''), w.NormalizedStreetAddress, N'UNKNOWN')
+                ))))
             ),
-            w.StreetNumber, w.StreetName, w.StreetType,
-            w.City, w.[State], w.ZipCode, w.NormalizedStreetAddress, w.NormalizedFullAddress,
-            w.PropertyType, w.OwnerName,
+            EffectiveStreetNumber = COALESCE(NULLIF(LTRIM(RTRIM(w.StreetNumber)), N''), N'0'),
+            EffectiveStreetName   = COALESCE(NULLIF(LTRIM(RTRIM(w.StreetName)), N''), N'UNKNOWN'),
+            EffectiveStreetType   = COALESCE(NULLIF(LTRIM(RTRIM(w.StreetType)), N''), N'UNK'),
+            EffectiveCity         = COALESCE(NULLIF(LTRIM(RTRIM(w.City)), N''), N'UNKNOWN'),
+            EffectiveZipCode      = COALESCE(NULLIF(LTRIM(RTRIM(w.ZipCode)), N''), N'00000'),
+            EffectiveNormalizedStreetAddress = COALESCE(
+                NULLIF(LTRIM(RTRIM(w.NormalizedStreetAddress)), N''),
+                CONCAT(
+                    COALESCE(NULLIF(LTRIM(RTRIM(w.StreetNumber)), N''), N'0'), N' ',
+                    COALESCE(NULLIF(LTRIM(RTRIM(w.StreetName)), N''), N'UNKNOWN'), N' ',
+                    COALESCE(NULLIF(LTRIM(RTRIM(w.StreetType)), N''), N'UNK')
+                )
+            ),
+            EffectiveNormalizedFullAddress = COALESCE(
+                NULLIF(LTRIM(RTRIM(w.NormalizedFullAddress)), N''),
+                CONCAT(
+                    COALESCE(NULLIF(LTRIM(RTRIM(w.NormalizedStreetAddress)), N''), N'UNKNOWN'), N' ',
+                    COALESCE(NULLIF(LTRIM(RTRIM(w.City)), N''), N'UNKNOWN'), N' ',
+                    LEFT(COALESCE(NULLIF(LTRIM(RTRIM(w.ZipCode)), N''), N'00000'), 5)
+                )
+            ),
+            w.[State], w.PropertyType, w.OwnerName,
             ROW_NUMBER() OVER (
                 PARTITION BY COALESCE(
-                    NULLIF(w.SDATAccountNumber, N''),
-                    NULLIF(w.ParcelID, N''),
+                    NULLIF(LTRIM(RTRIM(w.SDATAccountNumber)), N''),
+                    NULLIF(LTRIM(RTRIM(w.ParcelID)), N''),
                     w.NormalizedFullAddress
                 )
                 ORDER BY CASE w.MatchSource WHEN N'BOTH' THEN 1 WHEN N'KDAT' THEN 2 ELSE 3 END
@@ -485,7 +507,7 @@ BEGIN TRY
         tgt.SDATAccountNumber = src.EffectiveSDATAccountNumber
         OR (tgt.SDATAccountNumber = src.SDATAccountNumber AND src.SDATAccountNumber IS NOT NULL)
         OR (tgt.ParcelID = src.ParcelID AND src.ParcelID IS NOT NULL)
-        OR (tgt.NormalizedFullAddress = src.NormalizedFullAddress)
+        OR (tgt.NormalizedFullAddress = src.EffectiveNormalizedFullAddress)
     )
     WHEN MATCHED THEN UPDATE SET
         tgt.ParcelID          = COALESCE(tgt.ParcelID, src.ParcelID),
@@ -499,12 +521,13 @@ BEGIN TRY
         SDATAccountNumber, ParcelID, PropertyName, Owner,
         StreetNumber, StreetName, StreetType,
         City, [State], ZipCode, NormalizedStreetAddress, NormalizedFullAddress,
-        PropertyTypeCode, StatusCode, IsActive,
+        PropertyTypeCode, PropertyStatusCode, IsActive,
         CreatedDate, CreatedBy, UpdatedDate, UpdatedBy
     ) VALUES (
         src.EffectiveSDATAccountNumber, src.ParcelID, NULL, src.OwnerName,
-        src.StreetNumber, src.StreetName, src.StreetType,
-        src.City, src.[State], src.ZipCode, src.NormalizedStreetAddress, src.NormalizedFullAddress,
+        src.EffectiveStreetNumber, src.EffectiveStreetName, src.EffectiveStreetType,
+        src.EffectiveCity, src.[State], src.EffectiveZipCode,
+        src.EffectiveNormalizedStreetAddress, src.EffectiveNormalizedFullAddress,
         src.PropertyType, N'ACTIVE', 1,
         @Now, @RunUser, @Now, @RunUser
     );
@@ -556,15 +579,18 @@ BEGIN TRY
     INSERT INTO dbo.UPR_STATUSHISTORY (
         UPropertyRecordsID, SDATAccountNumber, OldStatusCode, NewStatusCode,
         ChangeReason, ParcelID, Owner, StreetNumber, StreetName, StreetType,
-        City, ZipCode, PropertyTypeCode, ChangeSource, ChangedBy, ChangedDate
+        City, ZipCode, PropertyTypeCode, ChangeSource, ChangedBy, ChangedDate,
+        LevelInd, BuildingID, UnitNumber, OwnershipStartDate
     )
     SELECT
         m.UPropertyRecordsID, upr.SDATAccountNumber,
-        NULL, upr.StatusCode,
+        NULL, COALESCE(upr.PropertyStatusCode, N'ACTIVE'),
         N'Initial load - new UPR record',
-        upr.ParcelID, upr.Owner, upr.StreetNumber, upr.StreetName, upr.StreetType,
+        upr.ParcelID, upr.Owner, upr.StreetNumber, upr.StreetName,
+        COALESCE(NULLIF(LTRIM(RTRIM(upr.StreetType)), N''), N'UNK'),
         upr.City, upr.ZipCode, upr.PropertyTypeCode,
-        N'UPR_LOAD', @RunUser, @Now
+        N'UPR_LOAD', @RunUser, @Now,
+        0, 0, N'N/A', @Now  /* property-level snapshot — client table requires these NOT NULL */
     FROM #UPRMap m
     INNER JOIN dbo.UPROPERTYRECORDS upr ON upr.UPropertyRecordsID = m.UPropertyRecordsID
     WHERE m.IsNew = 1;
