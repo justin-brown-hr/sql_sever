@@ -9,7 +9,7 @@
   MA Unit held in #Work/#UPRMap only — loaded to dbo.Unit (UPR has no unit column).
   UPR NOT NULL columns per client DDL: SDATAccountNumber, StreetNumber, StreetName,
   StreetType, City, ZipCode, NormalizedStreetAddress, NormalizedFullAddress, PropertyStatusCode,
-  PropertyTypeCode (defaults to SF when source is blank).
+  PropertyTypeCode: BOTH match → MA LUCategory; no match → default CONDO.
 ================================================================================
 */
 USE UPRDB_Test;
@@ -72,6 +72,7 @@ SET XACT_ABORT ON;
 DECLARE @RunUser NVARCHAR(100) = SUSER_SNAME();
 DECLARE @Now     DATETIME2(0)  = SYSDATETIME();
 DECLARE @DefaultState  CHAR(2)   = N'MD';
+DECLARE @DefaultUnmatchedPropertyType NVARCHAR(10) = N'CONDO';  /* MA-only / SDAT-only default */
 
 /* Processing statistics */
 DECLARE @Stats TABLE (Metric NVARCHAR(100) NOT NULL, Cnt INT NOT NULL);
@@ -354,7 +355,7 @@ BEGIN TRY
         COALESCE(ma.City, sd.City),
         COALESCE(sd.[State], @DefaultState),
         COALESCE(ma.ZipCode, sd.ZipCode),
-        CONVERT(NVARCHAR(50), COALESCE(ma.PropertyType, N'SF')),  /* BOTH match → MA LUCategory */
+        CONVERT(NVARCHAR(50), COALESCE(ma.PropertyType, @DefaultUnmatchedPropertyType)),  /* BOTH → MA LUCategory */
         CONVERT(NVARCHAR(200), sd.OwnerName),
         TRY_CONVERT(INT, sd.YearBuilt),        /* SDAT only — not ma */
         TRY_CONVERT(INT, sd.DwellingUnits),    /* SDAT only — not ma */
@@ -372,7 +373,7 @@ BEGIN TRY
             OR ma.NormalizedFullAddress = sd.NormalizedFullAddress
        );
 
-    /* 4b. AddressMaster only — no SDAT match → PropertyType = SF */
+    /* 4b. AddressMaster only — no SDAT match → default CONDO */
     INSERT INTO #Work (
         MasterAddressID, KdatRecordID, MasterAddressAccount, SDATAccountNumber, ParcelID,
         StreetNumber, StreetName, StreetType, Unit,
@@ -385,7 +386,7 @@ BEGIN TRY
         ma.MasterAddressID, NULL, ma.MasterAddressAccount, ma.SDATAccountNumber, ma.ParcelID,
         ma.StreetNumber, ma.StreetName, ma.StreetType, ma.Unit,
         ma.City, ma.[State], ma.ZipCode,
-        N'SF',  /* MA-only (no SDAT match) → default single family */
+        @DefaultUnmatchedPropertyType,  /* MA-only → default CONDO */
         CONVERT(NVARCHAR(200), ma.OwnerName),
         CAST(NULL AS INT),  /* MA has no YearBuilt */
         CAST(NULL AS INT),  /* MA has no DwellingUnits — use sd in matched/SDAT-only rows */
@@ -404,7 +405,7 @@ BEGIN TRY
         WHERE ma2.MasterAddressID = ma.MasterAddressID
     );
 
-    /* 4c. SDAT only — no AddressMaster match → PropertyType = SF */
+    /* 4c. SDAT only — no AddressMaster match → default CONDO */
     INSERT INTO #Work (
         MasterAddressID, KdatRecordID, MasterAddressAccount, SDATAccountNumber, ParcelID,
         StreetNumber, StreetName, StreetType, Unit,
@@ -418,7 +419,7 @@ BEGIN TRY
         sd.StreetNumber, sd.StreetName, sd.StreetType,
         CAST(NULL AS NVARCHAR(20)),  /* SDAT has no Unit */
         sd.City, sd.[State], sd.ZipCode,
-        N'SF',  /* SDAT-only (no MA match) → default single family */
+        @DefaultUnmatchedPropertyType,  /* SDAT-only → default CONDO */
         CONVERT(NVARCHAR(200), sd.OwnerName),
         TRY_CONVERT(INT, sd.YearBuilt),
         TRY_CONVERT(INT, sd.DwellingUnits),
@@ -506,7 +507,7 @@ BEGIN TRY
                 WHEN N'SF'    THEN N'SF'
                 WHEN N'LAND'  THEN N'LAND'
                 WHEN N'MIXED' THEN N'MIXED'
-                ELSE N'SF'
+                ELSE @DefaultUnmatchedPropertyType
             END,
             ROW_NUMBER() OVER (
                 PARTITION BY COALESCE(
@@ -533,7 +534,7 @@ BEGIN TRY
         tgt.PropertyTypeCode  = COALESCE(
             NULLIF(LTRIM(RTRIM(tgt.PropertyTypeCode)), N''),
             src.EffectivePropertyType,
-            N'SF'
+            @DefaultUnmatchedPropertyType
         ),
         tgt.UpdatedDate       = @Now,
         tgt.UpdatedBy         = @RunUser
