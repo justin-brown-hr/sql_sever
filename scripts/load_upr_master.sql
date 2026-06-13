@@ -177,7 +177,7 @@ BEGIN TRY
         [State]              = @DefaultState,
         ZipCode              = LEFT(NULLIF(LTRIM(RTRIM(ma.ZipCode)), N''), 10),
         PropertyTypeRaw      = NULLIF(UPPER(LTRIM(RTRIM(ma.LUCategory))), N''),
-        /* LUCategory → REF_PROPERTYTYPE.PropertyTypeCode (expand as client adds values) */
+        /* LUCategory → REF_PROPERTYTYPE (client-confirmed distinct values) */
         PropertyType         = CONVERT(NVARCHAR(50), CASE UPPER(LTRIM(RTRIM(ma.LUCategory)))
             WHEN N'CONDOMINIUM'            THEN N'CONDO'
             WHEN N'C'                      THEN N'CONDO'
@@ -189,7 +189,7 @@ BEGIN TRY
             WHEN N'VACANT'                 THEN N'LAND'
             WHEN N'TOWNHOUSE'              THEN N'TH'
             WHEN N'MIXED USE'              THEN N'MIXED'
-            ELSE N'SF'  /* unmapped LUCategory — default; send distinct values to expand mapping */
+            ELSE N'SF'  /* blank or unexpected LUCategory */
         END),
         OwnerName            = CAST(NULL AS NVARCHAR(200)),
         YearBuilt            = CAST(NULL AS INT),
@@ -354,7 +354,7 @@ BEGIN TRY
         COALESCE(ma.City, sd.City),
         COALESCE(sd.[State], @DefaultState),
         COALESCE(ma.ZipCode, sd.ZipCode),
-        CONVERT(NVARCHAR(50), COALESCE(ma.PropertyType, sd.PropertyType)),
+        CONVERT(NVARCHAR(50), COALESCE(ma.PropertyType, sd.PropertyType, N'SF')),
         CONVERT(NVARCHAR(200), sd.OwnerName),
         TRY_CONVERT(INT, sd.YearBuilt),        /* SDAT only — not ma */
         TRY_CONVERT(INT, sd.DwellingUnits),    /* SDAT only — not ma */
@@ -385,7 +385,7 @@ BEGIN TRY
         ma.MasterAddressID, NULL, ma.MasterAddressAccount, ma.SDATAccountNumber, ma.ParcelID,
         ma.StreetNumber, ma.StreetName, ma.StreetType, ma.Unit,
         ma.City, ma.[State], ma.ZipCode,
-        CONVERT(NVARCHAR(50), ma.PropertyType),
+        CONVERT(NVARCHAR(50), COALESCE(ma.PropertyType, N'SF')),
         CONVERT(NVARCHAR(200), ma.OwnerName),
         CAST(NULL AS INT),  /* MA has no YearBuilt */
         CAST(NULL AS INT),  /* MA has no DwellingUnits — use sd in matched/SDAT-only rows */
@@ -418,7 +418,7 @@ BEGIN TRY
         sd.StreetNumber, sd.StreetName, sd.StreetType,
         CAST(NULL AS NVARCHAR(20)),  /* SDAT has no Unit */
         sd.City, sd.[State], sd.ZipCode,
-        CONVERT(NVARCHAR(50), sd.PropertyType),
+        CONVERT(NVARCHAR(50), COALESCE(sd.PropertyType, N'SF')),
         CONVERT(NVARCHAR(200), sd.OwnerName),
         TRY_CONVERT(INT, sd.YearBuilt),
         TRY_CONVERT(INT, sd.DwellingUnits),
@@ -497,7 +497,17 @@ BEGIN TRY
                 )
             ),
             w.[State], w.OwnerName,
-            EffectivePropertyType = COALESCE(NULLIF(LTRIM(RTRIM(w.PropertyType)), N''), N'SF'),
+            /* Must be a valid REF_PROPERTYTYPE code — UPR.PropertyTypeCode is NOT NULL */
+            EffectivePropertyType = CASE UPPER(LTRIM(RTRIM(ISNULL(w.PropertyType, N''))))
+                WHEN N'APT'   THEN N'APT'
+                WHEN N'CONDO' THEN N'CONDO'
+                WHEN N'TH'    THEN N'TH'
+                WHEN N'MULTI' THEN N'MULTI'
+                WHEN N'SF'    THEN N'SF'
+                WHEN N'LAND'  THEN N'LAND'
+                WHEN N'MIXED' THEN N'MIXED'
+                ELSE N'SF'
+            END,
             ROW_NUMBER() OVER (
                 PARTITION BY COALESCE(
                     NULLIF(LTRIM(RTRIM(w.SDATAccountNumber)), N''),
@@ -520,7 +530,11 @@ BEGIN TRY
         tgt.Owner             = COALESCE(tgt.Owner, src.OwnerName),
         --tgt.Latitude          = COALESCE(tgt.Latitude, src.Latitude),
         --tgt.Longitude         = COALESCE(tgt.Longitude, src.Longitude),
-        tgt.PropertyTypeCode  = COALESCE(tgt.PropertyTypeCode, src.EffectivePropertyType),
+        tgt.PropertyTypeCode  = COALESCE(
+            NULLIF(LTRIM(RTRIM(tgt.PropertyTypeCode)), N''),
+            src.EffectivePropertyType,
+            N'SF'
+        ),
         tgt.UpdatedDate       = @Now,
         tgt.UpdatedBy         = @RunUser
     WHEN NOT MATCHED AND src.rn = 1 THEN INSERT (
