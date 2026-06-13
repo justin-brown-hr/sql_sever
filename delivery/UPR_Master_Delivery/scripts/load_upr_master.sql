@@ -9,7 +9,8 @@
   MA Unit held in #Work/#UPRMap only — loaded to dbo.Unit (UPR has no unit column).
   UPR NOT NULL columns per client DDL: SDATAccountNumber, StreetNumber, StreetName,
   StreetType, City, ZipCode, NormalizedStreetAddress, NormalizedFullAddress, PropertyStatusCode,
-  PropertyTypeCode: BOTH match → MA LUCategory; no match → default CONDO.
+  Aligns with docs/ddl.md CHECK: ZipCode #####/#####-####, State 2 uppercase A-Z,
+  PropertyStatusCode ACTIVE|INACTIVE|PENDING|RETIRED. Column NormalizedFulldAddress per DDL.
 ================================================================================
 */
 USE UPRDB_Test;
@@ -52,6 +53,60 @@ BEGIN
 END;
 GO
 
+/* UPR ZipCode CHECK: ##### or #####-#### — strip non-digits, pad/ format */
+CREATE OR ALTER FUNCTION dbo.fn_UPR_NormalizeZipCode (@zip NVARCHAR(20))
+RETURNS NVARCHAR(10)
+AS
+BEGIN
+    DECLARE @raw   NVARCHAR(20) = LTRIM(RTRIM(ISNULL(@zip, N'')));
+    DECLARE @digits NVARCHAR(20) = N'';
+    DECLARE @i     INT = 1;
+
+    WHILE @i <= LEN(@raw)
+    BEGIN
+        IF SUBSTRING(@raw, @i, 1) LIKE N'[0-9]'
+            SET @digits = @digits + SUBSTRING(@raw, @i, 1);
+        SET @i = @i + 1;
+    END;
+
+    IF LEN(@digits) >= 9
+        RETURN LEFT(@digits, 5) + N'-' + SUBSTRING(@digits, 6, 4);
+    IF LEN(@digits) >= 5
+        RETURN LEFT(@digits, 5);
+    IF LEN(@digits) > 0
+        RETURN RIGHT(REPLICATE(N'0', 5) + @digits, 5);
+
+    RETURN N'00000';
+END;
+GO
+
+CREATE OR ALTER FUNCTION dbo.fn_UPR_IsValidZipCode (@zip NVARCHAR(20))
+RETURNS BIT
+AS
+BEGIN
+    DECLARE @n NVARCHAR(10) = dbo.fn_UPR_NormalizeZipCode(@zip);
+    IF @n = N'00000' RETURN 0;
+    IF @n LIKE N'[0-9][0-9][0-9][0-9][0-9]'
+       OR @n LIKE N'[0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9]'
+        RETURN 1;
+    RETURN 0;
+END;
+GO
+
+/* DDL CK_UPropertyRecords_State: LEN=2, uppercase A-Z only */
+CREATE OR ALTER FUNCTION dbo.fn_UPR_NormalizeState (
+    @state NVARCHAR(10), @default CHAR(2)
+)
+RETURNS CHAR(2)
+AS
+BEGIN
+    DECLARE @s CHAR(2) = UPPER(LTRIM(RTRIM(ISNULL(@state, N''))));
+    IF LEN(@s) = 2 AND @s NOT LIKE N'%[^A-Z]%'
+        RETURN @s;
+    RETURN @default;
+END;
+GO
+
 CREATE OR ALTER FUNCTION dbo.fn_UPR_NormalizeFullAddressLine (
     @line NVARCHAR(300), @city NVARCHAR(100), @zip NVARCHAR(10)
 )
@@ -61,7 +116,7 @@ BEGIN
     RETURN LTRIM(RTRIM(CONCAT(
         dbo.fn_UPR_NormalizeAddressLine(@line), N' ',
         UPPER(LTRIM(RTRIM(ISNULL(@city, N'')))), N' ',
-        LEFT(ISNULL(@zip, N''), 5)
+        LEFT(REPLACE(dbo.fn_UPR_NormalizeZipCode(@zip), N'-', N''), 5)
     )));
 END;
 GO
@@ -72,7 +127,7 @@ SET XACT_ABORT ON;
 DECLARE @RunUser NVARCHAR(100) = SUSER_SNAME();
 DECLARE @Now     DATETIME2(0)  = SYSDATETIME();
 DECLARE @DefaultState  CHAR(2)   = N'MD';
-DECLARE @DefaultUnmatchedPropertyType NVARCHAR(10) = N'CONDO';  /* MA-only / SDAT-only default */
+DECLARE @DefaultSdatPropertyType NVARCHAR(10) = N'CONDO';  /* SDAT-only default — MA uses LUCategory */
 
 /* Processing statistics */
 DECLARE @Stats TABLE (Metric NVARCHAR(100) NOT NULL, Cnt INT NOT NULL);
@@ -175,8 +230,8 @@ BEGIN TRY
         END,
         Unit                = NULLIF(LTRIM(RTRIM(ma.Unit)), N''),
         City                 = NULLIF(UPPER(LTRIM(RTRIM(ma.City))), N''),
-        [State]              = @DefaultState,
-        ZipCode              = LEFT(NULLIF(LTRIM(RTRIM(ma.ZipCode)), N''), 10),
+        [State]              = dbo.fn_UPR_NormalizeState(NULL, @DefaultState),
+        ZipCode              = dbo.fn_UPR_NormalizeZipCode(ma.ZipCode),
         PropertyTypeRaw      = NULLIF(UPPER(LTRIM(RTRIM(ma.LUCategory))), N''),
         /* LUCategory → REF_PROPERTYTYPE (client-confirmed distinct values) */
         PropertyType         = CONVERT(NVARCHAR(50), CASE UPPER(LTRIM(RTRIM(ma.LUCategory)))
@@ -215,13 +270,13 @@ BEGIN TRY
                 ELSE ISNULL(UPPER(LTRIM(RTRIM(ma.StreetType))), N'')
             END, N' ',
             ISNULL(UPPER(LTRIM(RTRIM(ma.City))), N''), N' ',
-            LEFT(ISNULL(ma.ZipCode, N''), 5)
+            LEFT(REPLACE(dbo.fn_UPR_NormalizeZipCode(ma.ZipCode), N'-', N''), 5)
         )))),
         HasRequiredAddress   = CASE
             WHEN NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(20), ma.StreetNumber))), N'') IS NULL THEN 0
             WHEN NULLIF(UPPER(LTRIM(RTRIM(ma.StreetName))), N'') IS NULL THEN 0
             WHEN NULLIF(UPPER(LTRIM(RTRIM(ma.City))), N'') IS NULL THEN 0
-            WHEN NULLIF(LTRIM(RTRIM(ma.ZipCode)), N'') IS NULL THEN 0
+            WHEN dbo.fn_UPR_IsValidZipCode(ma.ZipCode) = 0 THEN 0
             ELSE 1
         END
     INTO #MA
@@ -259,11 +314,10 @@ BEGIN TRY
         Unit            = CAST(NULL AS NVARCHAR(20)),  /* SDAT source has no Unit column */
         City                 = NULLIF(UPPER(LTRIM(RTRIM(s.PremisesCity))), N''),
         /* [State] only once — do not add a second [State] line below */
-        [State]              = COALESCE(NULLIF(UPPER(LTRIM(RTRIM(s.PremisesState))), N''), @DefaultState),
-        ZipCode              = LEFT(NULLIF(LTRIM(RTRIM(s.PremisesZipCode)), N''), 10),
+        [State]              = dbo.fn_UPR_NormalizeState(s.PremisesState, @DefaultState),
+        ZipCode              = dbo.fn_UPR_NormalizeZipCode(s.PremisesZipCode),
         PropertyTypeRaw      = CAST(NULL AS NVARCHAR(50)),
-        PropertyType         = CONVERT(NVARCHAR(50),
-            CASE WHEN ISNULL(TRY_CONVERT(INT, s.DwellingUnits), 0) > 1 THEN N'MULTI' ELSE N'SF' END),
+        PropertyType         = N'CONDO',  /* SDAT has no LUCategory — default CONDO at load */
         OwnerName            = NULLIF(LTRIM(RTRIM(CAST(s.Owner AS NVARCHAR(200)))), N''),
         YearBuilt            = TRY_CONVERT(INT, s.YearBuilt),
         DwellingUnits        = TRY_CONVERT(INT, s.DwellingUnits),
@@ -287,13 +341,13 @@ BEGIN TRY
                 ELSE ISNULL(UPPER(LTRIM(RTRIM(s.PremisesStreetType))), N'')
             END, N' ',
             ISNULL(UPPER(LTRIM(RTRIM(s.PremisesCity))), N''), N' ',
-            LEFT(ISNULL(s.PremisesZipCode, N''), 5)
+            LEFT(REPLACE(dbo.fn_UPR_NormalizeZipCode(s.PremisesZipCode), N'-', N''), 5)
         )))),
         HasRequiredAddress   = CASE
             WHEN NULLIF(LTRIM(RTRIM(s.PremisesNumber)), N'') IS NULL THEN 0
             WHEN NULLIF(UPPER(LTRIM(RTRIM(s.PremisesStreetName))), N'') IS NULL THEN 0
             WHEN NULLIF(UPPER(LTRIM(RTRIM(s.PremisesCity))), N'') IS NULL THEN 0
-            WHEN NULLIF(LTRIM(RTRIM(s.PremisesZipCode)), N'') IS NULL THEN 0
+            WHEN dbo.fn_UPR_IsValidZipCode(s.PremisesZipCode) = 0 THEN 0
             ELSE 1
         END
     INTO #SDAT
@@ -355,7 +409,7 @@ BEGIN TRY
         COALESCE(ma.City, sd.City),
         COALESCE(sd.[State], @DefaultState),
         COALESCE(ma.ZipCode, sd.ZipCode),
-        CONVERT(NVARCHAR(50), COALESCE(ma.PropertyType, @DefaultUnmatchedPropertyType)),  /* BOTH → MA LUCategory */
+        CONVERT(NVARCHAR(50), ma.PropertyType),  /* BOTH → MA LUCategory */
         CONVERT(NVARCHAR(200), sd.OwnerName),
         TRY_CONVERT(INT, sd.YearBuilt),        /* SDAT only — not ma */
         TRY_CONVERT(INT, sd.DwellingUnits),    /* SDAT only — not ma */
@@ -373,7 +427,7 @@ BEGIN TRY
             OR ma.NormalizedFullAddress = sd.NormalizedFullAddress
        );
 
-    /* 4b. AddressMaster only — no SDAT match → default CONDO */
+    /* 4b. AddressMaster only — property type from MA LUCategory */
     INSERT INTO #Work (
         MasterAddressID, KdatRecordID, MasterAddressAccount, SDATAccountNumber, ParcelID,
         StreetNumber, StreetName, StreetType, Unit,
@@ -386,7 +440,7 @@ BEGIN TRY
         ma.MasterAddressID, NULL, ma.MasterAddressAccount, ma.SDATAccountNumber, ma.ParcelID,
         ma.StreetNumber, ma.StreetName, ma.StreetType, ma.Unit,
         ma.City, ma.[State], ma.ZipCode,
-        @DefaultUnmatchedPropertyType,  /* MA-only → default CONDO */
+        CONVERT(NVARCHAR(50), ma.PropertyType),  /* MA → LUCategory */
         CONVERT(NVARCHAR(200), ma.OwnerName),
         CAST(NULL AS INT),  /* MA has no YearBuilt */
         CAST(NULL AS INT),  /* MA has no DwellingUnits — use sd in matched/SDAT-only rows */
@@ -419,7 +473,7 @@ BEGIN TRY
         sd.StreetNumber, sd.StreetName, sd.StreetType,
         CAST(NULL AS NVARCHAR(20)),  /* SDAT has no Unit */
         sd.City, sd.[State], sd.ZipCode,
-        @DefaultUnmatchedPropertyType,  /* SDAT-only → default CONDO */
+        @DefaultSdatPropertyType,  /* SDAT-only → default CONDO */
         CONVERT(NVARCHAR(200), sd.OwnerName),
         TRY_CONVERT(INT, sd.YearBuilt),
         TRY_CONVERT(INT, sd.DwellingUnits),
@@ -476,28 +530,29 @@ BEGIN TRY
                     COALESCE(NULLIF(w.NormalizedFullAddress, N''), w.NormalizedStreetAddress, N'UNKNOWN')
                 ))))
             ),
-            EffectiveStreetNumber = COALESCE(NULLIF(LTRIM(RTRIM(w.StreetNumber)), N''), N'0'),
-            EffectiveStreetName   = COALESCE(NULLIF(LTRIM(RTRIM(w.StreetName)), N''), N'UNKNOWN'),
-            EffectiveStreetType   = COALESCE(NULLIF(LTRIM(RTRIM(w.StreetType)), N''), N'UNK'),
-            EffectiveCity         = COALESCE(NULLIF(LTRIM(RTRIM(w.City)), N''), N'UNKNOWN'),
-            EffectiveZipCode      = COALESCE(NULLIF(LTRIM(RTRIM(w.ZipCode)), N''), N'00000'),
-            EffectiveNormalizedStreetAddress = COALESCE(
+            EffectiveStreetNumber = LEFT(COALESCE(NULLIF(LTRIM(RTRIM(w.StreetNumber)), N''), N'0'), 20),
+            EffectiveStreetName   = LEFT(COALESCE(NULLIF(LTRIM(RTRIM(w.StreetName)), N''), N'UNKNOWN'), 100),
+            EffectiveStreetType   = LEFT(COALESCE(NULLIF(LTRIM(RTRIM(w.StreetType)), N''), N'UNK'), 4),
+            EffectiveCity         = LEFT(COALESCE(NULLIF(LTRIM(RTRIM(w.City)), N''), N'UNKNOWN'), 100),
+            EffectiveZipCode      = dbo.fn_UPR_NormalizeZipCode(w.ZipCode),
+            EffectiveState        = dbo.fn_UPR_NormalizeState(w.[State], @DefaultState),
+            EffectiveNormalizedStreetAddress = LEFT(COALESCE(
                 NULLIF(LTRIM(RTRIM(w.NormalizedStreetAddress)), N''),
                 CONCAT(
                     COALESCE(NULLIF(LTRIM(RTRIM(w.StreetNumber)), N''), N'0'), N' ',
                     COALESCE(NULLIF(LTRIM(RTRIM(w.StreetName)), N''), N'UNKNOWN'), N' ',
                     COALESCE(NULLIF(LTRIM(RTRIM(w.StreetType)), N''), N'UNK')
                 )
-            ),
-            EffectiveNormalizedFullAddress = COALESCE(
+            ), 100),
+            EffectiveNormalizedFulldAddress = LEFT(COALESCE(
                 NULLIF(LTRIM(RTRIM(w.NormalizedFullAddress)), N''),
                 CONCAT(
                     COALESCE(NULLIF(LTRIM(RTRIM(w.NormalizedStreetAddress)), N''), N'UNKNOWN'), N' ',
                     COALESCE(NULLIF(LTRIM(RTRIM(w.City)), N''), N'UNKNOWN'), N' ',
-                    LEFT(COALESCE(NULLIF(LTRIM(RTRIM(w.ZipCode)), N''), N'00000'), 5)
+                    LEFT(REPLACE(dbo.fn_UPR_NormalizeZipCode(w.ZipCode), N'-', N''), 5)
                 )
-            ),
-            w.[State], w.OwnerName,
+            ), 100),
+            EffectiveOwnerName    = LEFT(NULLIF(LTRIM(RTRIM(w.OwnerName)), N''), 100),
             /* Must be a valid REF_PROPERTYTYPE code — UPR.PropertyTypeCode is NOT NULL */
             EffectivePropertyType = CASE UPPER(LTRIM(RTRIM(ISNULL(w.PropertyType, N''))))
                 WHEN N'APT'   THEN N'APT'
@@ -507,7 +562,7 @@ BEGIN TRY
                 WHEN N'SF'    THEN N'SF'
                 WHEN N'LAND'  THEN N'LAND'
                 WHEN N'MIXED' THEN N'MIXED'
-                ELSE @DefaultUnmatchedPropertyType
+                ELSE @DefaultSdatPropertyType
             END,
             ROW_NUMBER() OVER (
                 PARTITION BY COALESCE(
@@ -519,36 +574,37 @@ BEGIN TRY
             ) AS rn
         FROM #Work w
         WHERE w.HasRequiredAddress = 1
+          AND dbo.fn_UPR_IsValidZipCode(w.ZipCode) = 1
     ) AS src
     ON (
         tgt.SDATAccountNumber = src.EffectiveSDATAccountNumber
         OR (tgt.SDATAccountNumber = src.SDATAccountNumber AND src.SDATAccountNumber IS NOT NULL)
         OR (tgt.ParcelID = src.ParcelID AND src.ParcelID IS NOT NULL)
-        OR (tgt.NormalizedFullAddress = src.EffectiveNormalizedFullAddress)
+        OR (tgt.NormalizedFulldAddress = src.EffectiveNormalizedFulldAddress)
     )
     WHEN MATCHED THEN UPDATE SET
         tgt.ParcelID          = COALESCE(tgt.ParcelID, src.ParcelID),
-        tgt.Owner             = COALESCE(tgt.Owner, src.OwnerName),
+        tgt.Owner             = LEFT(COALESCE(tgt.Owner, src.EffectiveOwnerName), 100),
         --tgt.Latitude          = COALESCE(tgt.Latitude, src.Latitude),
         --tgt.Longitude         = COALESCE(tgt.Longitude, src.Longitude),
         tgt.PropertyTypeCode  = COALESCE(
             NULLIF(LTRIM(RTRIM(tgt.PropertyTypeCode)), N''),
             src.EffectivePropertyType,
-            @DefaultUnmatchedPropertyType
+            @DefaultSdatPropertyType
         ),
         tgt.UpdatedDate       = @Now,
         tgt.UpdatedBy         = @RunUser
     WHEN NOT MATCHED AND src.rn = 1 THEN INSERT (
         SDATAccountNumber, ParcelID, PropertyName, Owner,
         StreetNumber, StreetName, StreetType,
-        City, [State], ZipCode, NormalizedStreetAddress, NormalizedFullAddress,
+        City, [State], ZipCode, NormalizedStreetAddress, NormalizedFulldAddress,
         PropertyTypeCode, PropertyStatusCode, IsActive,
         CreatedDate, CreatedBy, UpdatedDate, UpdatedBy
     ) VALUES (
-        src.EffectiveSDATAccountNumber, src.ParcelID, NULL, src.OwnerName,
+        src.EffectiveSDATAccountNumber, src.ParcelID, NULL, src.EffectiveOwnerName,
         src.EffectiveStreetNumber, src.EffectiveStreetName, src.EffectiveStreetType,
-        src.EffectiveCity, src.[State], src.EffectiveZipCode,
-        src.EffectiveNormalizedStreetAddress, src.EffectiveNormalizedFullAddress,
+        src.EffectiveCity, src.EffectiveState, src.EffectiveZipCode,
+        src.EffectiveNormalizedStreetAddress, src.EffectiveNormalizedFulldAddress,
         src.EffectivePropertyType, N'ACTIVE', 1,
         @Now, @RunUser, @Now, @RunUser
     );
@@ -577,7 +633,7 @@ BEGIN TRY
               )
            OR (w.SDATAccountNumber IS NOT NULL AND upr.SDATAccountNumber = w.SDATAccountNumber)
            OR (w.ParcelID IS NOT NULL AND upr.ParcelID = w.ParcelID)
-           OR (upr.NormalizedFullAddress = w.NormalizedFullAddress)
+           OR (upr.NormalizedFulldAddress = w.NormalizedFullAddress)
         ORDER BY
             CASE WHEN upr.SDATAccountNumber = COALESCE(
                       NULLIF(w.SDATAccountNumber, N''),
@@ -739,7 +795,7 @@ BEGIN TRY
     INNER JOIN #ExtAddr ea
         ON (m.SDATAccountNumber IS NOT NULL AND ea.TaxOrAccount IS NOT NULL AND m.SDATAccountNumber = ea.TaxOrAccount)
         OR ea.NormAddress = upr.NormalizedStreetAddress
-        OR ea.NormFullAddress = upr.NormalizedFullAddress;
+        OR ea.NormFullAddress = upr.NormalizedFulldAddress;
 
     INSERT INTO dbo.UPROPERTYRECORDS_XREF (
         UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
@@ -846,7 +902,7 @@ BEGIN TRY
         N'MAIN',
         CONCAT(N'Building ', upr.UPropertyRecordsID),
         N'MAIN',
-        upr.NormalizedFullAddress,
+        upr.NormalizedFulldAddress,
         N'ACTIVE', 1, @Now, @Now, @RunUser, @RunUser
     FROM dbo.UPROPERTYRECORDS upr
     INNER JOIN dbo.REF_PROPERTYTYPE pt ON pt.PropertyTypeCode = upr.PropertyTypeCode
