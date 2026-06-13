@@ -332,7 +332,7 @@ BEGIN TRY
         IncomingMatchMethod       NVARCHAR(30)   NOT NULL
     );
 
-    /* 4a. Matched — MA + SDAT same account and address */
+    /* 4a. Matched — MA + SDAT: use MA LUCategory property type */
     INSERT INTO #Work (
         MasterAddressID, KdatRecordID, MasterAddressAccount, SDATAccountNumber, ParcelID,
         StreetNumber, StreetName, StreetType, Unit,
@@ -354,7 +354,7 @@ BEGIN TRY
         COALESCE(ma.City, sd.City),
         COALESCE(sd.[State], @DefaultState),
         COALESCE(ma.ZipCode, sd.ZipCode),
-        CONVERT(NVARCHAR(50), COALESCE(ma.PropertyType, sd.PropertyType, N'SF')),
+        CONVERT(NVARCHAR(50), COALESCE(ma.PropertyType, N'SF')),  /* BOTH match → MA LUCategory */
         CONVERT(NVARCHAR(200), sd.OwnerName),
         TRY_CONVERT(INT, sd.YearBuilt),        /* SDAT only — not ma */
         TRY_CONVERT(INT, sd.DwellingUnits),    /* SDAT only — not ma */
@@ -372,7 +372,7 @@ BEGIN TRY
             OR ma.NormalizedFullAddress = sd.NormalizedFullAddress
        );
 
-    /* 4b. AddressMaster only — no SDAT match */
+    /* 4b. AddressMaster only — no SDAT match → PropertyType = SF */
     INSERT INTO #Work (
         MasterAddressID, KdatRecordID, MasterAddressAccount, SDATAccountNumber, ParcelID,
         StreetNumber, StreetName, StreetType, Unit,
@@ -385,7 +385,7 @@ BEGIN TRY
         ma.MasterAddressID, NULL, ma.MasterAddressAccount, ma.SDATAccountNumber, ma.ParcelID,
         ma.StreetNumber, ma.StreetName, ma.StreetType, ma.Unit,
         ma.City, ma.[State], ma.ZipCode,
-        CONVERT(NVARCHAR(50), COALESCE(ma.PropertyType, N'SF')),
+        N'SF',  /* MA-only (no SDAT match) → default single family */
         CONVERT(NVARCHAR(200), ma.OwnerName),
         CAST(NULL AS INT),  /* MA has no YearBuilt */
         CAST(NULL AS INT),  /* MA has no DwellingUnits — use sd in matched/SDAT-only rows */
@@ -404,7 +404,7 @@ BEGIN TRY
         WHERE ma2.MasterAddressID = ma.MasterAddressID
     );
 
-    /* 4c. SDAT only — no AddressMaster match */
+    /* 4c. SDAT only — no AddressMaster match → PropertyType = SF */
     INSERT INTO #Work (
         MasterAddressID, KdatRecordID, MasterAddressAccount, SDATAccountNumber, ParcelID,
         StreetNumber, StreetName, StreetType, Unit,
@@ -418,7 +418,7 @@ BEGIN TRY
         sd.StreetNumber, sd.StreetName, sd.StreetType,
         CAST(NULL AS NVARCHAR(20)),  /* SDAT has no Unit */
         sd.City, sd.[State], sd.ZipCode,
-        CONVERT(NVARCHAR(50), COALESCE(sd.PropertyType, N'SF')),
+        N'SF',  /* SDAT-only (no MA match) → default single family */
         CONVERT(NVARCHAR(200), sd.OwnerName),
         TRY_CONVERT(INT, sd.YearBuilt),
         TRY_CONVERT(INT, sd.DwellingUnits),
