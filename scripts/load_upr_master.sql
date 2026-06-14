@@ -556,6 +556,17 @@ BEGIN TRY
                 COALESCE(NULLIF(w.NormalizedFullAddress, N''), w.NormalizedStreetAddress, N'UNKNOWN')
             ))))
         ),
+        /* UQ_UPropertyRecords_ParcelID allows only one NULL — synthesize when missing */
+        EffectiveParcelID = COALESCE(
+            NULLIF(LTRIM(RTRIM(w.ParcelID)), N''),
+            CASE WHEN w.MasterAddressID IS NOT NULL
+                 THEN CONCAT(N'MA-P-', CONVERT(NVARCHAR(20), w.MasterAddressID)) END,
+            CASE WHEN w.KdatRecordID IS NOT NULL
+                 THEN CONCAT(N'KDAT-P-', CONVERT(NVARCHAR(20), w.KdatRecordID)) END,
+            CONCAT(N'ADDR-P-', CONVERT(NVARCHAR(20), ABS(CHECKSUM(
+                COALESCE(NULLIF(w.NormalizedFullAddress, N''), w.NormalizedStreetAddress, N'UNKNOWN')
+            ))))
+        ),
         EffectiveStreetNumber = LEFT(NULLIF(LTRIM(RTRIM(w.StreetNumber)), N''), 20),
         EffectiveStreetName   = LEFT(NULLIF(UPPER(LTRIM(RTRIM(w.StreetName))), N''), 100),
         EffectiveStreetType   = LEFT(COALESCE(NULLIF(UPPER(LTRIM(RTRIM(w.StreetType))), N''), N'UNK'), 4),
@@ -588,6 +599,21 @@ BEGIN TRY
                 LEFT(NULLIF(UPPER(LTRIM(RTRIM(w.StreetName))), N''), 100),
                 LEFT(COALESCE(NULLIF(UPPER(LTRIM(RTRIM(w.StreetType))), N''), N'UNK'), 4),
                 dbo.fn_UPR_NormalizeZipCode(w.ZipCode)
+            ORDER BY CASE w.MatchSource WHEN N'BOTH' THEN 1 WHEN N'KDAT' THEN 2 ELSE 3 END,
+                     COALESCE(w.SDATAccountNumber, w.ParcelID, N'')
+        ),
+        ParcelRn = ROW_NUMBER() OVER (
+            PARTITION BY
+                COALESCE(
+                    NULLIF(LTRIM(RTRIM(w.ParcelID)), N''),
+                    CASE WHEN w.MasterAddressID IS NOT NULL
+                         THEN CONCAT(N'MA-P-', CONVERT(NVARCHAR(20), w.MasterAddressID)) END,
+                    CASE WHEN w.KdatRecordID IS NOT NULL
+                         THEN CONCAT(N'KDAT-P-', CONVERT(NVARCHAR(20), w.KdatRecordID)) END,
+                    CONCAT(N'ADDR-P-', CONVERT(NVARCHAR(20), ABS(CHECKSUM(
+                        COALESCE(NULLIF(w.NormalizedFullAddress, N''), w.NormalizedStreetAddress, N'UNKNOWN')
+                    ))))
+                )
             ORDER BY CASE w.MatchSource WHEN N'BOTH' THEN 1 WHEN N'KDAT' THEN 2 ELSE 3 END,
                      COALESCE(w.SDATAccountNumber, w.ParcelID, N'')
         )
@@ -678,6 +704,26 @@ BEGIN TRY
     WHERE c.IsEligibleForUpr = 1
       AND c.AddressRn > 1;
 
+    INSERT INTO #ReviewPending (
+        MasterAddressID, KdatRecordID, MatchSource, NormalizedIncomingAddress,
+        ParcelID, SDATAccountNumber, ReasonForNoMatch,
+        StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber
+    )
+    SELECT
+        w.MasterAddressID, w.KdatRecordID, w.MatchSource,
+        COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress, N'UNKNOWN'),
+        w.ParcelID, w.SDATAccountNumber,
+        N'AMBIGUOUS_CANDIDATES',
+        w.StreetNumber, w.StreetName, w.StreetType, w.ZipCode,
+        c.EffectiveSDATAccountNumber
+    FROM #Work w
+    INNER JOIN #UprCandidate c
+        ON (w.MasterAddressID IS NOT NULL AND c.MasterAddressID = w.MasterAddressID)
+        OR (w.KdatRecordID IS NOT NULL AND c.KdatRecordID = w.KdatRecordID)
+    WHERE c.IsEligibleForUpr = 1
+      AND c.AddressRn = 1
+      AND c.ParcelRn > 1;
+
     MERGE dbo.UPROPERTYRECORDS AS tgt
     USING (
         SELECT
@@ -689,10 +735,12 @@ BEGIN TRY
         FROM #UprCandidate c
         WHERE c.IsEligibleForUpr = 1
           AND c.AddressRn = 1
+          AND c.ParcelRn = 1
     ) AS src
     ON (
         tgt.SDATAccountNumber = src.EffectiveSDATAccountNumber
         OR (tgt.SDATAccountNumber = src.SDATAccountNumber AND src.SDATAccountNumber IS NOT NULL)
+        OR tgt.ParcelID = src.EffectiveParcelID
         OR (tgt.ParcelID = src.ParcelID AND src.ParcelID IS NOT NULL)
         OR (tgt.NormalizedFulldAddress = src.EffectiveNormalizedFulldAddress)
         OR (
@@ -703,7 +751,11 @@ BEGIN TRY
         )
     )
     WHEN MATCHED THEN UPDATE SET
-        tgt.ParcelID          = COALESCE(tgt.ParcelID, src.ParcelID),
+        tgt.ParcelID          = COALESCE(
+            NULLIF(LTRIM(RTRIM(src.ParcelID)), N''),
+            tgt.ParcelID,
+            src.EffectiveParcelID
+        ),
         tgt.Owner             = LEFT(COALESCE(tgt.Owner, src.EffectiveOwnerName), 100),
         --tgt.Latitude          = COALESCE(tgt.Latitude, src.Latitude),
         --tgt.Longitude         = COALESCE(tgt.Longitude, src.Longitude),
@@ -721,7 +773,7 @@ BEGIN TRY
         PropertyTypeCode, PropertyStatusCode, IsActive,
         CreatedDate, CreatedBy, UpdatedDate, UpdatedBy
     ) VALUES (
-        src.EffectiveSDATAccountNumber, src.ParcelID, NULL, src.EffectiveOwnerName,
+        src.EffectiveSDATAccountNumber, src.EffectiveParcelID, NULL, src.EffectiveOwnerName,
         src.EffectiveStreetNumber, src.EffectiveStreetName, src.EffectiveStreetType,
         src.EffectiveCity, src.EffectiveState, src.EffectiveZipCode,
         src.EffectiveNormalizedStreetAddress, src.EffectiveNormalizedFulldAddress,
@@ -748,6 +800,7 @@ BEGIN TRY
         WHERE upr.SDATAccountNumber = c.EffectiveSDATAccountNumber
            OR (w.SDATAccountNumber IS NOT NULL AND upr.SDATAccountNumber = w.SDATAccountNumber)
            OR (w.ParcelID IS NOT NULL AND upr.ParcelID = w.ParcelID)
+           OR upr.ParcelID = c.EffectiveParcelID
            OR (upr.NormalizedFulldAddress = c.EffectiveNormalizedFulldAddress)
            OR (
                 upr.StreetNumber = c.EffectiveStreetNumber
@@ -762,7 +815,8 @@ BEGIN TRY
                  ELSE 4 END
     ) x
     WHERE c.IsEligibleForUpr = 1
-      AND c.AddressRn = 1;
+      AND c.AddressRn = 1
+      AND c.ParcelRn = 1;
 
     INSERT INTO @Stats (Metric, Cnt)
     SELECT N'UPROPERTYRECORDS total', COUNT(*) FROM dbo.UPROPERTYRECORDS;
