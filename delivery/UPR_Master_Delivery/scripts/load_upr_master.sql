@@ -1036,34 +1036,38 @@ BEGIN TRY
     INSERT INTO @Stats VALUES (N'Review_XREF rejected incoming', (SELECT COUNT(*) FROM @ReviewXrefOut));
 
     /* ========================================================================
-       7. MATCH EXTERNAL SYSTEMS: eProperty, CASE, MPDU, MULTIFAMILY
-          Uses street-type normalization so LANE/LN, STREET/ST, etc. match.
+       7. MATCH EXTERNAL SYSTEMS — each checked separately (per client spec)
+          Property (eProperty), CASE, MPDU, Multifamily: one pass each.
+          Match in a system  → XREF row (SourceSystemCode = that system)
+          No match in system → Review_Q row (IncomingSourceSystem = that system)
        ======================================================================== */
     IF OBJECT_ID('tempdb..#ExtMatch') IS NOT NULL DROP TABLE #ExtMatch;
 
     CREATE TABLE #ExtMatch (
         UPropertyRecordsID INT NOT NULL,
-        SourceSystemCode      VARCHAR(30) NOT NULL,
-        SourceRecordID    VARCHAR(100) NOT NULL,
-        SourceEntityType  VARCHAR(50) NOT NULL,
-        MatchMethodCode   VARCHAR(30) NOT NULL,
-        MatchResult       NVARCHAR(30) NOT NULL,
-        MatchConfidence   NVARCHAR(30) NOT NULL,
-        ProcessingStatus  NVARCHAR(50) NOT NULL,
-        Notes             VARCHAR(1000) NULL
+        SourceSystemCode   VARCHAR(30) NOT NULL,
+        SourceRecordID     VARCHAR(100) NOT NULL,
+        SourceEntityType   VARCHAR(50) NOT NULL,
+        MatchMethodCode    VARCHAR(30) NOT NULL,
+        MatchResult        NVARCHAR(30) NOT NULL,
+        MatchConfidence    NVARCHAR(30) NOT NULL,
+        ProcessingStatus   NVARCHAR(50) NOT NULL,
+        Notes              VARCHAR(1000) NULL
     );
 
     IF OBJECT_ID('tempdb..#ExtAddr') IS NOT NULL DROP TABLE #ExtAddr;
     CREATE TABLE #ExtAddr (
         SourceSystemCode   VARCHAR(30)  NOT NULL,
-        SourceRecordID VARCHAR(100) NOT NULL,
-        SourceEntityType VARCHAR(50) NOT NULL,
-        TaxOrAccount   NVARCHAR(50) NULL,
-        NormAddress    NVARCHAR(200) NOT NULL,
-        NormFullAddress NVARCHAR(300) NOT NULL
+        SourceRecordID     VARCHAR(100) NOT NULL,
+        SourceEntityType   VARCHAR(50)  NOT NULL,
+        TaxOrAccount       NVARCHAR(50) NULL,
+        NormAddress        NVARCHAR(200) NOT NULL,
+        NormFullAddress    NVARCHAR(300) NOT NULL
     );
 
-    /* Normalize external addresses using same street-type rules */
+    CREATE CLUSTERED INDEX IX_ExtAddr_System ON #ExtAddr (SourceSystemCode, NormAddress);
+    CREATE NONCLUSTERED INDEX IX_ExtAddr_Full ON #ExtAddr (SourceSystemCode, NormFullAddress);
+
     INSERT INTO #ExtAddr (SourceSystemCode, SourceRecordID, SourceEntityType, TaxOrAccount, NormAddress, NormFullAddress)
     SELECT N'eProperty', CONVERT(VARCHAR(100), ep.PropertyID), N'Property', ep.TaxID,
         dbo.fn_UPR_NormalizeAddressLine(ep.StreetAddress),
@@ -1089,31 +1093,95 @@ BEGIN TRY
     FROM DHCA_MultifamilyLoans.dbo.Address mf
     WHERE mf.DeletedInd = 0;
 
-    INSERT INTO #ExtMatch
+    /* --- 7a. Property (eProperty): account/TaxID or normalized address --- */
+    INSERT INTO #ExtMatch (
+        UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
+        MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus, Notes
+    )
     SELECT DISTINCT
-        m.UPropertyRecordsID, ea.SourceSystemCode, ea.SourceRecordID, ea.SourceEntityType,
+        m.UPropertyRecordsID, N'eProperty', ea.SourceRecordID, ea.SourceEntityType,
         CASE
-            WHEN m.SDATAccountNumber IS NOT NULL AND m.SDATAccountNumber = ea.TaxOrAccount THEN N'SDATAccount'
-            WHEN m.ParcelID IS NOT NULL AND EXISTS (
-                SELECT 1 FROM DHCA_LicensingAndRegistration.dbo.Property ep2
-                WHERE CONVERT(VARCHAR(100), ep2.PropertyID) = ea.SourceRecordID
-                  AND ep2.TaxID = m.ParcelID
-            ) THEN N'ParcelID'
+            WHEN m.SDATAccountNumber IS NOT NULL AND ea.TaxOrAccount IS NOT NULL
+                 AND m.SDATAccountNumber = ea.TaxOrAccount THEN N'SDATAccount'
+            WHEN m.ParcelID IS NOT NULL AND ea.TaxOrAccount IS NOT NULL
+                 AND m.ParcelID = ea.TaxOrAccount THEN N'ParcelID'
             ELSE N'AddressNormalized'
         END,
         N'MATCH',
         CASE
-            WHEN m.SDATAccountNumber IS NOT NULL AND m.SDATAccountNumber = ea.TaxOrAccount THEN N'HIGH'
+            WHEN m.SDATAccountNumber IS NOT NULL AND ea.TaxOrAccount IS NOT NULL
+                 AND m.SDATAccountNumber = ea.TaxOrAccount THEN N'HIGH'
+            WHEN m.ParcelID IS NOT NULL AND ea.TaxOrAccount IS NOT NULL
+                 AND m.ParcelID = ea.TaxOrAccount THEN N'HIGH'
             ELSE N'MEDIUM'
         END,
         N'PROCESSED',
-        CONCAT(N'Matched to ', ea.SourceSystemCode)
+        N'Matched to eProperty'
     FROM #UPRMap m
     INNER JOIN dbo.UPROPERTYRECORDS upr ON upr.UPropertyRecordsID = m.UPropertyRecordsID
     INNER JOIN #ExtAddr ea
-        ON (m.SDATAccountNumber IS NOT NULL AND ea.TaxOrAccount IS NOT NULL AND m.SDATAccountNumber = ea.TaxOrAccount)
-        OR ea.NormAddress = upr.NormalizedStreetAddress
-        OR ea.NormFullAddress = upr.NormalizedFulldAddress;
+        ON ea.SourceSystemCode = N'eProperty'
+       AND (
+            (m.SDATAccountNumber IS NOT NULL AND ea.TaxOrAccount IS NOT NULL AND m.SDATAccountNumber = ea.TaxOrAccount)
+            OR (m.ParcelID IS NOT NULL AND ea.TaxOrAccount IS NOT NULL AND m.ParcelID = ea.TaxOrAccount)
+            OR ea.NormAddress = upr.NormalizedStreetAddress
+            OR ea.NormFullAddress = upr.NormalizedFulldAddress
+       )
+    WHERE m.HasRequiredAddress = 1;
+
+    /* --- 7b. CASE: normalized address only --- */
+    INSERT INTO #ExtMatch (
+        UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
+        MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus, Notes
+    )
+    SELECT DISTINCT
+        m.UPropertyRecordsID, N'CASE', ea.SourceRecordID, ea.SourceEntityType,
+        N'AddressNormalized', N'MATCH', N'MEDIUM', N'PROCESSED', N'Matched to CASE'
+    FROM #UPRMap m
+    INNER JOIN dbo.UPROPERTYRECORDS upr ON upr.UPropertyRecordsID = m.UPropertyRecordsID
+    INNER JOIN #ExtAddr ea
+        ON ea.SourceSystemCode = N'CASE'
+       AND (
+            ea.NormAddress = upr.NormalizedStreetAddress
+            OR ea.NormFullAddress = upr.NormalizedFulldAddress
+       )
+    WHERE m.HasRequiredAddress = 1;
+
+    /* --- 7c. MPDU: normalized address only --- */
+    INSERT INTO #ExtMatch (
+        UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
+        MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus, Notes
+    )
+    SELECT DISTINCT
+        m.UPropertyRecordsID, N'MPDU', ea.SourceRecordID, ea.SourceEntityType,
+        N'AddressNormalized', N'MATCH', N'MEDIUM', N'PROCESSED', N'Matched to MPDU'
+    FROM #UPRMap m
+    INNER JOIN dbo.UPROPERTYRECORDS upr ON upr.UPropertyRecordsID = m.UPropertyRecordsID
+    INNER JOIN #ExtAddr ea
+        ON ea.SourceSystemCode = N'MPDU'
+       AND (
+            ea.NormAddress = upr.NormalizedStreetAddress
+            OR ea.NormFullAddress = upr.NormalizedFulldAddress
+       )
+    WHERE m.HasRequiredAddress = 1;
+
+    /* --- 7d. Multifamily: normalized address only --- */
+    INSERT INTO #ExtMatch (
+        UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
+        MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus, Notes
+    )
+    SELECT DISTINCT
+        m.UPropertyRecordsID, N'MULTIFAMILY', ea.SourceRecordID, ea.SourceEntityType,
+        N'AddressNormalized', N'MATCH', N'MEDIUM', N'PROCESSED', N'Matched to MULTIFAMILY'
+    FROM #UPRMap m
+    INNER JOIN dbo.UPROPERTYRECORDS upr ON upr.UPropertyRecordsID = m.UPropertyRecordsID
+    INNER JOIN #ExtAddr ea
+        ON ea.SourceSystemCode = N'MULTIFAMILY'
+       AND (
+            ea.NormAddress = upr.NormalizedStreetAddress
+            OR ea.NormFullAddress = upr.NormalizedFulldAddress
+       )
+    WHERE m.HasRequiredAddress = 1;
 
     INSERT INTO dbo.UPROPERTYRECORDS_XREF (
         UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
@@ -1135,8 +1203,18 @@ BEGIN TRY
     INSERT INTO @Stats VALUES (N'XREF external systems written', @@ROWCOUNT);
 
     /* ========================================================================
-       8. REVIEW QUEUE - no external match
+       8. REVIEW QUEUE — one row per external system with no address match
        ======================================================================== */
+    IF OBJECT_ID('tempdb..#ExtSystems') IS NOT NULL DROP TABLE #ExtSystems;
+    CREATE TABLE #ExtSystems (
+        SourceSystemCode VARCHAR(30) NOT NULL PRIMARY KEY,
+        DisplayName      NVARCHAR(100) NOT NULL
+    );
+    INSERT INTO #ExtSystems (SourceSystemCode, DisplayName) VALUES
+        (N'eProperty',   N'Property'),
+        (N'CASE',         N'Case'),
+        (N'MPDU',         N'MPDU'),
+        (N'MULTIFAMILY',  N'Multifamily');
 
     INSERT INTO dbo.UPRMATCHREVIEW_Q (
         UPropertyRecords_XrefID, IncomingSourceSystem, NormalizedIncomingAddress,
@@ -1144,18 +1222,19 @@ BEGIN TRY
     )
     SELECT
         xref.UPropertyRecords_XrefID,
-        m.MatchSource,
+        es.DisplayName,
         m.NormalizedFullAddress,
         m.ParcelID,
         m.SDATAccountNumber,
         N'NO_ADDRESS_MATCH',
         N'PENDING_REVIEW'
     FROM #UPRMap m
+    CROSS JOIN #ExtSystems es
     CROSS APPLY (
         SELECT TOP 1 x.UPropertyRecords_XrefID
         FROM dbo.UPROPERTYRECORDS_XREF x
         WHERE x.UPropertyRecordsID = m.UPropertyRecordsID
-          AND x.MatchResult = N'MATCH'
+          AND x.MatchResult IN (N'MATCH', N'REJECTED')
           AND (
                 (m.KdatRecordID IS NOT NULL
                  AND x.SourceSystemCode = N'KDAT'
@@ -1167,14 +1246,19 @@ BEGIN TRY
         ORDER BY CASE x.SourceSystemCode WHEN N'KDAT' THEN 1 ELSE 2 END
     ) xref
     WHERE m.HasRequiredAddress = 1
-      AND NOT EXISTS (SELECT 1 FROM #ExtMatch e WHERE e.UPropertyRecordsID = m.UPropertyRecordsID)
+      AND NOT EXISTS (
+          SELECT 1 FROM #ExtMatch e
+          WHERE e.UPropertyRecordsID = m.UPropertyRecordsID
+            AND e.SourceSystemCode = es.SourceSystemCode
+      )
       AND NOT EXISTS (
           SELECT 1 FROM dbo.UPRMATCHREVIEW_Q q
           WHERE q.UPropertyRecords_XrefID = xref.UPropertyRecords_XrefID
+            AND q.IncomingSourceSystem = es.DisplayName
             AND q.ReasonForNoMatch = N'NO_ADDRESS_MATCH'
       );
 
-    INSERT INTO @Stats VALUES (N'Review_Q no external match', @@ROWCOUNT);
+    INSERT INTO @Stats VALUES (N'Review_Q external no-match (per system)', @@ROWCOUNT);
 
     /* ========================================================================
        9. CONTACT + PROPERTYCONTACT (owner from SDAT)
