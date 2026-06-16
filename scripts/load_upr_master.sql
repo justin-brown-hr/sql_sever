@@ -898,115 +898,110 @@ BEGIN TRY
         ReasonForNoMatch        NVARCHAR(255) NOT NULL
     );
 
-    INSERT INTO dbo.UPROPERTYRECORDS_XREF (
+    IF OBJECT_ID('tempdb..#ReviewXrefStage') IS NOT NULL DROP TABLE #ReviewXrefStage;
+    CREATE TABLE #ReviewXrefStage (
+        MasterAddressID     INT NULL,
+        KdatRecordID        INT NULL,
+        ReasonForNoMatch    NVARCHAR(255) NOT NULL,
+        UPropertyRecordsID  INT NOT NULL,
+        SourceSystemCode    NVARCHAR(30) NOT NULL,
+        SourceRecordID      NVARCHAR(100) NOT NULL,
+        SourceEntityType    NVARCHAR(50) NOT NULL
+    );
+
+    INSERT INTO #ReviewXrefStage (
+        MasterAddressID, KdatRecordID, ReasonForNoMatch,
+        UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType
+    )
+    SELECT
+        rp.MasterAddressID,
+        rp.KdatRecordID,
+        rp.ReasonForNoMatch,
+        anchor.UPropertyRecordsID,
+        CASE WHEN rp.KdatRecordID IS NOT NULL THEN N'KDAT' ELSE N'ADDRESS_MASTER' END,
+        CASE WHEN rp.KdatRecordID IS NOT NULL
+             THEN CONVERT(NVARCHAR(100), rp.KdatRecordID)
+             ELSE CONVERT(NVARCHAR(100), rp.MasterAddressID) END,
+        CASE WHEN rp.KdatRecordID IS NOT NULL THEN N'SDATProperty' ELSE N'MasterAddress' END
+    FROM #ReviewPending rp
+    CROSS APPLY (
+        SELECT TOP 1 x.UPropertyRecordsID
+        FROM (
+            SELECT win_map.UPropertyRecordsID, 1 AS MatchPriority
+            FROM #UprCandidate loser
+            INNER JOIN #UprCandidate winner
+                ON winner.EffectiveStreetNumber = loser.EffectiveStreetNumber
+               AND winner.EffectiveStreetName = loser.EffectiveStreetName
+               AND winner.EffectiveStreetType = loser.EffectiveStreetType
+               AND winner.EffectiveZipCode = loser.EffectiveZipCode
+               AND winner.AddressRn = 1
+               AND winner.IsEligibleForUpr = 1
+            INNER JOIN #UPRMap win_map
+                ON (winner.MasterAddressID IS NOT NULL AND win_map.MasterAddressID = winner.MasterAddressID)
+                OR (winner.KdatRecordID IS NOT NULL AND win_map.KdatRecordID = winner.KdatRecordID)
+            WHERE rp.ReasonForNoMatch = N'AMBIGUOUS_CANDIDATES'
+              AND (
+                    (loser.MasterAddressID IS NOT NULL AND loser.MasterAddressID = rp.MasterAddressID)
+                 OR (loser.KdatRecordID IS NOT NULL AND loser.KdatRecordID = rp.KdatRecordID)
+              )
+              AND loser.MatchSource = rp.MatchSource
+
+            UNION ALL
+
+            SELECT upr.UPropertyRecordsID, 2
+            FROM dbo.UPROPERTYRECORDS upr
+            WHERE upr.SDATAccountNumber = rp.EffectiveSDATAccountNumber
+
+            UNION ALL
+
+            SELECT upr.UPropertyRecordsID, 3
+            FROM dbo.UPROPERTYRECORDS upr
+            WHERE rp.SDATAccountNumber IS NOT NULL
+              AND upr.SDATAccountNumber = rp.SDATAccountNumber
+
+            UNION ALL
+
+            SELECT upr.UPropertyRecordsID, 4
+            FROM dbo.UPROPERTYRECORDS upr
+            WHERE rp.ParcelID IS NOT NULL
+              AND upr.ParcelID = rp.ParcelID
+
+            UNION ALL
+
+            SELECT upr.UPropertyRecordsID, 5
+            FROM dbo.UPROPERTYRECORDS upr
+            WHERE upr.StreetNumber = LEFT(NULLIF(LTRIM(RTRIM(rp.StreetNumber)), N''), 20)
+              AND upr.StreetName = LEFT(NULLIF(UPPER(LTRIM(RTRIM(rp.StreetName))), N''), 100)
+              AND upr.StreetType = LEFT(COALESCE(NULLIF(UPPER(LTRIM(RTRIM(rp.StreetType))), N''), N'UNK'), 4)
+              AND upr.ZipCode = dbo.fn_UPR_NormalizeZipCode(rp.ZipCode)
+        ) x
+        ORDER BY x.MatchPriority
+    ) anchor
+    WHERE anchor.UPropertyRecordsID IS NOT NULL;
+
+    MERGE dbo.UPROPERTYRECORDS_XREF AS tgt
+    USING #ReviewXrefStage AS src
+      ON tgt.UPropertyRecordsID = src.UPropertyRecordsID
+     AND tgt.SourceSystemCode = src.SourceSystemCode
+     AND tgt.SourceRecordID = src.SourceRecordID
+     AND tgt.MatchResult = N'REJECTED'
+    WHEN NOT MATCHED THEN
+      INSERT (
         UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
         MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus,
         IsActive, EffectiveStartDate, Notes, CreatedDate, UpdatedDate, CreatedBy
-    )
+      )
+      VALUES (
+        src.UPropertyRecordsID, src.SourceSystemCode, src.SourceRecordID, src.SourceEntityType,
+        N'AddressNormalized', N'REJECTED', N'NONE', N'PENDING_REVIEW',
+        1, @Now, CONCAT(N'Review: ', src.ReasonForNoMatch), @Now, @Now, @RunUser
+      )
     OUTPUT
-        INSERTED.UPropertyRecords_XrefID,
-        src.MasterAddressID,
-        src.KdatRecordID,
-        src.ReasonForNoMatch
-    INTO @ReviewXrefOut
-    SELECT
-        src.UPropertyRecordsID,
-        src.SourceSystemCode,
-        src.SourceRecordID,
-        src.SourceEntityType,
-        N'AddressNormalized',
-        N'REJECTED',
-        N'NONE',
-        N'PENDING_REVIEW',
-        1,
-        @Now,
-        CONCAT(N'Review: ', src.ReasonForNoMatch),
-        @Now,
-        @Now,
-        @RunUser
-    FROM (
-        SELECT
-            rp.MasterAddressID,
-            rp.KdatRecordID,
-            rp.ReasonForNoMatch,
-            anchor.UPropertyRecordsID,
-            SourceSystemCode = CASE
-                WHEN rp.KdatRecordID IS NOT NULL THEN N'KDAT'
-                ELSE N'ADDRESS_MASTER'
-            END,
-            SourceRecordID = CASE
-                WHEN rp.KdatRecordID IS NOT NULL
-                    THEN CONVERT(VARCHAR(100), rp.KdatRecordID)
-                ELSE CONVERT(VARCHAR(100), rp.MasterAddressID)
-            END,
-            SourceEntityType = CASE
-                WHEN rp.KdatRecordID IS NOT NULL THEN N'SDATProperty'
-                ELSE N'MasterAddress'
-            END
-        FROM #ReviewPending rp
-        CROSS APPLY (
-            SELECT TOP 1 x.UPropertyRecordsID
-            FROM (
-                SELECT win_map.UPropertyRecordsID, 1 AS MatchPriority
-                FROM #UprCandidate loser
-                INNER JOIN #UprCandidate winner
-                    ON winner.EffectiveStreetNumber = loser.EffectiveStreetNumber
-                   AND winner.EffectiveStreetName = loser.EffectiveStreetName
-                   AND winner.EffectiveStreetType = loser.EffectiveStreetType
-                   AND winner.EffectiveZipCode = loser.EffectiveZipCode
-                   AND winner.AddressRn = 1
-                   AND winner.IsEligibleForUpr = 1
-                INNER JOIN #UPRMap win_map
-                    ON (winner.MasterAddressID IS NOT NULL AND win_map.MasterAddressID = winner.MasterAddressID)
-                    OR (winner.KdatRecordID IS NOT NULL AND win_map.KdatRecordID = winner.KdatRecordID)
-                WHERE rp.ReasonForNoMatch = N'AMBIGUOUS_CANDIDATES'
-                  AND (
-                        (loser.MasterAddressID IS NOT NULL AND loser.MasterAddressID = rp.MasterAddressID)
-                     OR (loser.KdatRecordID IS NOT NULL AND loser.KdatRecordID = rp.KdatRecordID)
-                  )
-                  AND loser.MatchSource = rp.MatchSource
-
-                UNION ALL
-
-                SELECT upr.UPropertyRecordsID, 2
-                FROM dbo.UPROPERTYRECORDS upr
-                WHERE upr.SDATAccountNumber = rp.EffectiveSDATAccountNumber
-
-                UNION ALL
-
-                SELECT upr.UPropertyRecordsID, 3
-                FROM dbo.UPROPERTYRECORDS upr
-                WHERE rp.SDATAccountNumber IS NOT NULL
-                  AND upr.SDATAccountNumber = rp.SDATAccountNumber
-
-                UNION ALL
-
-                SELECT upr.UPropertyRecordsID, 4
-                FROM dbo.UPROPERTYRECORDS upr
-                WHERE rp.ParcelID IS NOT NULL
-                  AND upr.ParcelID = rp.ParcelID
-
-                UNION ALL
-
-                SELECT upr.UPropertyRecordsID, 5
-                FROM dbo.UPROPERTYRECORDS upr
-                WHERE upr.StreetNumber = LEFT(NULLIF(LTRIM(RTRIM(rp.StreetNumber)), N''), 20)
-                  AND upr.StreetName = LEFT(NULLIF(UPPER(LTRIM(RTRIM(rp.StreetName))), N''), 100)
-                  AND upr.StreetType = LEFT(COALESCE(NULLIF(UPPER(LTRIM(RTRIM(rp.StreetType))), N''), N'UNK'), 4)
-                  AND upr.ZipCode = dbo.fn_UPR_NormalizeZipCode(rp.ZipCode)
-            ) x
-            ORDER BY x.MatchPriority
-        ) anchor
-        WHERE anchor.UPropertyRecordsID IS NOT NULL
-    ) src
-    WHERE NOT EXISTS (
-        SELECT 1
-        FROM dbo.UPROPERTYRECORDS_XREF x
-        WHERE x.UPropertyRecordsID = src.UPropertyRecordsID
-          AND x.SourceSystemCode = src.SourceSystemCode
-          AND x.SourceRecordID = src.SourceRecordID
-          AND x.MatchResult = N'REJECTED'
-    );
+      INSERTED.UPropertyRecords_XrefID,
+      src.MasterAddressID,
+      src.KdatRecordID,
+      src.ReasonForNoMatch
+    INTO @ReviewXrefOut;
 
     INSERT INTO dbo.UPRMATCHREVIEW_Q (
         UPropertyRecords_XrefID, IncomingSourceSystem, NormalizedIncomingAddress,
