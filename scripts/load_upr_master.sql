@@ -863,58 +863,53 @@ BEGIN TRY
 
     /* ========================================================================
        6. WRITE INCOMING SOURCE XREF (AddressMaster / SDAT)
+       Skip when the XREF row already exists (safe to re-run).
        ======================================================================== */
-    MERGE dbo.UPROPERTYRECORDS_XREF AS tgt
-    USING (
-        SELECT DISTINCT
-            m.UPropertyRecordsID,
-            SourceSystemCode     = N'ADDRESS_MASTER',
-            SourceRecordID       = CONVERT(NVARCHAR(100), m.MasterAddressID),
-            SourceEntityType     = N'MasterAddress'
-        FROM #UPRMap m
-        WHERE m.MasterAddressID IS NOT NULL
-    ) AS src
-    ON tgt.UPropertyRecordsID = src.UPropertyRecordsID
-   AND tgt.SourceSystemCode = src.SourceSystemCode
-   AND tgt.SourceRecordID = src.SourceRecordID
-    WHEN NOT MATCHED THEN
-        INSERT (
-            UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
-            MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus,
-            IsActive, EffectiveStartDate, CreatedDate, UpdatedDate, CreatedBy
-        )
-        VALUES (
-            src.UPropertyRecordsID, src.SourceSystemCode, src.SourceRecordID, src.SourceEntityType,
-            N'AddressNormalized', N'MATCH', N'HIGH', N'PROCESSED',
-            1, @Now, @Now, @Now, @RunUser
-        );
+    INSERT INTO dbo.UPROPERTYRECORDS_XREF (
+        UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
+        MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus,
+        IsActive, EffectiveStartDate, CreatedDate, UpdatedDate, CreatedBy
+    )
+    SELECT DISTINCT
+        m.UPropertyRecordsID,
+        N'ADDRESS_MASTER',
+        CONVERT(NVARCHAR(100), m.MasterAddressID),
+        N'MasterAddress',
+        N'AddressNormalized', N'MATCH', N'HIGH', N'PROCESSED',
+        1, @Now, @Now, @Now, @RunUser
+    FROM #UPRMap m
+    WHERE m.MasterAddressID IS NOT NULL
+      AND NOT EXISTS (
+          SELECT 1
+          FROM dbo.UPROPERTYRECORDS_XREF x
+          WHERE x.UPropertyRecordsID = m.UPropertyRecordsID
+            AND x.SourceSystemCode = N'ADDRESS_MASTER'
+            AND x.SourceRecordID = CONVERT(NVARCHAR(100), m.MasterAddressID)
+      );
 
     INSERT INTO @Stats VALUES (N'XREF ADDRESS_MASTER written', @@ROWCOUNT);
 
-    MERGE dbo.UPROPERTYRECORDS_XREF AS tgt
-    USING (
-        SELECT DISTINCT
-            m.UPropertyRecordsID,
-            SourceSystemCode     = N'KDAT',
-            SourceRecordID       = CONVERT(NVARCHAR(100), m.KdatRecordID),
-            SourceEntityType     = N'SDATProperty'
-        FROM #UPRMap m
-        WHERE m.KdatRecordID IS NOT NULL
-    ) AS src
-    ON tgt.UPropertyRecordsID = src.UPropertyRecordsID
-   AND tgt.SourceSystemCode = src.SourceSystemCode
-   AND tgt.SourceRecordID = src.SourceRecordID
-    WHEN NOT MATCHED THEN
-        INSERT (
-            UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
-            MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus,
-            IsActive, EffectiveStartDate, CreatedDate, UpdatedDate, CreatedBy
-        )
-        VALUES (
-            src.UPropertyRecordsID, src.SourceSystemCode, src.SourceRecordID, src.SourceEntityType,
-            N'AddressNormalized', N'MATCH', N'HIGH', N'PROCESSED',
-            1, @Now, @Now, @Now, @RunUser
-        );
+    INSERT INTO dbo.UPROPERTYRECORDS_XREF (
+        UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
+        MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus,
+        IsActive, EffectiveStartDate, CreatedDate, UpdatedDate, CreatedBy
+    )
+    SELECT DISTINCT
+        m.UPropertyRecordsID,
+        N'KDAT',
+        CONVERT(NVARCHAR(100), m.KdatRecordID),
+        N'SDATProperty',
+        N'AddressNormalized', N'MATCH', N'HIGH', N'PROCESSED',
+        1, @Now, @Now, @Now, @RunUser
+    FROM #UPRMap m
+    WHERE m.KdatRecordID IS NOT NULL
+      AND NOT EXISTS (
+          SELECT 1
+          FROM dbo.UPROPERTYRECORDS_XREF x
+          WHERE x.UPropertyRecordsID = m.UPropertyRecordsID
+            AND x.SourceSystemCode = N'KDAT'
+            AND x.SourceRecordID = CONVERT(NVARCHAR(100), m.KdatRecordID)
+      );
 
     INSERT INTO @Stats VALUES (N'XREF KDAT written', @@ROWCOUNT);
 
@@ -1011,42 +1006,66 @@ BEGIN TRY
     ) anchor
     WHERE anchor.UPropertyRecordsID IS NOT NULL;
 
-    MERGE dbo.UPROPERTYRECORDS_XREF AS tgt
-    USING (
+    IF OBJECT_ID('tempdb..#ReviewXrefStageDeduped') IS NOT NULL DROP TABLE #ReviewXrefStageDeduped;
+
+    SELECT
+        MasterAddressID, KdatRecordID, ReasonForNoMatch,
+        UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType
+    INTO #ReviewXrefStageDeduped
+    FROM (
         SELECT
-            MasterAddressID, KdatRecordID, ReasonForNoMatch,
-            UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType
-        FROM (
-            SELECT
-                s.*,
-                ROW_NUMBER() OVER (
-                    PARTITION BY s.UPropertyRecordsID, s.SourceSystemCode, s.SourceRecordID
-                    ORDER BY s.ReasonForNoMatch
-                ) AS StageRn
-            FROM #ReviewXrefStage s
-        ) ranked
-        WHERE StageRn = 1
-    ) AS src
-      ON tgt.UPropertyRecordsID = src.UPropertyRecordsID
-     AND tgt.SourceSystemCode = src.SourceSystemCode
-     AND tgt.SourceRecordID = src.SourceRecordID
-    WHEN NOT MATCHED THEN
-      INSERT (
+            s.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY s.UPropertyRecordsID, s.SourceSystemCode, s.SourceRecordID
+                ORDER BY s.ReasonForNoMatch
+            ) AS StageRn
+        FROM #ReviewXrefStage s
+    ) ranked
+    WHERE StageRn = 1;
+
+    DECLARE @ReviewXrefInserted TABLE (
+        UPropertyRecords_XrefID INT NOT NULL,
+        UPropertyRecordsID      INT NOT NULL,
+        SourceSystemCode        NVARCHAR(30) NOT NULL,
+        SourceRecordID          NVARCHAR(100) NOT NULL
+    );
+
+    INSERT INTO dbo.UPROPERTYRECORDS_XREF (
         UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
         MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus,
         IsActive, EffectiveStartDate, Notes, CreatedDate, UpdatedDate, CreatedBy
-      )
-      VALUES (
+    )
+    OUTPUT
+        INSERTED.UPropertyRecords_XrefID,
+        INSERTED.UPropertyRecordsID,
+        INSERTED.SourceSystemCode,
+        INSERTED.SourceRecordID
+    INTO @ReviewXrefInserted
+    SELECT
         src.UPropertyRecordsID, src.SourceSystemCode, src.SourceRecordID, src.SourceEntityType,
         N'AddressNormalized', N'REJECTED', N'NONE', N'PENDING_REVIEW',
         1, @Now, CONCAT(N'Review: ', src.ReasonForNoMatch), @Now, @Now, @RunUser
-      )
-    OUTPUT
-      INSERTED.UPropertyRecords_XrefID,
-      src.MasterAddressID,
-      src.KdatRecordID,
-      src.ReasonForNoMatch
-    INTO @ReviewXrefOut;
+    FROM #ReviewXrefStageDeduped src
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM dbo.UPROPERTYRECORDS_XREF x
+        WHERE x.UPropertyRecordsID = src.UPropertyRecordsID
+          AND x.SourceSystemCode = src.SourceSystemCode
+          AND x.SourceRecordID = src.SourceRecordID
+    );
+
+    INSERT INTO @ReviewXrefOut (
+        UPropertyRecords_XrefID, MasterAddressID, KdatRecordID, ReasonForNoMatch
+    )
+    SELECT
+        i.UPropertyRecords_XrefID, s.MasterAddressID, s.KdatRecordID, s.ReasonForNoMatch
+    FROM @ReviewXrefInserted i
+    INNER JOIN #ReviewXrefStageDeduped s
+        ON s.UPropertyRecordsID = i.UPropertyRecordsID
+       AND s.SourceSystemCode = i.SourceSystemCode
+       AND s.SourceRecordID = i.SourceRecordID;
+
+    DROP TABLE #ReviewXrefStageDeduped;
 
     INSERT INTO dbo.UPRMATCHREVIEW_Q (
         UPropertyRecords_XrefID, IncomingSourceSystem, NormalizedIncomingAddress,
@@ -1273,21 +1292,23 @@ BEGIN TRY
 
     DROP TABLE #ExtMatchDeduped;
 
-    MERGE dbo.UPROPERTYRECORDS_XREF AS tgt
-    USING #ExtMatch AS src
-    ON tgt.UPropertyRecordsID = src.UPropertyRecordsID
-   AND tgt.SourceSystemCode = src.SourceSystemCode
-    WHEN NOT MATCHED THEN
-        INSERT (
-            UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
-            MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus,
-            IsActive, EffectiveStartDate, Notes, CreatedDate, UpdatedDate, CreatedBy
-        )
-        VALUES (
-            src.UPropertyRecordsID, src.SourceSystemCode, src.SourceRecordID, src.SourceEntityType,
-            src.MatchMethodCode, src.MatchResult, src.MatchConfidence, src.ProcessingStatus,
-            1, @Now, src.Notes, @Now, @Now, @RunUser
-        );
+    /* One XREF per property per external system — skip if link already exists */
+    INSERT INTO dbo.UPROPERTYRECORDS_XREF (
+        UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
+        MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus,
+        IsActive, EffectiveStartDate, Notes, CreatedDate, UpdatedDate, CreatedBy
+    )
+    SELECT
+        e.UPropertyRecordsID, e.SourceSystemCode, e.SourceRecordID, e.SourceEntityType,
+        e.MatchMethodCode, e.MatchResult, e.MatchConfidence, e.ProcessingStatus,
+        1, @Now, e.Notes, @Now, @Now, @RunUser
+    FROM #ExtMatch e
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM dbo.UPROPERTYRECORDS_XREF x
+        WHERE x.UPropertyRecordsID = e.UPropertyRecordsID
+          AND x.SourceSystemCode = e.SourceSystemCode
+    );
 
     INSERT INTO @Stats VALUES (N'XREF external systems written', @@ROWCOUNT);
 
