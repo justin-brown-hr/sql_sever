@@ -1512,27 +1512,49 @@ BEGIN TRY
 
     INSERT INTO @Stats VALUES (N'Buildings created', @@ROWCOUNT);
 
+    /* UQ_Unit_UPropertyRecords_UnitNumber: (UPropertyRecordsID, UnitNumber) — dedupe + NOT EXISTS */
+    ;WITH UnitSrc AS (
+        SELECT
+            upr.UPropertyRecordsID,
+            b.BuildingID,
+            UnitNumber = COALESCE(NULLIF(LTRIM(RTRIM(m.Unit)), N''), N'U1'),
+            upr.SDATAccountNumber,
+            UnitTypeCode = CASE upr.PropertyTypeCode WHEN N'CONDO' THEN N'COND' ELSE N'APT' END,
+            ROW_NUMBER() OVER (
+                PARTITION BY
+                    upr.UPropertyRecordsID,
+                    COALESCE(NULLIF(LTRIM(RTRIM(m.Unit)), N''), N'U1')
+                ORDER BY
+                    CASE WHEN NULLIF(LTRIM(RTRIM(m.Unit)), N'') IS NOT NULL THEN 0 ELSE 1 END,
+                    CASE m.MatchSource WHEN N'BOTH' THEN 1 WHEN N'ADDRESS_MASTER' THEN 2 ELSE 3 END,
+                    m.WorkKey
+            ) AS UnitRn
+        FROM dbo.UPROPERTYRECORDS upr
+        INNER JOIN #UPRMap m ON m.UPropertyRecordsID = upr.UPropertyRecordsID
+        INNER JOIN dbo.Building b
+            ON b.UPropertyRecordsID = upr.UPropertyRecordsID AND b.BuildingCode = N'MAIN'
+        INNER JOIN dbo.REF_PROPERTYTYPE pt ON pt.PropertyTypeCode = upr.PropertyTypeCode
+        WHERE upr.PropertyTypeCode IN (N'CONDO', N'APT')
+          AND pt.AllowsBuildings = 1 AND pt.AllowsUnits = 1
+    )
     INSERT INTO dbo.Unit (
         UPropertyRecordsID, BuildingID, UnitNumber, SDATAccountNumber,
         UnitTypeCode, UnitStatusCode, IsMPDU, IsActive, CreatedDate, UpdatedDate
     )
     SELECT
-        upr.UPropertyRecordsID,
-        b.BuildingID,
-        COALESCE(NULLIF(m.Unit, N''), N'U1'),  /* MA.Unit → dbo.Unit; UPR has no unit column */
-        upr.SDATAccountNumber,
-        CASE upr.PropertyTypeCode WHEN N'CONDO' THEN N'COND' ELSE N'APT' END,
+        s.UPropertyRecordsID,
+        s.BuildingID,
+        s.UnitNumber,
+        s.SDATAccountNumber,
+        s.UnitTypeCode,
         N'ACTIVE', 0, 1, @Now, @Now
-    FROM dbo.UPROPERTYRECORDS upr
-    INNER JOIN #UPRMap m ON m.UPropertyRecordsID = upr.UPropertyRecordsID
-    INNER JOIN dbo.Building b ON b.UPropertyRecordsID = upr.UPropertyRecordsID AND b.BuildingCode = N'MAIN'
-    INNER JOIN dbo.REF_PROPERTYTYPE pt ON pt.PropertyTypeCode = upr.PropertyTypeCode
-    WHERE upr.PropertyTypeCode IN (N'CONDO', N'APT')
-      AND pt.AllowsBuildings = 1 AND pt.AllowsUnits = 1
+    FROM UnitSrc s
+    WHERE s.UnitRn = 1
       AND NOT EXISTS (
-          SELECT 1 FROM dbo.Unit u
-          WHERE u.UPropertyRecordsID = upr.UPropertyRecordsID
-            AND u.BuildingID = b.BuildingID
+          SELECT 1
+          FROM dbo.Unit u
+          WHERE u.UPropertyRecordsID = s.UPropertyRecordsID
+            AND u.UnitNumber = s.UnitNumber
       );
 
     INSERT INTO @Stats VALUES (N'Units created', @@ROWCOUNT);
