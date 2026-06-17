@@ -1178,6 +1178,55 @@ BEGIN TRY
        )
     WHERE m.HasRequiredAddress = 1;
 
+    /* UX_UPropertyRecords_XREF: one row per (UPR, source system, external record).
+       Same property can match one external row by account AND address in one batch. */
+    IF OBJECT_ID('tempdb..#ExtMatchDeduped') IS NOT NULL DROP TABLE #ExtMatchDeduped;
+
+    SELECT
+        UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
+        MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus, Notes
+    INTO #ExtMatchDeduped
+    FROM (
+        SELECT
+            e.*,
+            ROW_NUMBER() OVER (
+                PARTITION BY e.UPropertyRecordsID, e.SourceSystemCode, e.SourceRecordID
+                ORDER BY
+                    CASE e.MatchMethodCode
+                        WHEN N'SDATAccount' THEN 1
+                        WHEN N'ParcelID' THEN 2
+                        WHEN N'AddressNormalized' THEN 3
+                        ELSE 4
+                    END,
+                    CASE e.MatchConfidence
+                        WHEN N'HIGH' THEN 1
+                        WHEN N'MEDIUM' THEN 2
+                        WHEN N'LOW' THEN 3
+                        ELSE 4
+                    END
+            ) AS MatchRn
+        FROM #ExtMatch e
+    ) ranked
+    WHERE MatchRn = 1;
+
+    INSERT INTO @Stats VALUES (
+        N'ExtMatch duplicates collapsed',
+        (SELECT COUNT(*) FROM #ExtMatch) - (SELECT COUNT(*) FROM #ExtMatchDeduped)
+    );
+
+    DELETE FROM #ExtMatch;
+
+    INSERT INTO #ExtMatch (
+        UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
+        MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus, Notes
+    )
+    SELECT
+        UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
+        MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus, Notes
+    FROM #ExtMatchDeduped;
+
+    DROP TABLE #ExtMatchDeduped;
+
     INSERT INTO dbo.UPROPERTYRECORDS_XREF (
         UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
         MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus,
