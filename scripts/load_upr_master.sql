@@ -12,9 +12,14 @@
   Aligns with docs/ddl.md CHECK: ZipCode #####/#####-####, State 2 uppercase A-Z,
   PropertyStatusCode ACTIVE|INACTIVE|PENDING|RETIRED. Column NormalizedFulldAddress per DDL.
 
-  DHCA SOURCE DATABASES (client standard — edit names below if needed):
-    DHCA_Internal, DHCA_LicensingAndRegistration, DHCA_OLTA, DHCA_MPDU, DHCA_MultifamilyLoans
-  Cross-database reads use dynamic SQL (no synonym setup, no SSMS red underlines).
+  DHCA SOURCE DATA (client standard — three-part names):
+    DHCA_Internal.dbo.MasterAddress
+    DHCA_Internal.dbo.RealPropertyTaxInformation
+    DHCA_LicensingAndRegistration.dbo.Property
+    DHCA_OLTA.dbo.[Case]
+    DHCA_MPDU.dbo.Development
+    DHCA_MultifamilyLoans.dbo.Address
+  Requires VPN + SELECT permission on DHCA databases (unchanged from production practice).
 ================================================================================
 */
 USE UPRDB_Test;
@@ -186,14 +191,6 @@ DECLARE @BatchEndTime DATETIME2(0);
 DECLARE @UprCountBefore INT = 0;
 DECLARE @UprMergeRowsAffected INT = 0;
 
-/* DHCA source database names (client standard) */
-DECLARE @DbInternal    SYSNAME = N'DHCA_Internal';
-DECLARE @DbLicensing   SYSNAME = N'DHCA_LicensingAndRegistration';
-DECLARE @DbOLTA        SYSNAME = N'DHCA_OLTA';
-DECLARE @DbMPDU        SYSNAME = N'DHCA_MPDU';
-DECLARE @DbMultifamily SYSNAME = N'DHCA_MultifamilyLoans';
-DECLARE @Sql           NVARCHAR(MAX);
-
 BEGIN TRY
     BEGIN TRANSACTION;
 
@@ -267,34 +264,7 @@ BEGIN TRY
     /* ========================================================================
        2. NORMALIZE AddressMaster  
        ======================================================================== */
-    IF OBJECT_ID('tempdb..#MA_Raw') IS NOT NULL DROP TABLE #MA_Raw;
     IF OBJECT_ID('tempdb..#MA') IS NOT NULL DROP TABLE #MA;
-
-    CREATE TABLE #MA_Raw (
-        MasterAddressID INT           NOT NULL,
-        Account         NCHAR(8)      NULL,
-        ParcelNumber    NCHAR(3)      NULL,
-        StreetNumber    INT           NULL,
-        StreetName      NVARCHAR(22)  NULL,
-        StreetType      NCHAR(4)      NULL,
-        Unit            NCHAR(6)      NULL,
-        City            NVARCHAR(22)  NULL,
-        ZipCode         NCHAR(10)     NULL,
-        LUCategory      NVARCHAR(35)  NULL,
-        XCoordinate     INT           NULL,
-        YCoordinate     INT           NULL
-    );
-
-    SET @Sql = N'
-    INSERT INTO #MA_Raw (
-        MasterAddressID, Account, ParcelNumber, StreetNumber, StreetName, StreetType,
-        Unit, City, ZipCode, LUCategory, XCoordinate, YCoordinate
-    )
-    SELECT
-        MasterAddressID, Account, ParcelNumber, StreetNumber, StreetName, StreetType,
-        Unit, City, ZipCode, LUCategory, XCoordinate, YCoordinate
-    FROM ' + QUOTENAME(@DbInternal) + N'.dbo.MasterAddress';
-    EXEC sys.sp_executesql @Sql;
 
     SELECT
         ma.MasterAddressID,
@@ -371,41 +341,14 @@ BEGIN TRY
             ELSE 1
         END
     INTO #MA
-    FROM #MA_Raw ma;
+    FROM DHCA_Internal.dbo.MasterAddress ma;
 
     SET @MasterAddressRead = (SELECT COUNT(*) FROM #MA);
 
     /* ========================================================================
        3. NORMALIZE SDAT  
        ======================================================================== */
-    IF OBJECT_ID('tempdb..#SDAT_Raw') IS NOT NULL DROP TABLE #SDAT_Raw;
     IF OBJECT_ID('tempdb..#SDAT') IS NOT NULL DROP TABLE #SDAT;
-
-    CREATE TABLE #SDAT_Raw (
-        RealPropertyTaxInformationID INT           NOT NULL,
-        AccountNumber                NVARCHAR(50)  NULL,
-        Parcel                       NVARCHAR(50)  NULL,
-        PremisesNumber               NVARCHAR(20)  NULL,
-        PremisesStreetName           NVARCHAR(100) NULL,
-        PremisesStreetType           NVARCHAR(10)  NULL,
-        PremisesCity                 NVARCHAR(100) NULL,
-        PremisesState                NVARCHAR(10)  NULL,
-        PremisesZipCode              NVARCHAR(20)  NULL,
-        Owner                        NVARCHAR(200) NULL,
-        YearBuilt                    NVARCHAR(20)  NULL,
-        DwellingUnits                NVARCHAR(20)  NULL
-    );
-
-    SET @Sql = N'
-    INSERT INTO #SDAT_Raw (
-        RealPropertyTaxInformationID, AccountNumber, Parcel, PremisesNumber, PremisesStreetName,
-        PremisesStreetType, PremisesCity, PremisesState, PremisesZipCode, Owner, YearBuilt, DwellingUnits
-    )
-    SELECT
-        RealPropertyTaxInformationID, AccountNumber, Parcel, PremisesNumber, PremisesStreetName,
-        PremisesStreetType, PremisesCity, PremisesState, PremisesZipCode, Owner, YearBuilt, DwellingUnits
-    FROM ' + QUOTENAME(@DbInternal) + N'.dbo.RealPropertyTaxInformation';
-    EXEC sys.sp_executesql @Sql;
 
     SELECT
         KdatRecordID         = TRY_CONVERT(INT, s.RealPropertyTaxInformationID),
@@ -470,7 +413,7 @@ BEGIN TRY
             ELSE 1
         END
     INTO #SDAT
-    FROM #SDAT_Raw s;
+    FROM DHCA_Internal.dbo.RealPropertyTaxInformation s;
 
     SET @SDATRead = (SELECT COUNT(*) FROM #SDAT);
 
@@ -1287,38 +1230,30 @@ BEGIN TRY
     CREATE CLUSTERED INDEX IX_ExtAddr_System ON #ExtAddr (SourceSystemCode, NormAddress);
     CREATE NONCLUSTERED INDEX IX_ExtAddr_Full ON #ExtAddr (SourceSystemCode, NormFullAddress);
 
-    SET @Sql = N'
     INSERT INTO #ExtAddr (SourceSystemCode, SourceRecordID, SourceEntityType, TaxOrAccount, NormAddress, NormFullAddress)
-    SELECT N''eProperty'', CONVERT(VARCHAR(100), ep.PropertyID), N''Property'', ep.TaxID,
+    SELECT N'eProperty', CONVERT(VARCHAR(100), ep.PropertyID), N'Property', ep.TaxID,
         dbo.fn_UPR_NormalizeAddressLine(ep.StreetAddress),
         dbo.fn_UPR_NormalizeFullAddressLine(ep.StreetAddress, ep.City, ep.ZipCode)
-    FROM ' + QUOTENAME(@DbLicensing) + N'.dbo.Property ep';
-    EXEC sys.sp_executesql @Sql;
+    FROM DHCA_LicensingAndRegistration.dbo.Property ep;
 
-    SET @Sql = N'
     INSERT INTO #ExtAddr (SourceSystemCode, SourceRecordID, SourceEntityType, TaxOrAccount, NormAddress, NormFullAddress)
-    SELECT N''CASE'', CONVERT(VARCHAR(100), c.CaseNumber), N''Case'', NULL,
+    SELECT N'CASE', CONVERT(VARCHAR(100), c.CaseNumber), N'Case', NULL,
         dbo.fn_UPR_NormalizeAddressLine(c.StreetAddress),
         dbo.fn_UPR_NormalizeFullAddressLine(c.StreetAddress, c.City, c.ZipCode)
-    FROM ' + QUOTENAME(@DbOLTA) + N'.dbo.[Case] c';
-    EXEC sys.sp_executesql @Sql;
+    FROM DHCA_OLTA.dbo.[Case] c;
 
-    SET @Sql = N'
     INSERT INTO #ExtAddr (SourceSystemCode, SourceRecordID, SourceEntityType, TaxOrAccount, NormAddress, NormFullAddress)
-    SELECT N''MPDU'', CONVERT(VARCHAR(100), mp.DevelopmentID), N''Development'', NULL,
+    SELECT N'MPDU', CONVERT(VARCHAR(100), mp.DevelopmentID), N'Development', NULL,
         dbo.fn_UPR_NormalizeAddressLine(mp.StreetAddress),
         dbo.fn_UPR_NormalizeFullAddressLine(mp.StreetAddress, mp.City, mp.ZipCode)
-    FROM ' + QUOTENAME(@DbMPDU) + N'.dbo.Development mp';
-    EXEC sys.sp_executesql @Sql;
+    FROM DHCA_MPDU.dbo.Development mp;
 
-    SET @Sql = N'
     INSERT INTO #ExtAddr (SourceSystemCode, SourceRecordID, SourceEntityType, TaxOrAccount, NormAddress, NormFullAddress)
-    SELECT N''MULTIFAMILY'', CONVERT(VARCHAR(100), mf.AddressID), N''MultifamilyLoan'', NULL,
-        dbo.fn_UPR_NormalizeAddressLine(CONCAT(mf.StreetNumber, N'' '', mf.StreetName, N'' '', mf.StreetType)),
-        dbo.fn_UPR_NormalizeFullAddressLine(CONCAT(mf.StreetNumber, N'' '', mf.StreetName, N'' '', mf.StreetType), mf.City, mf.ZipCode)
-    FROM ' + QUOTENAME(@DbMultifamily) + N'.dbo.Address mf
-    WHERE mf.DeletedInd = 0';
-    EXEC sys.sp_executesql @Sql;
+    SELECT N'MULTIFAMILY', CONVERT(VARCHAR(100), mf.AddressID), N'MultifamilyLoan', NULL,
+        dbo.fn_UPR_NormalizeAddressLine(CONCAT(mf.StreetNumber, N' ', mf.StreetName, N' ', mf.StreetType)),
+        dbo.fn_UPR_NormalizeFullAddressLine(CONCAT(mf.StreetNumber, N' ', mf.StreetName, N' ', mf.StreetType), mf.City, mf.ZipCode)
+    FROM DHCA_MultifamilyLoans.dbo.Address mf
+    WHERE mf.DeletedInd = 0;
 
     /* --- 7a. Property (eProperty): account/TaxID or normalized address --- */
     INSERT INTO #ExtMatch (
