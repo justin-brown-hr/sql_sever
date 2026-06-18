@@ -152,7 +152,8 @@ DECLARE @ReviewIncomingInserted INT = 0, @ReviewExternalInserted INT = 0, @Revie
 DECLARE @StatusHistoryInserted INT = 0, @AuditInserted INT = 0;
 DECLARE @BuildingInserted INT = 0, @UnitInserted INT = 0, @ContactInserted INT = 0, @PropertyContactInserted INT = 0;
 DECLARE @BatchEndTime DATETIME2(0);
-DECLARE @UprMergeOut TABLE (MergeAction NVARCHAR(10) NOT NULL);
+DECLARE @UprCountBefore INT = 0;
+DECLARE @UprMergeRowsAffected INT = 0;
 
 BEGIN TRY
     BEGIN TRANSACTION;
@@ -758,6 +759,8 @@ BEGIN TRY
 
     SET @BadIncomingRows = (SELECT COUNT(*) FROM #ReviewPending);
 
+    SET @UprCountBefore = (SELECT COUNT(*) FROM dbo.UPROPERTYRECORDS);
+
     MERGE dbo.UPROPERTYRECORDS AS tgt
     USING (
         SELECT
@@ -815,11 +818,14 @@ BEGIN TRY
         src.EffectiveLatitude, src.EffectiveLongitude,
         src.EffectivePropertyType, N'ACTIVE', 1,
         @Now, @RunUser, @Now, @RunUser
-    )
-    OUTPUT $action INTO @UprMergeOut;
+    );
 
-    SET @UPRInserted = (SELECT COUNT(*) FROM @UprMergeOut WHERE MergeAction = N'INSERT');
-    SET @UPRExistingMatched = (SELECT COUNT(*) FROM @UprMergeOut WHERE MergeAction = N'UPDATE');
+    SET @UprMergeRowsAffected = @@ROWCOUNT;
+    SET @UPRInserted = (
+        SELECT COUNT(*) FROM dbo.UPROPERTYRECORDS
+        WHERE CreatedDate >= @Now AND CreatedBy = @RunUser
+    );
+    SET @UPRExistingMatched = @UprMergeRowsAffected - @UPRInserted;
 
     /* Map eligible work rows only (excludes bad/duplicate addresses sent to review) */
     INSERT INTO #UPRMap (UPropertyRecordsID, MasterAddressID, KdatRecordID, MatchSource, IsNew, HasRequiredAddress, SDATAccountNumber, ParcelID, NormalizedFullAddress, Unit)
@@ -1023,7 +1029,7 @@ BEGIN TRY
             INNER JOIN #UPRMap win_map
                 ON (winner.MasterAddressID IS NOT NULL AND win_map.MasterAddressID = winner.MasterAddressID)
                 OR (winner.KdatRecordID IS NOT NULL AND win_map.KdatRecordID = winner.KdatRecordID)
-            WHERE rp.ReasonForNoMatch = N'AMBIGUOUS_CANDIDATES'
+            WHERE rp.ReasonForNoMatch IN (N'DUPLICATE_ADDRESS', N'DUPLICATE_PARCEL')
               AND (
                     (loser.MasterAddressID IS NOT NULL AND loser.MasterAddressID = rp.MasterAddressID)
                  OR (loser.KdatRecordID IS NOT NULL AND loser.KdatRecordID = rp.KdatRecordID)
