@@ -11,6 +11,10 @@
   StreetType, City, ZipCode, NormalizedStreetAddress, NormalizedFullAddress, PropertyStatusCode,
   Aligns with docs/ddl.md CHECK: ZipCode #####/#####-####, State 2 uppercase A-Z,
   PropertyStatusCode ACTIVE|INACTIVE|PENDING|RETIRED. Column NormalizedFulldAddress per DDL.
+
+  CROSS-DATABASE SOURCES: uses dbo.src_* synonyms (see ddl/03_create_source_synonyms.sql).
+  SSMS red underlines on 3-part names are IntelliSense-only — run synonym script once,
+  then Refresh Local Cache (Ctrl+Shift+R). Runtime requires VPN + SELECT on source DBs.
 ================================================================================
 */
 USE UPRDB_Test;
@@ -332,7 +336,7 @@ BEGIN TRY
             ELSE 1
         END
     INTO #MA
-    FROM DHCA_Internal.dbo.MasterAddress ma;
+    FROM dbo.src_MasterAddress ma;
 
     SET @MasterAddressRead = (SELECT COUNT(*) FROM #MA);
 
@@ -404,7 +408,7 @@ BEGIN TRY
             ELSE 1
         END
     INTO #SDAT
-    FROM DHCA_Internal.dbo.RealPropertyTaxInformation s;
+    FROM dbo.src_RealPropertyTaxInformation s;
 
     SET @SDATRead = (SELECT COUNT(*) FROM #SDAT);
 
@@ -1225,25 +1229,25 @@ BEGIN TRY
     SELECT N'eProperty', CONVERT(VARCHAR(100), ep.PropertyID), N'Property', ep.TaxID,
         dbo.fn_UPR_NormalizeAddressLine(ep.StreetAddress),
         dbo.fn_UPR_NormalizeFullAddressLine(ep.StreetAddress, ep.City, ep.ZipCode)
-    FROM DHCA_LicensingAndRegistration.dbo.Property ep;
+    FROM dbo.src_eProperty ep;
 
     INSERT INTO #ExtAddr
     SELECT N'CASE', CONVERT(VARCHAR(100), c.CaseNumber), N'Case', NULL,
         dbo.fn_UPR_NormalizeAddressLine(c.StreetAddress),
         dbo.fn_UPR_NormalizeFullAddressLine(c.StreetAddress, c.City, c.ZipCode)
-    FROM DHCA_OLTA.dbo.[Case] c;
+    FROM dbo.src_Case c;
 
     INSERT INTO #ExtAddr
     SELECT N'MPDU', CONVERT(VARCHAR(100), mp.DevelopmentID), N'Development', NULL,
         dbo.fn_UPR_NormalizeAddressLine(mp.StreetAddress),
         dbo.fn_UPR_NormalizeFullAddressLine(mp.StreetAddress, mp.City, mp.ZipCode)
-    FROM DHCA_MPDU.dbo.Development mp;
+    FROM dbo.src_MPDU_Development mp;
 
     INSERT INTO #ExtAddr
     SELECT N'MULTIFAMILY', CONVERT(VARCHAR(100), mf.AddressID), N'MultifamilyLoan', NULL,
         dbo.fn_UPR_NormalizeAddressLine(CONCAT(mf.StreetNumber, N' ', mf.StreetName, N' ', mf.StreetType)),
         dbo.fn_UPR_NormalizeFullAddressLine(CONCAT(mf.StreetNumber, N' ', mf.StreetName, N' ', mf.StreetType), mf.City, mf.ZipCode)
-    FROM DHCA_MultifamilyLoans.dbo.Address mf
+    FROM dbo.src_MultifamilyAddress mf
     WHERE mf.DeletedInd = 0;
 
     /* --- 7a. Property (eProperty): account/TaxID or normalized address --- */
