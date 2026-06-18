@@ -788,32 +788,36 @@ BEGIN TRY
 
     SET @UprCountBefore = (SELECT COUNT(*) FROM dbo.UPROPERTYRECORDS);
 
-    MERGE dbo.UPROPERTYRECORDS AS tgt
-    USING (
+    /* One source row per account — MERGE ON must be 1:1 (Error 8672 if multiple source rows hit same target) */
+    IF OBJECT_ID('tempdb..#UprMergeSrc') IS NOT NULL DROP TABLE #UprMergeSrc;
+
+    SELECT
+        c.MasterAddressID, c.KdatRecordID, c.MatchSource, c.HasRequiredAddress,
+        c.SDATAccountNumber, c.ParcelID, c.OwnerName,
+        c.EffectiveSDATAccountNumber, c.EffectiveParcelID,
+        c.EffectiveStreetNumber, c.EffectiveStreetName, c.EffectiveStreetType,
+        c.EffectiveCity, c.EffectiveState, c.EffectiveZipCode,
+        c.EffectiveNormalizedStreetAddress, c.EffectiveNormalizedFulldAddress,
+        c.EffectiveLatitude, c.EffectiveLongitude, c.EffectiveOwnerName, c.EffectivePropertyType
+    INTO #UprMergeSrc
+    FROM (
         SELECT
             c.*,
             ROW_NUMBER() OVER (
                 PARTITION BY c.EffectiveSDATAccountNumber
-                ORDER BY CASE c.MatchSource WHEN N'BOTH' THEN 1 WHEN N'KDAT' THEN 2 ELSE 3 END
+                ORDER BY CASE c.MatchSource WHEN N'BOTH' THEN 1 WHEN N'KDAT' THEN 2 ELSE 3 END,
+                         c.MasterAddressID, c.KdatRecordID
             ) AS AccountRn
         FROM #UprCandidate c
         WHERE c.IsEligibleForUpr = 1
           AND c.AddressRn = 1
           AND c.ParcelRn = 1
-    ) AS src
-    ON (
-        tgt.SDATAccountNumber = src.EffectiveSDATAccountNumber
-        OR (tgt.SDATAccountNumber = src.SDATAccountNumber AND src.SDATAccountNumber IS NOT NULL)
-        OR tgt.ParcelID = src.EffectiveParcelID
-        OR (tgt.ParcelID = src.ParcelID AND src.ParcelID IS NOT NULL)
-        OR (tgt.NormalizedFulldAddress = src.EffectiveNormalizedFulldAddress)
-        OR (
-            tgt.StreetNumber = src.EffectiveStreetNumber
-            AND tgt.StreetName = src.EffectiveStreetName
-            AND tgt.StreetType = src.EffectiveStreetType
-            AND tgt.ZipCode = src.EffectiveZipCode
-        )
-    )
+    ) c
+    WHERE c.AccountRn = 1;
+
+    MERGE dbo.UPROPERTYRECORDS AS tgt
+    USING #UprMergeSrc AS src
+    ON tgt.SDATAccountNumber = src.EffectiveSDATAccountNumber
     WHEN MATCHED THEN UPDATE SET
         tgt.ParcelID          = COALESCE(
             NULLIF(LTRIM(RTRIM(src.ParcelID)), N''),
@@ -830,7 +834,7 @@ BEGIN TRY
         ),
         tgt.UpdatedDate       = @Now,
         tgt.UpdatedBy         = @RunUser
-    WHEN NOT MATCHED AND src.AccountRn = 1 THEN INSERT (
+    WHEN NOT MATCHED THEN INSERT (
         SDATAccountNumber, ParcelID, PropertyName, Owner,
         StreetNumber, StreetName, StreetType,
         City, [State], ZipCode, NormalizedStreetAddress, NormalizedFulldAddress,
