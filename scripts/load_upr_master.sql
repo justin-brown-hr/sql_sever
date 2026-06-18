@@ -19,7 +19,7 @@
     DHCA_OLTA.dbo.[Case]
     DHCA_MPDU.dbo.Development
     DHCA_MultifamilyLoans.dbo.Address
-  Requires VPN + SELECT permission on DHCA databases (unchanged from production practice).
+  Cross-database reads use sp_executesql (DHCA names in script; avoids SSMS IntelliSense errors).
 ================================================================================
 */
 USE UPRDB_Test;
@@ -190,6 +190,7 @@ DECLARE @BuildingInserted INT = 0, @UnitInserted INT = 0, @ContactInserted INT =
 DECLARE @BatchEndTime DATETIME2(0);
 DECLARE @UprCountBefore INT = 0;
 DECLARE @UprMergeRowsAffected INT = 0;
+DECLARE @Sql NVARCHAR(MAX);
 
 BEGIN TRY
     BEGIN TRANSACTION;
@@ -264,7 +265,34 @@ BEGIN TRY
     /* ========================================================================
        2. NORMALIZE AddressMaster  
        ======================================================================== */
+    IF OBJECT_ID('tempdb..#MA_Raw') IS NOT NULL DROP TABLE #MA_Raw;
     IF OBJECT_ID('tempdb..#MA') IS NOT NULL DROP TABLE #MA;
+
+    CREATE TABLE #MA_Raw (
+        MasterAddressID INT           NOT NULL,
+        Account         NCHAR(8)      NULL,
+        ParcelNumber    NCHAR(3)      NULL,
+        StreetNumber    INT           NULL,
+        StreetName      NVARCHAR(22)  NULL,
+        StreetType      NCHAR(4)      NULL,
+        Unit            NCHAR(6)      NULL,
+        City            NVARCHAR(22)  NULL,
+        ZipCode         NCHAR(10)     NULL,
+        LUCategory      NVARCHAR(35)  NULL,
+        XCoordinate     INT           NULL,
+        YCoordinate     INT           NULL
+    );
+
+    SET @Sql = N'
+    INSERT INTO #MA_Raw (
+        MasterAddressID, Account, ParcelNumber, StreetNumber, StreetName, StreetType,
+        Unit, City, ZipCode, LUCategory, XCoordinate, YCoordinate
+    )
+    SELECT
+        MasterAddressID, Account, ParcelNumber, StreetNumber, StreetName, StreetType,
+        Unit, City, ZipCode, LUCategory, XCoordinate, YCoordinate
+    FROM DHCA_Internal.dbo.MasterAddress';
+    EXEC sys.sp_executesql @Sql;
 
     SELECT
         ma.MasterAddressID,
@@ -341,14 +369,41 @@ BEGIN TRY
             ELSE 1
         END
     INTO #MA
-    FROM DHCA_Internal.dbo.MasterAddress ma;
+    FROM #MA_Raw ma;
 
     SET @MasterAddressRead = (SELECT COUNT(*) FROM #MA);
 
     /* ========================================================================
        3. NORMALIZE SDAT  
        ======================================================================== */
+    IF OBJECT_ID('tempdb..#SDAT_Raw') IS NOT NULL DROP TABLE #SDAT_Raw;
     IF OBJECT_ID('tempdb..#SDAT') IS NOT NULL DROP TABLE #SDAT;
+
+    CREATE TABLE #SDAT_Raw (
+        RealPropertyTaxInformationID INT           NOT NULL,
+        AccountNumber                NVARCHAR(50)  NULL,
+        Parcel                       NVARCHAR(50)  NULL,
+        PremisesNumber               NVARCHAR(20)  NULL,
+        PremisesStreetName           NVARCHAR(100) NULL,
+        PremisesStreetType           NVARCHAR(10)  NULL,
+        PremisesCity                 NVARCHAR(100) NULL,
+        PremisesState                NVARCHAR(10)  NULL,
+        PremisesZipCode              NVARCHAR(20)  NULL,
+        Owner                        NVARCHAR(200) NULL,
+        YearBuilt                    NVARCHAR(20)  NULL,
+        DwellingUnits                NVARCHAR(20)  NULL
+    );
+
+    SET @Sql = N'
+    INSERT INTO #SDAT_Raw (
+        RealPropertyTaxInformationID, AccountNumber, Parcel, PremisesNumber, PremisesStreetName,
+        PremisesStreetType, PremisesCity, PremisesState, PremisesZipCode, Owner, YearBuilt, DwellingUnits
+    )
+    SELECT
+        RealPropertyTaxInformationID, AccountNumber, Parcel, PremisesNumber, PremisesStreetName,
+        PremisesStreetType, PremisesCity, PremisesState, PremisesZipCode, Owner, YearBuilt, DwellingUnits
+    FROM DHCA_Internal.dbo.RealPropertyTaxInformation';
+    EXEC sys.sp_executesql @Sql;
 
     SELECT
         KdatRecordID         = TRY_CONVERT(INT, s.RealPropertyTaxInformationID),
@@ -413,7 +468,7 @@ BEGIN TRY
             ELSE 1
         END
     INTO #SDAT
-    FROM DHCA_Internal.dbo.RealPropertyTaxInformation s;
+    FROM #SDAT_Raw s;
 
     SET @SDATRead = (SELECT COUNT(*) FROM #SDAT);
 
@@ -1230,30 +1285,38 @@ BEGIN TRY
     CREATE CLUSTERED INDEX IX_ExtAddr_System ON #ExtAddr (SourceSystemCode, NormAddress);
     CREATE NONCLUSTERED INDEX IX_ExtAddr_Full ON #ExtAddr (SourceSystemCode, NormFullAddress);
 
+    SET @Sql = N'
     INSERT INTO #ExtAddr (SourceSystemCode, SourceRecordID, SourceEntityType, TaxOrAccount, NormAddress, NormFullAddress)
-    SELECT N'eProperty', CONVERT(VARCHAR(100), ep.PropertyID), N'Property', ep.TaxID,
+    SELECT N''eProperty'', CONVERT(VARCHAR(100), ep.PropertyID), N''Property'', ep.TaxID,
         dbo.fn_UPR_NormalizeAddressLine(ep.StreetAddress),
         dbo.fn_UPR_NormalizeFullAddressLine(ep.StreetAddress, ep.City, ep.ZipCode)
-    FROM DHCA_LicensingAndRegistration.dbo.Property ep;
+    FROM DHCA_LicensingAndRegistration.dbo.Property ep';
+    EXEC sys.sp_executesql @Sql;
 
+    SET @Sql = N'
     INSERT INTO #ExtAddr (SourceSystemCode, SourceRecordID, SourceEntityType, TaxOrAccount, NormAddress, NormFullAddress)
-    SELECT N'CASE', CONVERT(VARCHAR(100), c.CaseNumber), N'Case', NULL,
+    SELECT N''CASE'', CONVERT(VARCHAR(100), c.CaseNumber), N''Case'', NULL,
         dbo.fn_UPR_NormalizeAddressLine(c.StreetAddress),
         dbo.fn_UPR_NormalizeFullAddressLine(c.StreetAddress, c.City, c.ZipCode)
-    FROM DHCA_OLTA.dbo.[Case] c;
+    FROM DHCA_OLTA.dbo.[Case] c';
+    EXEC sys.sp_executesql @Sql;
 
+    SET @Sql = N'
     INSERT INTO #ExtAddr (SourceSystemCode, SourceRecordID, SourceEntityType, TaxOrAccount, NormAddress, NormFullAddress)
-    SELECT N'MPDU', CONVERT(VARCHAR(100), mp.DevelopmentID), N'Development', NULL,
+    SELECT N''MPDU'', CONVERT(VARCHAR(100), mp.DevelopmentID), N''Development'', NULL,
         dbo.fn_UPR_NormalizeAddressLine(mp.StreetAddress),
         dbo.fn_UPR_NormalizeFullAddressLine(mp.StreetAddress, mp.City, mp.ZipCode)
-    FROM DHCA_MPDU.dbo.Development mp;
+    FROM DHCA_MPDU.dbo.Development mp';
+    EXEC sys.sp_executesql @Sql;
 
+    SET @Sql = N'
     INSERT INTO #ExtAddr (SourceSystemCode, SourceRecordID, SourceEntityType, TaxOrAccount, NormAddress, NormFullAddress)
-    SELECT N'MULTIFAMILY', CONVERT(VARCHAR(100), mf.AddressID), N'MultifamilyLoan', NULL,
-        dbo.fn_UPR_NormalizeAddressLine(CONCAT(mf.StreetNumber, N' ', mf.StreetName, N' ', mf.StreetType)),
-        dbo.fn_UPR_NormalizeFullAddressLine(CONCAT(mf.StreetNumber, N' ', mf.StreetName, N' ', mf.StreetType), mf.City, mf.ZipCode)
+    SELECT N''MULTIFAMILY'', CONVERT(VARCHAR(100), mf.AddressID), N''MultifamilyLoan'', NULL,
+        dbo.fn_UPR_NormalizeAddressLine(CONCAT(mf.StreetNumber, N'' '', mf.StreetName, N'' '', mf.StreetType)),
+        dbo.fn_UPR_NormalizeFullAddressLine(CONCAT(mf.StreetNumber, N'' '', mf.StreetName, N'' '', mf.StreetType), mf.City, mf.ZipCode)
     FROM DHCA_MultifamilyLoans.dbo.Address mf
-    WHERE mf.DeletedInd = 0;
+    WHERE mf.DeletedInd = 0';
+    EXEC sys.sp_executesql @Sql;
 
     /* --- 7a. Property (eProperty): account/TaxID or normalized address --- */
     INSERT INTO #ExtMatch (
