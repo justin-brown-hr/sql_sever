@@ -93,12 +93,39 @@ BEGIN
 END;
 GO
 
+/* Strip leading zeros from numeric street numbers — 02456 -> 2456 */
+CREATE OR ALTER FUNCTION dbo.fn_UPR_NormalizeStreetNumber (@streetNumber NVARCHAR(20))
+RETURNS NVARCHAR(20)
+AS
+BEGIN
+    DECLARE @s NVARCHAR(20) = LTRIM(RTRIM(ISNULL(@streetNumber, N'')));
+    IF @s = N'' RETURN N'';
+
+    /* Pure digits: 02456 -> 2456 */
+    IF @s NOT LIKE N'%[^0-9]%'
+    BEGIN
+        DECLARE @n BIGINT = TRY_CONVERT(BIGINT, @s);
+        IF @n IS NOT NULL AND @n > 0
+            RETURN CONVERT(NVARCHAR(20), @n);
+        RETURN @s;
+    END
+
+    /* Leading-zero digit prefix before letters/suffix — 012A -> 12A */
+    WHILE LEN(@s) > 1
+      AND LEFT(@s, 1) = N'0'
+      AND SUBSTRING(@s, 2, 1) LIKE N'[0-9]'
+        SET @s = SUBSTRING(@s, 2, LEN(@s) - 1);
+
+    RETURN @s;
+END;
+GO
+
 /* Reject placeholder/bad street numbers (e.g. 0) — UQ_UPropertyRecords_Address */
 CREATE OR ALTER FUNCTION dbo.fn_UPR_IsValidStreetNumber (@streetNumber NVARCHAR(20))
 RETURNS BIT
 AS
 BEGIN
-    DECLARE @s NVARCHAR(20) = LTRIM(RTRIM(ISNULL(@streetNumber, N'')));
+    DECLARE @s NVARCHAR(20) = dbo.fn_UPR_NormalizeStreetNumber(@streetNumber);
     IF @s = N'' OR @s = N'0' RETURN 0;
     DECLARE @n INT = TRY_CONVERT(INT, @s);
     IF @n IS NOT NULL AND @n <= 0 RETURN 0;
@@ -238,7 +265,7 @@ BEGIN TRY
         MasterAddressAccount = NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(50), ma.Account))), N''),
         SDATAccountNumber    = NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(50), ma.Account))), N''),
         ParcelID             = NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(50), ma.ParcelNumber))), N''),
-        StreetNumber         = NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(20), ma.StreetNumber))), N''),
+        StreetNumber         = NULLIF(dbo.fn_UPR_NormalizeStreetNumber(CONVERT(NVARCHAR(20), ma.StreetNumber)), N''),
         StreetName           = NULLIF(UPPER(LTRIM(RTRIM(ma.StreetName))), N''),
         StreetType           = CASE UPPER(LTRIM(RTRIM(ma.StreetType)))
             WHEN N'STREET' THEN N'ST'  WHEN N'ST' THEN N'ST'
@@ -276,7 +303,7 @@ BEGIN TRY
         Latitude             = TRY_CONVERT(DECIMAL(10, 6), NULLIF(ma.YCoordinate, 0)),
         Longitude            = TRY_CONVERT(DECIMAL(10, 6), NULLIF(ma.XCoordinate, 0)),
         NormalizedStreetAddress    = UPPER(LTRIM(RTRIM(CONCAT(
-            ISNULL(CONVERT(NVARCHAR(20), ma.StreetNumber), N''), N' ',
+            ISNULL(dbo.fn_UPR_NormalizeStreetNumber(CONVERT(NVARCHAR(20), ma.StreetNumber)), N''), N' ',
             ISNULL(UPPER(LTRIM(RTRIM(ma.StreetName))), N''), N' ',
             CASE UPPER(LTRIM(RTRIM(ma.StreetType)))
                 WHEN N'STREET' THEN N'ST' WHEN N'AVENUE' THEN N'AVE' WHEN N'ROAD' THEN N'RD'
@@ -286,7 +313,7 @@ BEGIN TRY
             END
         )))),
         NormalizedFullAddress = UPPER(LTRIM(RTRIM(CONCAT(
-            ISNULL(CONVERT(NVARCHAR(20), ma.StreetNumber), N''), N' ',
+            ISNULL(dbo.fn_UPR_NormalizeStreetNumber(CONVERT(NVARCHAR(20), ma.StreetNumber)), N''), N' ',
             ISNULL(UPPER(LTRIM(RTRIM(ma.StreetName))), N''), N' ',
             CASE UPPER(LTRIM(RTRIM(ma.StreetType)))
                 WHEN N'STREET' THEN N'ST' WHEN N'AVENUE' THEN N'AVE' WHEN N'ROAD' THEN N'RD'
@@ -322,7 +349,7 @@ BEGIN TRY
         MasterAddressAccount = NULL,
         SDATAccountNumber    = NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(50), s.AccountNumber))), N''),
         ParcelID             = NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(50), s.Parcel))), N''),
-        StreetNumber         = NULLIF(LTRIM(RTRIM(s.PremisesNumber)), N''),
+        StreetNumber         = NULLIF(dbo.fn_UPR_NormalizeStreetNumber(LTRIM(RTRIM(s.PremisesNumber))), N''),
         StreetName           = NULLIF(UPPER(LTRIM(RTRIM(s.PremisesStreetName))), N''),
         StreetType           = CASE UPPER(LTRIM(RTRIM(s.PremisesStreetType)))
             WHEN N'STREET' THEN N'ST'  WHEN N'ST' THEN N'ST'
@@ -348,7 +375,7 @@ BEGIN TRY
         Latitude             = CAST(NULL AS DECIMAL(10, 6)),
         Longitude            = CAST(NULL AS DECIMAL(10, 6)),
         NormalizedStreetAddress    = UPPER(LTRIM(RTRIM(CONCAT(
-            ISNULL(s.PremisesNumber, N''), N' ',
+            ISNULL(dbo.fn_UPR_NormalizeStreetNumber(LTRIM(RTRIM(s.PremisesNumber))), N''), N' ',
             ISNULL(UPPER(LTRIM(RTRIM(s.PremisesStreetName))), N''), N' ',
             CASE UPPER(LTRIM(RTRIM(s.PremisesStreetType)))
                 WHEN N'STREET' THEN N'ST' WHEN N'AVENUE' THEN N'AVE' WHEN N'ROAD' THEN N'RD'
@@ -358,7 +385,7 @@ BEGIN TRY
             END
         )))),
         NormalizedFullAddress = UPPER(LTRIM(RTRIM(CONCAT(
-            ISNULL(s.PremisesNumber, N''), N' ',
+            ISNULL(dbo.fn_UPR_NormalizeStreetNumber(LTRIM(RTRIM(s.PremisesNumber))), N''), N' ',
             ISNULL(UPPER(LTRIM(RTRIM(s.PremisesStreetName))), N''), N' ',
             CASE UPPER(LTRIM(RTRIM(s.PremisesStreetType)))
                 WHEN N'STREET' THEN N'ST' WHEN N'AVENUE' THEN N'AVE' WHEN N'ROAD' THEN N'RD'
@@ -575,7 +602,7 @@ BEGIN TRY
         ),
         /* Real parcel required for UPR — no synthetic parcel IDs */
         EffectiveParcelID = NULLIF(LTRIM(RTRIM(w.ParcelID)), N''),
-        EffectiveStreetNumber = LEFT(NULLIF(LTRIM(RTRIM(w.StreetNumber)), N''), 20),
+        EffectiveStreetNumber = LEFT(NULLIF(dbo.fn_UPR_NormalizeStreetNumber(w.StreetNumber), N''), 20),
         EffectiveStreetName   = LEFT(NULLIF(UPPER(LTRIM(RTRIM(w.StreetName))), N''), 100),
         EffectiveStreetType   = LEFT(COALESCE(NULLIF(UPPER(LTRIM(RTRIM(w.StreetType))), N''), N'UNK'), 4),
         EffectiveCity         = LEFT(NULLIF(UPPER(LTRIM(RTRIM(w.City))), N''), 100),
@@ -606,7 +633,7 @@ BEGIN TRY
         END,
         AddressRn = ROW_NUMBER() OVER (
             PARTITION BY
-                LEFT(NULLIF(LTRIM(RTRIM(w.StreetNumber)), N''), 20),
+                LEFT(NULLIF(dbo.fn_UPR_NormalizeStreetNumber(w.StreetNumber), N''), 20),
                 LEFT(NULLIF(UPPER(LTRIM(RTRIM(w.StreetName))), N''), 100),
                 LEFT(COALESCE(NULLIF(UPPER(LTRIM(RTRIM(w.StreetType))), N''), N'UNK'), 4),
                 dbo.fn_UPR_NormalizeZipCode(w.ZipCode)
@@ -1060,7 +1087,7 @@ BEGIN TRY
 
             SELECT upr.UPropertyRecordsID, 5
             FROM dbo.UPROPERTYRECORDS upr
-            WHERE upr.StreetNumber = LEFT(NULLIF(LTRIM(RTRIM(rp.StreetNumber)), N''), 20)
+            WHERE upr.StreetNumber = LEFT(NULLIF(dbo.fn_UPR_NormalizeStreetNumber(rp.StreetNumber), N''), 20)
               AND upr.StreetName = LEFT(NULLIF(UPPER(LTRIM(RTRIM(rp.StreetName))), N''), 100)
               AND upr.StreetType = LEFT(COALESCE(NULLIF(UPPER(LTRIM(RTRIM(rp.StreetType))), N''), N'UNK'), 4)
               AND upr.ZipCode = dbo.fn_UPR_NormalizeZipCode(rp.ZipCode)

@@ -43,6 +43,31 @@ BEGIN
 END;
 GO
 
+/* Strip leading zeros — 02456 -> 2456 */
+CREATE OR ALTER FUNCTION dbo.fn_UPR_NormalizeStreetNumber (@streetNumber NVARCHAR(20))
+RETURNS NVARCHAR(20)
+AS
+BEGIN
+    DECLARE @s NVARCHAR(20) = LTRIM(RTRIM(ISNULL(@streetNumber, N'')));
+    IF @s = N'' RETURN N'';
+
+    IF @s NOT LIKE N'%[^0-9]%'
+    BEGIN
+        DECLARE @n BIGINT = TRY_CONVERT(BIGINT, @s);
+        IF @n IS NOT NULL AND @n > 0
+            RETURN CONVERT(NVARCHAR(20), @n);
+        RETURN @s;
+    END
+
+    WHILE LEN(@s) > 1
+      AND LEFT(@s, 1) = N'0'
+      AND SUBSTRING(@s, 2, 1) LIKE N'[0-9]'
+        SET @s = SUBSTRING(@s, 2, LEN(@s) - 1);
+
+    RETURN @s;
+END;
+GO
+
 CREATE OR ALTER FUNCTION dbo.fn_UPR_NormalizeFullAddressLine (
     @line   NVARCHAR(300),
     @city   NVARCHAR(100),
