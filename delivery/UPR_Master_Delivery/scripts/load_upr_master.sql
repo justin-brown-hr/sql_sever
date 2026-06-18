@@ -21,9 +21,6 @@
     DHCA_MultifamilyLoans.dbo.Address
 
   HOW TO RUN: Execute this script in SSMS against UPRDB_Test. No other scripts required.
-
-  NOTE: SSMS may underline DHCA table/column names before execution. That is an editor
-  warning only — the script reads the DHCA sources listed above and runs normally.
 ================================================================================
 */
 USE UPRDB_Test;
@@ -194,6 +191,7 @@ DECLARE @BuildingInserted INT = 0, @UnitInserted INT = 0, @ContactInserted INT =
 DECLARE @BatchEndTime DATETIME2(0);
 DECLARE @UprCountBefore INT = 0;
 DECLARE @UprMergeRowsAffected INT = 0;
+DECLARE @Sql NVARCHAR(MAX);
 
 BEGIN TRY
     BEGIN TRANSACTION;
@@ -261,15 +259,9 @@ BEGIN TRY
         INSERT INTO dbo.REF_BUILDINGTYPE (BuildingTypeCode, BuildingTypeName, [Description], IsResidential, IsActive)
         VALUES (N'MAIN', N'Main building', N'Default main structure', 1, 1);
 
-    MERGE dbo.REF_UNITTYPECODE AS t
-    USING (VALUES
-        (N'APT',  N'Apartment unit', N'Apartment'),
-        (N'COND', N'Condo unit',     N'Condominium unit')
-    ) AS s(UnitTypeCode, UnitTypeName, Descr)
-    ON t.UnitTypeCode = s.UnitTypeCode
-    WHEN NOT MATCHED THEN
-        INSERT (UnitTypeCode, UnitTypeName, [Description])
-        VALUES (s.UnitTypeCode, s.UnitTypeName, s.Descr);
+    IF NOT EXISTS (SELECT 1 FROM dbo.REF_UNITTYPECODE)
+        INSERT INTO dbo.REF_UNITTYPECODE (UnitTypeCode, UnitTypeName, [Description])
+        VALUES (N'APT', N'Apartment unit', N'Apartment'), (N'CONDO', N'Condo unit', N'Condominium unit');
 
     /* ========================================================================
        2. NORMALIZE AddressMaster  
@@ -660,7 +652,7 @@ BEGIN TRY
                      COALESCE(w.SDATAccountNumber, w.ParcelID, N'')
         ),
         ParcelRn = ROW_NUMBER() OVER (
-            PARTITION BY NULLIF(LTRIM(RTRIM(w.ParcelID)), N'')
+            PARTITION BY UPPER(NULLIF(LTRIM(RTRIM(w.ParcelID)), N''))
             ORDER BY CASE w.MatchSource WHEN N'BOTH' THEN 1 WHEN N'KDAT' THEN 2 ELSE 3 END,
                      COALESCE(w.SDATAccountNumber, w.ParcelID, N'')
         )
@@ -677,6 +669,7 @@ BEGIN TRY
         ParcelID                   NVARCHAR(50) NULL,
         SDATAccountNumber          NVARCHAR(50) NULL,
         ReasonForNoMatch           NVARCHAR(255) NOT NULL,
+        ReviewDetail               NVARCHAR(255) NOT NULL,
         StreetNumber               NVARCHAR(20) NULL,
         StreetName                 NVARCHAR(100) NULL,
         StreetType                 NVARCHAR(4) NULL,
@@ -684,10 +677,10 @@ BEGIN TRY
         EffectiveSDATAccountNumber NVARCHAR(50) NOT NULL
     );
 
-    /* Stage bad/duplicate incoming rows for review — specific rejection reasons */
+    /* Stage bad/duplicate incoming rows for review (ReasonForNoMatch = client DDL CHECK values) */
     INSERT INTO #ReviewPending (
         MasterAddressID, KdatRecordID, MatchSource, NormalizedIncomingAddress,
-        ParcelID, SDATAccountNumber, ReasonForNoMatch,
+        ParcelID, SDATAccountNumber, ReasonForNoMatch, ReviewDetail,
         StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber
     )
     SELECT
@@ -695,12 +688,20 @@ BEGIN TRY
         COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress, N'UNKNOWN'),
         w.ParcelID, w.SDATAccountNumber,
         CASE
-            WHEN NULLIF(UPPER(LTRIM(RTRIM(w.StreetName))), N'') IS NULL THEN N'MISSING_STREET_NAME'
-            WHEN NULLIF(UPPER(LTRIM(RTRIM(w.City))), N'') IS NULL THEN N'MISSING_CITY'
-            WHEN dbo.fn_UPR_IsValidStreetNumber(w.StreetNumber) = 0 THEN N'INVALID_STREET_NUMBER'
-            WHEN dbo.fn_UPR_IsValidZipCode(w.ZipCode) = 0 THEN N'INVALID_ZIP_CODE'
-            WHEN NULLIF(LTRIM(RTRIM(w.ParcelID)), N'') IS NULL THEN N'MISSING_PARCEL_ID'
-            ELSE N'INSUFFICIENT_ADDRESS_DATA'
+            WHEN NULLIF(LTRIM(RTRIM(w.ParcelID)), N'') IS NULL THEN N'NO_PARCEL_MATCH'
+            WHEN NULLIF(UPPER(LTRIM(RTRIM(w.StreetName))), N'') IS NULL THEN N'INSUFFICIENT_DATA'
+            WHEN NULLIF(UPPER(LTRIM(RTRIM(w.City))), N'') IS NULL THEN N'INSUFFICIENT_DATA'
+            WHEN dbo.fn_UPR_IsValidStreetNumber(w.StreetNumber) = 0 THEN N'SOURCE_RECORD_ERROR'
+            WHEN dbo.fn_UPR_IsValidZipCode(w.ZipCode) = 0 THEN N'SOURCE_RECORD_ERROR'
+            ELSE N'INSUFFICIENT_DATA'
+        END,
+        CASE
+            WHEN NULLIF(LTRIM(RTRIM(w.ParcelID)), N'') IS NULL THEN N'Missing parcel ID'
+            WHEN NULLIF(UPPER(LTRIM(RTRIM(w.StreetName))), N'') IS NULL THEN N'Missing street name'
+            WHEN NULLIF(UPPER(LTRIM(RTRIM(w.City))), N'') IS NULL THEN N'Missing city'
+            WHEN dbo.fn_UPR_IsValidStreetNumber(w.StreetNumber) = 0 THEN N'Invalid street number'
+            WHEN dbo.fn_UPR_IsValidZipCode(w.ZipCode) = 0 THEN N'Invalid zip code'
+            ELSE N'Insufficient address data'
         END,
         w.StreetNumber, w.StreetName, w.StreetType, w.ZipCode,
         COALESCE(
@@ -719,14 +720,14 @@ BEGIN TRY
 
     INSERT INTO #ReviewPending (
         MasterAddressID, KdatRecordID, MatchSource, NormalizedIncomingAddress,
-        ParcelID, SDATAccountNumber, ReasonForNoMatch,
+        ParcelID, SDATAccountNumber, ReasonForNoMatch, ReviewDetail,
         StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber
     )
     SELECT
         w.MasterAddressID, w.KdatRecordID, w.MatchSource,
         COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress, N'UNKNOWN'),
         w.ParcelID, w.SDATAccountNumber,
-        N'MISSING_PARCEL_ID',
+        N'NO_PARCEL_MATCH', N'Missing parcel ID',
         w.StreetNumber, w.StreetName, w.StreetType, w.ZipCode,
         COALESCE(
             NULLIF(LTRIM(RTRIM(w.SDATAccountNumber)), N''),
@@ -740,7 +741,7 @@ BEGIN TRY
 
     INSERT INTO #ReviewPending (
         MasterAddressID, KdatRecordID, MatchSource, NormalizedIncomingAddress,
-        ParcelID, SDATAccountNumber, ReasonForNoMatch,
+        ParcelID, SDATAccountNumber, ReasonForNoMatch, ReviewDetail,
         StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber
     )
     SELECT
@@ -748,12 +749,20 @@ BEGIN TRY
         COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress, N'UNKNOWN'),
         w.ParcelID, w.SDATAccountNumber,
         CASE
-            WHEN NULLIF(LTRIM(RTRIM(w.ParcelID)), N'') IS NULL THEN N'MISSING_PARCEL_ID'
-            WHEN dbo.fn_UPR_IsValidStreetNumber(w.StreetNumber) = 0 THEN N'INVALID_STREET_NUMBER'
-            WHEN dbo.fn_UPR_IsValidZipCode(w.ZipCode) = 0 THEN N'INVALID_ZIP_CODE'
-            WHEN NULLIF(UPPER(LTRIM(RTRIM(w.StreetName))), N'') IS NULL THEN N'MISSING_STREET_NAME'
-            WHEN NULLIF(UPPER(LTRIM(RTRIM(w.City))), N'') IS NULL THEN N'MISSING_CITY'
-            ELSE N'INSUFFICIENT_ADDRESS_DATA'
+            WHEN NULLIF(LTRIM(RTRIM(w.ParcelID)), N'') IS NULL THEN N'NO_PARCEL_MATCH'
+            WHEN dbo.fn_UPR_IsValidStreetNumber(w.StreetNumber) = 0 THEN N'SOURCE_RECORD_ERROR'
+            WHEN dbo.fn_UPR_IsValidZipCode(w.ZipCode) = 0 THEN N'SOURCE_RECORD_ERROR'
+            WHEN NULLIF(UPPER(LTRIM(RTRIM(w.StreetName))), N'') IS NULL THEN N'INSUFFICIENT_DATA'
+            WHEN NULLIF(UPPER(LTRIM(RTRIM(w.City))), N'') IS NULL THEN N'INSUFFICIENT_DATA'
+            ELSE N'INSUFFICIENT_DATA'
+        END,
+        CASE
+            WHEN NULLIF(LTRIM(RTRIM(w.ParcelID)), N'') IS NULL THEN N'Missing parcel ID'
+            WHEN dbo.fn_UPR_IsValidStreetNumber(w.StreetNumber) = 0 THEN N'Invalid street number'
+            WHEN dbo.fn_UPR_IsValidZipCode(w.ZipCode) = 0 THEN N'Invalid zip code'
+            WHEN NULLIF(UPPER(LTRIM(RTRIM(w.StreetName))), N'') IS NULL THEN N'Missing street name'
+            WHEN NULLIF(UPPER(LTRIM(RTRIM(w.City))), N'') IS NULL THEN N'Missing city'
+            ELSE N'Insufficient address data'
         END,
         w.StreetNumber, w.StreetName, w.StreetType, w.ZipCode,
         c.EffectiveSDATAccountNumber
@@ -766,14 +775,14 @@ BEGIN TRY
 
     INSERT INTO #ReviewPending (
         MasterAddressID, KdatRecordID, MatchSource, NormalizedIncomingAddress,
-        ParcelID, SDATAccountNumber, ReasonForNoMatch,
+        ParcelID, SDATAccountNumber, ReasonForNoMatch, ReviewDetail,
         StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber
     )
     SELECT
         w.MasterAddressID, w.KdatRecordID, w.MatchSource,
         COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress, N'UNKNOWN'),
         w.ParcelID, w.SDATAccountNumber,
-        N'DUPLICATE_ADDRESS',
+        N'NO_ADDRESS_MATCH', N'Duplicate address in batch',
         w.StreetNumber, w.StreetName, w.StreetType, w.ZipCode,
         c.EffectiveSDATAccountNumber
     FROM #Work w
@@ -785,14 +794,14 @@ BEGIN TRY
 
     INSERT INTO #ReviewPending (
         MasterAddressID, KdatRecordID, MatchSource, NormalizedIncomingAddress,
-        ParcelID, SDATAccountNumber, ReasonForNoMatch,
+        ParcelID, SDATAccountNumber, ReasonForNoMatch, ReviewDetail,
         StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber
     )
     SELECT
         w.MasterAddressID, w.KdatRecordID, w.MatchSource,
         COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress, N'UNKNOWN'),
         w.ParcelID, w.SDATAccountNumber,
-        N'DUPLICATE_PARCEL',
+        N'AMBIGUOUS_CANDIDATES', N'Duplicate parcel in batch',
         w.StreetNumber, w.StreetName, w.StreetType, w.ZipCode,
         c.EffectiveSDATAccountNumber
     FROM #Work w
@@ -803,56 +812,164 @@ BEGIN TRY
       AND c.AddressRn = 1
       AND c.ParcelRn > 1;
 
-    SET @BadIncomingRows = (SELECT COUNT(*) FROM #ReviewPending);
-
     SET @UprCountBefore = (SELECT COUNT(*) FROM dbo.UPROPERTYRECORDS);
 
-    /* One source row per account — MERGE ON must be 1:1 (Error 8672 if multiple source rows hit same target) */
+    IF OBJECT_ID('tempdb..#UprMergeRanked') IS NOT NULL DROP TABLE #UprMergeRanked;
+
+    SELECT
+        c.*,
+        ROW_NUMBER() OVER (
+            PARTITION BY c.EffectiveSDATAccountNumber
+            ORDER BY CASE c.MatchSource WHEN N'BOTH' THEN 1 WHEN N'KDAT' THEN 2 ELSE 3 END,
+                     c.MasterAddressID, c.KdatRecordID
+        ) AS AccountRn,
+        ROW_NUMBER() OVER (
+            PARTITION BY UPPER(c.EffectiveParcelID)
+            ORDER BY CASE c.MatchSource WHEN N'BOTH' THEN 1 WHEN N'KDAT' THEN 2 ELSE 3 END,
+                     c.MasterAddressID, c.KdatRecordID
+        ) AS ParcelMergeRn
+    INTO #UprMergeRanked
+    FROM #UprCandidate c
+    WHERE c.IsEligibleForUpr = 1
+      AND c.AddressRn = 1
+      AND c.ParcelRn = 1;
+
+    INSERT INTO #ReviewPending (
+        MasterAddressID, KdatRecordID, MatchSource, NormalizedIncomingAddress,
+        ParcelID, SDATAccountNumber, ReasonForNoMatch, ReviewDetail,
+        StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber
+    )
+    SELECT
+        w.MasterAddressID, w.KdatRecordID, w.MatchSource,
+        COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress, N'UNKNOWN'),
+        w.ParcelID, w.SDATAccountNumber,
+        N'AMBIGUOUS_CANDIDATES', N'Duplicate effective account or parcel key in batch',
+        w.StreetNumber, w.StreetName, w.StreetType, w.ZipCode,
+        r.EffectiveSDATAccountNumber
+    FROM #UprMergeRanked r
+    INNER JOIN #Work w
+        ON (w.MasterAddressID IS NOT NULL AND w.MasterAddressID = r.MasterAddressID)
+        OR (w.KdatRecordID IS NOT NULL AND w.KdatRecordID = r.KdatRecordID)
+    WHERE r.AccountRn > 1
+       OR r.ParcelMergeRn > 1;
+
     IF OBJECT_ID('tempdb..#UprMergeSrc') IS NOT NULL DROP TABLE #UprMergeSrc;
 
     SELECT
-        c.MasterAddressID, c.KdatRecordID, c.MatchSource, c.HasRequiredAddress,
-        c.SDATAccountNumber, c.ParcelID, c.OwnerName,
-        c.EffectiveSDATAccountNumber, c.EffectiveParcelID,
-        c.EffectiveStreetNumber, c.EffectiveStreetName, c.EffectiveStreetType,
-        c.EffectiveCity, c.EffectiveState, c.EffectiveZipCode,
-        c.EffectiveNormalizedStreetAddress, c.EffectiveNormalizedFulldAddress,
-        c.EffectiveLatitude, c.EffectiveLongitude, c.EffectiveOwnerName, c.EffectivePropertyType
+        r.MasterAddressID, r.KdatRecordID, r.MatchSource, r.HasRequiredAddress,
+        r.SDATAccountNumber, r.ParcelID, r.OwnerName,
+        r.EffectiveSDATAccountNumber, r.EffectiveParcelID,
+        r.EffectiveStreetNumber, r.EffectiveStreetName, r.EffectiveStreetType,
+        r.EffectiveCity, r.EffectiveState, r.EffectiveZipCode,
+        r.EffectiveNormalizedStreetAddress, r.EffectiveNormalizedFulldAddress,
+        r.EffectiveLatitude, r.EffectiveLongitude, r.EffectiveOwnerName, r.EffectivePropertyType
     INTO #UprMergeSrc
-    FROM (
-        SELECT
-            c.*,
-            ROW_NUMBER() OVER (
-                PARTITION BY c.EffectiveSDATAccountNumber
-                ORDER BY CASE c.MatchSource WHEN N'BOTH' THEN 1 WHEN N'KDAT' THEN 2 ELSE 3 END,
-                         c.MasterAddressID, c.KdatRecordID
-            ) AS AccountRn
-        FROM #UprCandidate c
-        WHERE c.IsEligibleForUpr = 1
-          AND c.AddressRn = 1
-          AND c.ParcelRn = 1
-    ) c
-    WHERE c.AccountRn = 1;
+    FROM #UprMergeRanked r
+    WHERE r.AccountRn = 1
+      AND r.ParcelMergeRn = 1;
 
-    MERGE dbo.UPROPERTYRECORDS AS tgt
-    USING #UprMergeSrc AS src
-    ON tgt.SDATAccountNumber = src.EffectiveSDATAccountNumber
+    /* Parcel already on file under a different SDAT account — review, do not insert */
+    INSERT INTO #ReviewPending (
+        MasterAddressID, KdatRecordID, MatchSource, NormalizedIncomingAddress,
+        ParcelID, SDATAccountNumber, ReasonForNoMatch, ReviewDetail,
+        StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber
+    )
+    SELECT
+        w.MasterAddressID, w.KdatRecordID, w.MatchSource,
+        COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress, N'UNKNOWN'),
+        w.ParcelID, w.SDATAccountNumber,
+        N'NO_PARCEL_MATCH', N'Parcel already assigned to another UPR record',
+        w.StreetNumber, w.StreetName, w.StreetType, w.ZipCode,
+        s.EffectiveSDATAccountNumber
+    FROM #UprMergeSrc s
+    INNER JOIN #Work w
+        ON (w.MasterAddressID IS NOT NULL AND w.MasterAddressID = s.MasterAddressID)
+        OR (w.KdatRecordID IS NOT NULL AND w.KdatRecordID = s.KdatRecordID)
+    WHERE EXISTS (
+        SELECT 1
+        FROM dbo.UPROPERTYRECORDS upr
+        WHERE upr.ParcelID = s.EffectiveParcelID
+          AND upr.SDATAccountNumber <> s.EffectiveSDATAccountNumber
+    );
+
+    DELETE s
+    FROM #UprMergeSrc s
+    WHERE EXISTS (
+        SELECT 1
+        FROM dbo.UPROPERTYRECORDS upr
+        WHERE upr.ParcelID = s.EffectiveParcelID
+          AND upr.SDATAccountNumber <> s.EffectiveSDATAccountNumber
+    );
+
+    /* Address already on file under a different SDAT account — review, do not insert */
+    INSERT INTO #ReviewPending (
+        MasterAddressID, KdatRecordID, MatchSource, NormalizedIncomingAddress,
+        ParcelID, SDATAccountNumber, ReasonForNoMatch, ReviewDetail,
+        StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber
+    )
+    SELECT
+        w.MasterAddressID, w.KdatRecordID, w.MatchSource,
+        COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress, N'UNKNOWN'),
+        w.ParcelID, w.SDATAccountNumber,
+        N'NO_ADDRESS_MATCH', N'Address already assigned to another UPR record',
+        w.StreetNumber, w.StreetName, w.StreetType, w.ZipCode,
+        s.EffectiveSDATAccountNumber
+    FROM #UprMergeSrc s
+    INNER JOIN #Work w
+        ON (w.MasterAddressID IS NOT NULL AND w.MasterAddressID = s.MasterAddressID)
+        OR (w.KdatRecordID IS NOT NULL AND w.KdatRecordID = s.KdatRecordID)
+    WHERE EXISTS (
+        SELECT 1
+        FROM dbo.UPROPERTYRECORDS upr
+        WHERE upr.StreetNumber = s.EffectiveStreetNumber
+          AND upr.StreetName = s.EffectiveStreetName
+          AND upr.StreetType = s.EffectiveStreetType
+          AND upr.ZipCode = s.EffectiveZipCode
+          AND upr.SDATAccountNumber <> s.EffectiveSDATAccountNumber
+    );
+
+    DELETE s
+    FROM #UprMergeSrc s
+    WHERE EXISTS (
+        SELECT 1
+        FROM dbo.UPROPERTYRECORDS upr
+        WHERE upr.StreetNumber = s.EffectiveStreetNumber
+          AND upr.StreetName = s.EffectiveStreetName
+          AND upr.StreetType = s.EffectiveStreetType
+          AND upr.ZipCode = s.EffectiveZipCode
+          AND upr.SDATAccountNumber <> s.EffectiveSDATAccountNumber
+    );
+
+    SET @BadIncomingRows = (SELECT COUNT(*) FROM #ReviewPending);
+
+    MERGE dbo.UPROPERTYRECORDS AS upr
+    USING #UprMergeSrc AS s
+    ON upr.SDATAccountNumber = s.EffectiveSDATAccountNumber
     WHEN MATCHED THEN UPDATE SET
-        tgt.ParcelID          = COALESCE(
-            NULLIF(LTRIM(RTRIM(src.ParcelID)), N''),
-            tgt.ParcelID,
-            src.EffectiveParcelID
-        ),
-        tgt.Owner             = LEFT(COALESCE(tgt.Owner, src.EffectiveOwnerName), 100),
-        tgt.Latitude          = COALESCE(tgt.Latitude, src.EffectiveLatitude),
-        tgt.Longitude         = COALESCE(tgt.Longitude, src.EffectiveLongitude),
-        tgt.PropertyTypeCode  = COALESCE(
-            NULLIF(LTRIM(RTRIM(tgt.PropertyTypeCode)), N''),
-            src.EffectivePropertyType,
+        upr.ParcelID          = CASE
+            WHEN NULLIF(s.EffectiveParcelID, N'') IS NOT NULL
+                 AND EXISTS (
+                     SELECT 1
+                     FROM dbo.UPROPERTYRECORDS p
+                     WHERE p.ParcelID = s.EffectiveParcelID
+                       AND p.UPropertyRecordsID <> upr.UPropertyRecordsID
+                 ) THEN upr.ParcelID
+            ELSE COALESCE(
+                NULLIF(LTRIM(RTRIM(s.ParcelID)), N''),
+                upr.ParcelID,
+                s.EffectiveParcelID
+            )
+        END,
+        upr.Owner             = LEFT(COALESCE(upr.Owner, s.EffectiveOwnerName), 100),
+        upr.Latitude          = COALESCE(upr.Latitude, s.EffectiveLatitude),
+        upr.Longitude         = COALESCE(upr.Longitude, s.EffectiveLongitude),
+        upr.PropertyTypeCode  = COALESCE(
+            NULLIF(LTRIM(RTRIM(upr.PropertyTypeCode)), N''),
+            s.EffectivePropertyType,
             @DefaultSdatPropertyType
         ),
-        tgt.UpdatedDate       = @Now,
-        tgt.UpdatedBy         = @RunUser
+        upr.UpdatedDate       = @Now,
+        upr.UpdatedBy         = @RunUser
     WHEN NOT MATCHED THEN INSERT (
         SDATAccountNumber, ParcelID, PropertyName, Owner,
         StreetNumber, StreetName, StreetType,
@@ -861,12 +978,12 @@ BEGIN TRY
         PropertyTypeCode, PropertyStatusCode, IsActive,
         CreatedDate, CreatedBy, UpdatedDate, UpdatedBy
     ) VALUES (
-        src.EffectiveSDATAccountNumber, src.EffectiveParcelID, NULL, src.EffectiveOwnerName,
-        src.EffectiveStreetNumber, src.EffectiveStreetName, src.EffectiveStreetType,
-        src.EffectiveCity, src.EffectiveState, src.EffectiveZipCode,
-        src.EffectiveNormalizedStreetAddress, src.EffectiveNormalizedFulldAddress,
-        src.EffectiveLatitude, src.EffectiveLongitude,
-        src.EffectivePropertyType, N'ACTIVE', 1,
+        s.EffectiveSDATAccountNumber, s.EffectiveParcelID, NULL, s.EffectiveOwnerName,
+        s.EffectiveStreetNumber, s.EffectiveStreetName, s.EffectiveStreetType,
+        s.EffectiveCity, s.EffectiveState, s.EffectiveZipCode,
+        s.EffectiveNormalizedStreetAddress, s.EffectiveNormalizedFulldAddress,
+        s.EffectiveLatitude, s.EffectiveLongitude,
+        s.EffectivePropertyType, N'ACTIVE', 1,
         @Now, @RunUser, @Now, @RunUser
     );
 
@@ -912,7 +1029,7 @@ BEGIN TRY
       AND c.ParcelRn = 1;
 
     /* Status history for newly created UPR records only (idempotent re-runs) */
-    INSERT INTO dbo.UPR_STATUSHISTORY (
+    INSERT INTO dbo.UPRSTATUSHISTORY (
         UPropertyRecordsID, SDATAccountNumber, OldStatusCode, NewStatusCode,
         ChangeReason, ParcelID, Owner, StreetNumber, StreetName, StreetType,
         City, ZipCode, PropertyTypeCode, ChangeSource, ChangedBy, ChangedDate,
@@ -986,7 +1103,7 @@ BEGIN TRY
           WHERE x.SourceSystemCode = s.SourceSystemCode
             AND x.SourceRecordID = s.SourceRecordID
             AND x.SourceEntityType = s.SourceEntityType
-            AND ISNULL(x.DeleteInd, 0) = 0
+            AND x.IsActive = 1
       );
 
     SET @MasterAddressXrefInserted = @@ROWCOUNT;
@@ -1021,7 +1138,7 @@ BEGIN TRY
           WHERE x.SourceSystemCode = s.SourceSystemCode
             AND x.SourceRecordID = s.SourceRecordID
             AND x.SourceEntityType = s.SourceEntityType
-            AND ISNULL(x.DeleteInd, 0) = 0
+            AND x.IsActive = 1
       );
 
     SET @SDATXrefInserted = @@ROWCOUNT;
@@ -1043,6 +1160,7 @@ BEGIN TRY
         MasterAddressID     INT NULL,
         KdatRecordID        INT NULL,
         ReasonForNoMatch    NVARCHAR(255) NOT NULL,
+        ReviewDetail        NVARCHAR(255) NOT NULL,
         UPropertyRecordsID  INT NOT NULL,
         SourceSystemCode    NVARCHAR(30) NOT NULL,
         SourceRecordID      NVARCHAR(100) NOT NULL,
@@ -1050,13 +1168,14 @@ BEGIN TRY
     );
 
     INSERT INTO #ReviewXrefStage (
-        MasterAddressID, KdatRecordID, ReasonForNoMatch,
+        MasterAddressID, KdatRecordID, ReasonForNoMatch, ReviewDetail,
         UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType
     )
     SELECT
         rp.MasterAddressID,
         rp.KdatRecordID,
         rp.ReasonForNoMatch,
+        rp.ReviewDetail,
         anchor.UPropertyRecordsID,
         CASE WHEN rp.KdatRecordID IS NOT NULL THEN N'KDAT' ELSE N'ADDRESS_MASTER' END,
         CASE WHEN rp.KdatRecordID IS NOT NULL
@@ -1079,7 +1198,7 @@ BEGIN TRY
             INNER JOIN #UPRMap win_map
                 ON (winner.MasterAddressID IS NOT NULL AND win_map.MasterAddressID = winner.MasterAddressID)
                 OR (winner.KdatRecordID IS NOT NULL AND win_map.KdatRecordID = winner.KdatRecordID)
-            WHERE rp.ReasonForNoMatch IN (N'DUPLICATE_ADDRESS', N'DUPLICATE_PARCEL')
+            WHERE rp.ReasonForNoMatch IN (N'NO_ADDRESS_MATCH', N'AMBIGUOUS_CANDIDATES', N'NO_PARCEL_MATCH')
               AND (
                     (loser.MasterAddressID IS NOT NULL AND loser.MasterAddressID = rp.MasterAddressID)
                  OR (loser.KdatRecordID IS NOT NULL AND loser.KdatRecordID = rp.KdatRecordID)
@@ -1122,14 +1241,14 @@ BEGIN TRY
     IF OBJECT_ID('tempdb..#ReviewXrefStageDeduped') IS NOT NULL DROP TABLE #ReviewXrefStageDeduped;
 
     SELECT
-        MasterAddressID, KdatRecordID, ReasonForNoMatch,
+        MasterAddressID, KdatRecordID, ReasonForNoMatch, ReviewDetail,
         UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType
     INTO #ReviewXrefStageDeduped
     FROM (
         SELECT
             s.*,
             ROW_NUMBER() OVER (
-                PARTITION BY s.UPropertyRecordsID, s.SourceSystemCode, s.SourceRecordID
+                PARTITION BY s.UPropertyRecordsID, s.SourceSystemCode, s.SourceRecordID, s.SourceEntityType
                 ORDER BY s.ReasonForNoMatch
             ) AS StageRn
         FROM #ReviewXrefStage s
@@ -1157,7 +1276,7 @@ BEGIN TRY
     SELECT
         src.UPropertyRecordsID, src.SourceSystemCode, src.SourceRecordID, src.SourceEntityType,
         N'AddressNormalized', N'REJECTED', N'NONE', N'PENDING_REVIEW',
-        1, @Now, CONCAT(N'Review: ', src.ReasonForNoMatch), @Now, @Now, @RunUser
+        1, @Now, CONCAT(N'Review: ', src.ReviewDetail), @Now, @Now, @RunUser
     FROM #ReviewXrefStageDeduped src
     WHERE NOT EXISTS (
         SELECT 1
@@ -1165,7 +1284,7 @@ BEGIN TRY
         WHERE x.SourceSystemCode = src.SourceSystemCode
           AND x.SourceRecordID = src.SourceRecordID
           AND x.SourceEntityType = src.SourceEntityType
-          AND ISNULL(x.DeleteInd, 0) = 0
+          AND x.IsActive = 1
     );
 
     INSERT INTO @ReviewXrefOut (
@@ -1240,30 +1359,38 @@ BEGIN TRY
     CREATE CLUSTERED INDEX IX_ExtAddr_System ON #ExtAddr (SourceSystemCode, NormAddress);
     CREATE NONCLUSTERED INDEX IX_ExtAddr_Full ON #ExtAddr (SourceSystemCode, NormFullAddress);
 
+    SET @Sql = N'
     INSERT INTO #ExtAddr (SourceSystemCode, SourceRecordID, SourceEntityType, TaxOrAccount, NormAddress, NormFullAddress)
-    SELECT N'eProperty', CONVERT(VARCHAR(100), ep.PropertyID), N'Property', ep.TaxID,
+    SELECT N''eProperty'', CONVERT(VARCHAR(100), ep.PropertyID), N''Property'', ep.TaxID,
         dbo.fn_UPR_NormalizeAddressLine(ep.StreetAddress),
         dbo.fn_UPR_NormalizeFullAddressLine(ep.StreetAddress, ep.City, ep.ZipCode)
-    FROM DHCA_LicensingAndRegistration.dbo.Property ep;
+    FROM DHCA_LicensingAndRegistration.dbo.Property ep';
+    EXEC sys.sp_executesql @Sql;
 
+    SET @Sql = N'
     INSERT INTO #ExtAddr (SourceSystemCode, SourceRecordID, SourceEntityType, TaxOrAccount, NormAddress, NormFullAddress)
-    SELECT N'CASE', CONVERT(VARCHAR(100), c.CaseNumber), N'Case', NULL,
+    SELECT N''CASE'', CONVERT(VARCHAR(100), c.CaseNumber), N''Case'', NULL,
         dbo.fn_UPR_NormalizeAddressLine(c.StreetAddress),
         dbo.fn_UPR_NormalizeFullAddressLine(c.StreetAddress, c.City, c.ZipCode)
-    FROM DHCA_OLTA.dbo.[Case] c;
+    FROM DHCA_OLTA.dbo.[Case] c';
+    EXEC sys.sp_executesql @Sql;
 
+    SET @Sql = N'
     INSERT INTO #ExtAddr (SourceSystemCode, SourceRecordID, SourceEntityType, TaxOrAccount, NormAddress, NormFullAddress)
-    SELECT N'MPDU', CONVERT(VARCHAR(100), mp.DevelopmentID), N'Development', NULL,
+    SELECT N''MPDU'', CONVERT(VARCHAR(100), mp.DevelopmentID), N''Development'', NULL,
         dbo.fn_UPR_NormalizeAddressLine(mp.StreetAddress),
         dbo.fn_UPR_NormalizeFullAddressLine(mp.StreetAddress, mp.City, mp.ZipCode)
-    FROM DHCA_MPDU.dbo.Development mp;
+    FROM DHCA_MPDU.dbo.Development mp';
+    EXEC sys.sp_executesql @Sql;
 
+    SET @Sql = N'
     INSERT INTO #ExtAddr (SourceSystemCode, SourceRecordID, SourceEntityType, TaxOrAccount, NormAddress, NormFullAddress)
-    SELECT N'MULTIFAMILY', CONVERT(VARCHAR(100), mf.AddressID), N'MultifamilyLoan', NULL,
-        dbo.fn_UPR_NormalizeAddressLine(CONCAT(mf.StreetNumber, N' ', mf.StreetName, N' ', mf.StreetType)),
-        dbo.fn_UPR_NormalizeFullAddressLine(CONCAT(mf.StreetNumber, N' ', mf.StreetName, N' ', mf.StreetType), mf.City, mf.ZipCode)
+    SELECT N''MULTIFAMILY'', CONVERT(VARCHAR(100), mf.AddressID), N''MultifamilyLoan'', NULL,
+        dbo.fn_UPR_NormalizeAddressLine(CONCAT(mf.StreetNumber, N'' '', mf.StreetName, N'' '', mf.StreetType)),
+        dbo.fn_UPR_NormalizeFullAddressLine(CONCAT(mf.StreetNumber, N'' '', mf.StreetName, N'' '', mf.StreetType), mf.City, mf.ZipCode)
     FROM DHCA_MultifamilyLoans.dbo.Address mf
-    WHERE mf.DeletedInd = 0;
+    WHERE mf.DeletedInd = 0';
+    EXEC sys.sp_executesql @Sql;
 
     /* --- 7a. Property (eProperty): account/TaxID or normalized address --- */
     INSERT INTO #ExtMatch (
@@ -1399,7 +1526,7 @@ BEGIN TRY
 
     DROP TABLE #ExtMatchDeduped;
 
-    /* eProperty — NOT EXISTS on SourceSystem + SourceRecordID + EntityType + DeleteInd */
+    /* eProperty — NOT EXISTS on SourceSystem + SourceRecordID + EntityType + IsActive */
     INSERT INTO dbo.UPROPERTYRECORDS_XREF (
         UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
         MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus,
@@ -1417,7 +1544,7 @@ BEGIN TRY
           WHERE x.SourceSystemCode = N'eProperty'
             AND x.SourceRecordID = e.SourceRecordID
             AND x.SourceEntityType = e.SourceEntityType
-            AND ISNULL(x.DeleteInd, 0) = 0
+            AND x.IsActive = 1
       );
 
     SET @EPropertyXrefInserted = @@ROWCOUNT;
@@ -1440,7 +1567,7 @@ BEGIN TRY
           WHERE x.SourceSystemCode = N'CASE'
             AND x.SourceRecordID = e.SourceRecordID
             AND x.SourceEntityType = e.SourceEntityType
-            AND ISNULL(x.DeleteInd, 0) = 0
+            AND x.IsActive = 1
       );
 
     SET @CaseXrefInserted = @@ROWCOUNT;
@@ -1463,7 +1590,7 @@ BEGIN TRY
           WHERE x.SourceSystemCode = N'MPDU'
             AND x.SourceRecordID = e.SourceRecordID
             AND x.SourceEntityType = e.SourceEntityType
-            AND ISNULL(x.DeleteInd, 0) = 0
+            AND x.IsActive = 1
       );
 
     SET @MPDUXrefInserted = @@ROWCOUNT;
@@ -1486,7 +1613,7 @@ BEGIN TRY
           WHERE x.SourceSystemCode = N'MULTIFAMILY'
             AND x.SourceRecordID = e.SourceRecordID
             AND x.SourceEntityType = e.SourceEntityType
-            AND ISNULL(x.DeleteInd, 0) = 0
+            AND x.IsActive = 1
       );
 
     SET @MultifamilyXrefInserted = @@ROWCOUNT;
@@ -1507,7 +1634,7 @@ BEGIN TRY
         m.NormalizedFullAddress,
         m.ParcelID,
         m.SDATAccountNumber,
-        N'NO_EXTERNAL_MATCH',
+        N'OTHER',
         N'PENDING_REVIEW'
     FROM #UPRMap m
     CROSS APPLY (
@@ -1533,7 +1660,8 @@ BEGIN TRY
       AND NOT EXISTS (
           SELECT 1 FROM dbo.UPRMATCHREVIEW_Q q
           WHERE q.UPropertyRecords_XrefID = xref.UPropertyRecords_XrefID
-            AND q.ReasonForNoMatch = N'NO_EXTERNAL_MATCH'
+            AND q.ReasonForNoMatch = N'OTHER'
+            AND q.IncomingSourceSystem = N'EXTERNAL'
       );
 
     SET @ReviewExternalInserted = @@ROWCOUNT;
@@ -1595,7 +1723,7 @@ BEGIN TRY
             b.BuildingID,
             UnitNumber = COALESCE(NULLIF(LTRIM(RTRIM(m.Unit)), N''), N'U1'),
             upr.SDATAccountNumber,
-            UnitTypeCode = CASE upr.PropertyTypeCode WHEN N'CONDO' THEN N'COND' ELSE N'APT' END,
+            UnitTypeCode = CASE upr.PropertyTypeCode WHEN N'CONDO' THEN N'CONDO' ELSE N'APT' END,
             ROW_NUMBER() OVER (
                 PARTITION BY
                     upr.UPropertyRecordsID,
@@ -1683,7 +1811,6 @@ BEGIN TRY
     PRINT N'CASE XREF inserted: ' + CONVERT(VARCHAR(20), @CaseXrefInserted);
     PRINT N'MPDU XREF inserted: ' + CONVERT(VARCHAR(20), @MPDUXrefInserted);
     PRINT N'eProperty XREF inserted: ' + CONVERT(VARCHAR(20), @EPropertyXrefInserted);
-    PRINT N'Multifamily XREF inserted: ' + CONVERT(VARCHAR(20), @MultifamilyXrefInserted);
     PRINT N'Total XREF inserted: ' + CONVERT(VARCHAR(20), @TotalXrefInserted);
     PRINT N' ';
     PRINT N'Review_Q records inserted: ' + CONVERT(VARCHAR(20), @ReviewInserted);
