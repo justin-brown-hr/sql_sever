@@ -925,7 +925,17 @@ BEGIN TRY
             AND ISNULL(rp.KdatRecordID, -1) = ISNULL(w.KdatRecordID, -1)
       );
 
-    DROP TABLE #UprMergeSrc;
+    TRUNCATE TABLE #UprMergeSrc;
+
+    INSERT INTO #UprMergeSrc (
+        MasterAddressID, KdatRecordID, MatchSource, HasRequiredAddress,
+        SDATAccountNumber, ParcelID, OwnerName,
+        EffectiveSDATAccountNumber, EffectiveParcelID,
+        EffectiveStreetNumber, EffectiveStreetName, EffectiveStreetType,
+        EffectiveCity, EffectiveState, EffectiveZipCode,
+        EffectiveNormalizedStreetAddress, EffectiveNormalizedFulldAddress,
+        EffectiveLatitude, EffectiveLongitude, EffectiveOwnerName, EffectivePropertyType
+    )
     SELECT
         MasterAddressID, KdatRecordID, MatchSource, HasRequiredAddress,
         SDATAccountNumber, ParcelID, OwnerName,
@@ -934,7 +944,6 @@ BEGIN TRY
         EffectiveCity, EffectiveState, EffectiveZipCode,
         EffectiveNormalizedStreetAddress, EffectiveNormalizedFulldAddress,
         EffectiveLatitude, EffectiveLongitude, EffectiveOwnerName, EffectivePropertyType
-    INTO #UprMergeSrc
     FROM #UprMergeAddr
     WHERE AddrRn = 1;
     DROP TABLE #UprMergeAddr;
