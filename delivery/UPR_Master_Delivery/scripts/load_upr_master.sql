@@ -27,10 +27,17 @@
     DHCA_MPDU.dbo.Development
     DHCA_MultifamilyLoans.dbo.Address
 
-  HOW TO RUN: Execute this script in SSMS against UPRDB_Test. No other scripts required.
+  ROBUSTNESS:
+    Preflight checks required tables/columns before any writes
+    REF seeds populate IsActive, CreatedDate, UpdatedDate, audit user IDs
+    DHCA source reads wrapped in TRY/CATCH (external sources warn, MA/SDAT fail clear)
+    UPR MERGE guarded against address duplicates and invalid rows
+    Safe to re-run (idempotent MERGE / NOT EXISTS patterns)
+
+  HOW TO RUN: Execute this script in SSMS against your UPR database (e.g. UPRXDB_TEST).
 ================================================================================
 */
-USE UPRDB_Test;
+USE UPRDB_Test;  /* client: change to UPRXDB_TEST if needed */
 GO
 /* ---- Inline normalization functions ---- */
 CREATE OR ALTER FUNCTION dbo.fn_UPR_StdStreetToken (@token NVARCHAR(50))
@@ -182,6 +189,7 @@ SET NOCOUNT ON;
 SET XACT_ABORT ON;
 
 DECLARE @RunUser NVARCHAR(100) = SUSER_SNAME();
+DECLARE @AuditUser NVARCHAR(128) = COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(128), SUSER_SNAME()))), N''), N'SYSTEM');
 DECLARE @Now     DATETIME2(0)  = SYSDATETIME();
 DECLARE @BatchStartTime DATETIME2(0) = SYSDATETIME();
 DECLARE @DefaultState  CHAR(2)   = N'MD';
@@ -200,27 +208,118 @@ DECLARE @BatchEndTime DATETIME2(0);
 DECLARE @UprCountBefore INT = 0;
 DECLARE @UprMergeRowsAffected INT = 0;
 DECLARE @Sql NVARCHAR(MAX);
+DECLARE @PreflightErrors NVARCHAR(MAX) = N'';
+DECLARE @SourceWarning NVARCHAR(500);
+
+/* Resolve audit-user column names (client DDL variants) */
+DECLARE @RefUserCreateCol SYSNAME = CASE
+    WHEN COL_LENGTH('dbo.REF_PROPERTYTYPE', 'CreationUserID')  IS NOT NULL THEN N'CreationUserID'
+    WHEN COL_LENGTH('dbo.REF_PROPERTYTYPE', 'CreationUSERID')  IS NOT NULL THEN N'CreationUSERID'
+    ELSE NULL END;
+DECLARE @RefUserUpdateCol SYSNAME = CASE
+    WHEN COL_LENGTH('dbo.REF_PROPERTYTYPE', 'LastUpdatedUserID')  IS NOT NULL THEN N'LastUpdatedUserID'
+    WHEN COL_LENGTH('dbo.REF_PROPERTYTYPE', 'LastUpdatedUSERID')  IS NOT NULL THEN N'LastUpdatedUSERID'
+    ELSE NULL END;
 
 BEGIN TRY
     BEGIN TRANSACTION;
 
     /* ========================================================================
-       1. ENSURE REFERENCE DATA (idempotent MERGE)
+       0. PREFLIGHT — required tables / functions before any writes
        ======================================================================== */
+    SELECT @PreflightErrors = STRING_AGG(v.ObjName, N', ')
+    FROM (VALUES
+        (N'dbo.UPROPERTYRECORDS',        N'UPROPERTYRECORDS'),
+        (N'dbo.UPROPERTYRECORDS_XREF',   N'UPROPERTYRECORDS_XREF'),
+        (N'dbo.UPRMATCHREVIEW_Q',        N'UPRMATCHREVIEW_Q'),
+        (N'dbo.UPRSTATUSHISTORY',        N'UPRSTATUSHISTORY'),
+        (N'dbo.AuditLog',                N'AuditLog'),
+        (N'dbo.REF_PROPERTYTYPE',        N'REF_PROPERTYTYPE'),
+        (N'dbo.REF_SOURCESYSTEM',        N'REF_SOURCESYSTEM'),
+        (N'dbo.REF_MATCHMETHOD',         N'REF_MATCHMETHOD'),
+        (N'dbo.REF_MATCHCONFIDENCE',     N'REF_MATCHCONFIDENCE')
+    ) AS v(ObjName, Label)
+    WHERE OBJECT_ID(v.ObjName, N'U') IS NULL;
+
+    IF @PreflightErrors IS NOT NULL
+        THROW 50001,
+            CONCAT(N'Missing required tables: ', @PreflightErrors,
+                   N'. Recreate UPR schema from client DDL (docs/ddl.md), then re-run.'),
+            1;
+
+    IF OBJECT_ID(N'dbo.fn_UPR_NormalizeZipCode', N'FN') IS NULL
+        THROW 50002,
+            N'Normalization functions not found. Run this script from the beginning (includes CREATE FUNCTION block).',
+            1;
+
+    IF COL_LENGTH('dbo.REF_MATCHCONFIDENCE', 'IsActive') IS NULL
+        THROW 50003,
+            N'REF_MATCHCONFIDENCE.IsActive column missing. Recreate REF tables from client DDL.',
+            1;
+
+    IF @RefUserCreateCol IS NULL OR @RefUserUpdateCol IS NULL
+        THROW 50004,
+            N'REF_PROPERTYTYPE audit columns (CreationUserID / LastUpdatedUserID) missing. Recreate from client DDL.',
+            1;
+
+    PRINT N'Preflight OK — database: ' + DB_NAME()
+        + N' | started: ' + CONVERT(NVARCHAR(30), @BatchStartTime, 120);
+
+    /* ========================================================================
+       1. ENSURE REFERENCE DATA (idempotent — all NOT NULL / audit columns per DDL)
+       ======================================================================== */
+    SET @Sql = N'
     MERGE dbo.REF_PROPERTYTYPE AS t
     USING (VALUES
-        (N'APT',   N'Apartment Complex',     1, 1),
-        (N'CONDO', N'Condominium Property',  1, 1),
-        (N'TH',    N'Townhouse Community',   1, 1),
-        (N'MULTI', N'Multi-Family Property', 1, 1),
-        (N'SF',    N'Single Family Property',1, 0),
-        (N'LAND',  N'Vacant Land',           0, 0),
-        (N'MIXED', N'Mixed Use Property',    1, 1)
+        (N''APT'',   N''Apartment Complex'',     1, 1),
+        (N''CONDO'', N''Condominium Property'',  1, 1),
+        (N''TH'',    N''Townhouse Community'',   1, 1),
+        (N''MULTI'', N''Multi-Family Property'', 1, 1),
+        (N''SF'',    N''Single Family Property'',1, 0),
+        (N''LAND'',  N''Vacant Land'',           0, 0),
+        (N''MIXED'', N''Mixed Use Property'',    1, 1)
     ) AS s(Code, Name, AllowBldg, AllowUnit)
     ON t.PropertyTypeCode = s.Code
+    WHEN MATCHED THEN UPDATE SET
+        t.PropertyTypeName    = s.Name,
+        t.AllowsBuildings     = s.AllowBldg,
+        t.AllowsUnits         = s.AllowUnit,
+        t.DeletedInd          = 0,
+        t.' + QUOTENAME(@RefUserCreateCol) + N' = COALESCE(NULLIF(t.' + QUOTENAME(@RefUserCreateCol) + N', N''''), @AuditUser),
+        t.CreationDate        = COALESCE(t.CreationDate, @Now),
+        t.' + QUOTENAME(@RefUserUpdateCol) + N' = COALESCE(NULLIF(t.' + QUOTENAME(@RefUserUpdateCol) + N', N''''), @AuditUser),
+        t.LastUpdatedDate     = @Now
     WHEN NOT MATCHED THEN
-        INSERT (PropertyTypeCode, PropertyTypeName, AllowsBuildings, AllowsUnits, DeletedInd, CreationUSERID, LastUpdatedUserID)
-        VALUES (s.Code, s.Name, s.AllowBldg, s.AllowUnit, 0, N'SYSTEM', N'SYSTEM');
+        INSERT (
+            PropertyTypeCode, PropertyTypeName, AllowsBuildings, AllowsUnits, DeletedInd,
+            ' + QUOTENAME(@RefUserCreateCol) + N', CreationDate, ' + QUOTENAME(@RefUserUpdateCol) + N', LastUpdatedDate
+        )
+        VALUES (s.Code, s.Name, s.AllowBldg, s.AllowUnit, 0, @AuditUser, @Now, @AuditUser, @Now);';
+    EXEC sys.sp_executesql @Sql,
+        N'@AuditUser NVARCHAR(128), @Now DATETIME2(0)',
+        @AuditUser = @AuditUser, @Now = @Now;
+
+    IF OBJECT_ID('dbo.REF_PROPERTY_STATUSCODE', 'U') IS NOT NULL
+    BEGIN
+        MERGE dbo.REF_PROPERTY_STATUSCODE AS t
+        USING (VALUES
+            (N'ACTIVE',   N'Active property'),
+            (N'INACTIVE', N'Inactive property'),
+            (N'PENDING',  N'Pending property'),
+            (N'RETIRED',  N'Retired property')
+        ) AS s(Code, Descr)
+        ON t.StatusCode = s.Code
+        WHEN MATCHED THEN UPDATE SET
+            t.[Description]       = s.Descr,
+            t.DeletedInd          = 0,
+            t.CreationUserID      = COALESCE(NULLIF(t.CreationUserID, N''), @AuditUser),
+            t.CreationDate        = COALESCE(t.CreationDate, @Now),
+            t.LastUpdatedUserID   = COALESCE(NULLIF(t.LastUpdatedUserID, N''), @AuditUser),
+            t.LastUpdatedDate     = @Now
+        WHEN NOT MATCHED THEN
+            INSERT (StatusCode, [Description], DeletedInd, CreationUserID, CreationDate, LastUpdatedUserID, LastUpdatedDate)
+            VALUES (s.Code, s.Descr, 0, @AuditUser, @Now, @AuditUser, @Now);
+    END;
 
     MERGE dbo.REF_SOURCESYSTEM AS t
     USING (VALUES
@@ -232,50 +331,176 @@ BEGIN TRY
         (N'MULTIFAMILY',    N'Multifamily loans',   N'Multifamily loan address')
     ) AS s(Code, Name, Descr)
     ON t.SourceSystemCode = s.Code
+    WHEN MATCHED THEN UPDATE SET
+        t.SourceSystemName = s.Name,
+        t.[Description]    = s.Descr,
+        t.IsActive         = 1,
+        t.CreatedDate      = COALESCE(t.CreatedDate, @Now),
+        t.UpdatedDate      = @Now
     WHEN NOT MATCHED THEN
-        INSERT (SourceSystemCode, SourceSystemName, [Description])
-        VALUES (s.Code, s.Name, s.Descr);
+        INSERT (SourceSystemCode, SourceSystemName, [Description], IsActive, CreatedDate, UpdatedDate)
+        VALUES (s.Code, s.Name, s.Descr, 1, @Now, @Now);
 
-    MERGE dbo.REF_MATCHMETHOD AS t
-    USING (VALUES
-        (N'ParcelID',          N'Parcel match',        N'Exact parcel'),
-        (N'SDATAccount',       N'Tax/Account match',   N'Exact account / tax id'),
-        (N'AddressExact',      N'Exact address',       N'Exact normalized match'),
-        (N'AddressNormalized', N'Normalized address',  N'Normalized composite'),
-        (N'GISProximity',      N'GIS proximity',       N'Coordinate proximity'),
-        (N'Manual',            N'Manual',              N'Steward confirmed')
-    ) AS s(Code, Name, Descr)
-    ON t.MatchMethodCode = s.Code
-    WHEN NOT MATCHED THEN
-        INSERT (MatchMethodCode, MatchMethodName, [Description])
-        VALUES (s.Code, s.Name, s.Descr);
+    IF COL_LENGTH('dbo.REF_MATCHMETHOD', 'IsAutomated') IS NOT NULL
+    BEGIN
+        MERGE dbo.REF_MATCHMETHOD AS t
+        USING (VALUES
+            (N'ParcelID',          N'Parcel match',        N'Exact parcel'),
+            (N'SDATAccount',       N'Tax/Account match',   N'Exact account / tax id'),
+            (N'AddressExact',      N'Exact address',       N'Exact normalized match'),
+            (N'AddressNormalized', N'Normalized address',  N'Normalized composite'),
+            (N'GISProximity',      N'GIS proximity',       N'Coordinate proximity'),
+            (N'Manual',            N'Manual',              N'Steward confirmed')
+        ) AS s(Code, Name, Descr)
+        ON t.MatchMethodCode = s.Code
+        WHEN MATCHED THEN UPDATE SET
+            t.MatchMethodName = s.Name,
+            t.[Description]   = s.Descr,
+            t.IsAutomated     = 1,
+            t.IsActive        = 1,
+            t.CreatedDate     = COALESCE(t.CreatedDate, @Now),
+            t.UpdatedDate     = @Now
+        WHEN NOT MATCHED THEN
+            INSERT (
+                MatchMethodCode, MatchMethodName, [Description],
+                IsAutomated, IsActive, CreatedDate, UpdatedDate
+            )
+            VALUES (s.Code, s.Name, s.Descr, 1, 1, @Now, @Now);
+    END
+    ELSE
+    BEGIN
+        MERGE dbo.REF_MATCHMETHOD AS t
+        USING (VALUES
+            (N'ParcelID',          N'Parcel match',        N'Exact parcel'),
+            (N'SDATAccount',       N'Tax/Account match',   N'Exact account / tax id'),
+            (N'AddressExact',      N'Exact address',       N'Exact normalized match'),
+            (N'AddressNormalized', N'Normalized address',  N'Normalized composite'),
+            (N'GISProximity',      N'GIS proximity',       N'Coordinate proximity'),
+            (N'Manual',            N'Manual',              N'Steward confirmed')
+        ) AS s(Code, Name, Descr)
+        ON t.MatchMethodCode = s.Code
+        WHEN MATCHED THEN UPDATE SET
+            t.MatchMethodName = s.Name,
+            t.[Description]   = s.Descr,
+            t.IsActive        = 1,
+            t.CreatedDate     = COALESCE(t.CreatedDate, @Now),
+            t.UpdatedDate     = @Now
+        WHEN NOT MATCHED THEN
+            INSERT (MatchMethodCode, MatchMethodName, [Description], IsActive, CreatedDate, UpdatedDate)
+            VALUES (s.Code, s.Name, s.Descr, 1, @Now, @Now);
+    END;
 
     MERGE dbo.REF_MATCHCONFIDENCE AS t
     USING (VALUES
-        (N'HIGH',     N'High',     100, N'Very reliable', @Now, @Now),
-        (N'MEDIUM',   N'Medium',    75, N'Likely', @Now, @Now),
-        (N'LOW',      N'Low',       55, N'Uncertain', @Now, @Now),
-        (N'VERIFIED', N'Verified', 110, N'Human verified', @Now, @Now),
-        (N'NONE',     N'None',       0, N'No confidence assigned', @Now, @Now)
-    ) AS s(Code, Name, RankVal, Descr, CreationDate, UpdatedDate)
+        (N'HIGH',     N'High',     100, N'Very reliable'),
+        (N'MEDIUM',   N'Medium',    75, N'Likely'),
+        (N'LOW',      N'Low',       55, N'Uncertain'),
+        (N'VERIFIED', N'Verified', 110, N'Human verified'),
+        (N'NONE',     N'None',       0, N'No confidence assigned')
+    ) AS s(Code, Name, RankVal, Descr)
     ON t.MatchConfidenceCode = s.Code
+    WHEN MATCHED THEN UPDATE SET
+        t.MatchConfidenceName = s.Name,
+        t.ConfidenceRank      = s.RankVal,
+        t.[Description]       = s.Descr,
+        t.IsActive            = 1,
+        t.CreationDate        = COALESCE(t.CreationDate, @Now),
+        t.UpdatedDate         = @Now
     WHEN NOT MATCHED THEN
-        INSERT (MatchConfidenceCode, MatchConfidenceName, ConfidenceRank, [Description], CreationDate, UpdatedDate)
-        VALUES (s.Code, s.Name, s.RankVal, s.Descr, s.CreationDate, s.UpdatedDate);
+        INSERT (
+            MatchConfidenceCode, MatchConfidenceName, ConfidenceRank, [Description],
+            IsActive, CreationDate, UpdatedDate
+        )
+        VALUES (s.Code, s.Name, s.RankVal, s.Descr, 1, @Now, @Now);
 
-    IF NOT EXISTS (SELECT 1 FROM dbo.REF_BUILDINGTYPE)
-        INSERT INTO dbo.REF_BUILDINGTYPE (BuildingTypeCode, BuildingTypeName, [Description], IsResidential, IsActive)
-        VALUES (N'MAIN', N'Main building', N'Default main structure', 1, 1);
+    IF OBJECT_ID('dbo.REF_BUILDINGTYPE', 'U') IS NOT NULL
+    BEGIN
+        SET @Sql = N'
+        MERGE dbo.REF_BUILDINGTYPE AS t
+        USING (VALUES
+            (N''MAIN'', N''Main building'', N''Default main structure'', 1)
+        ) AS s(Code, Name, Descr, IsRes)
+        ON t.BuildingTypeCode = s.Code
+        WHEN MATCHED THEN UPDATE SET
+            t.BuildingTypeName    = s.Name,
+            t.[Description]       = s.Descr,
+            t.IsResidential       = s.IsRes,
+            t.IsActive            = 1,
+            t.DeletedInd          = 0,
+            t.' + QUOTENAME(@RefUserCreateCol) + N' = COALESCE(NULLIF(t.' + QUOTENAME(@RefUserCreateCol) + N', N''''), @AuditUser),
+            t.CreationDate        = COALESCE(t.CreationDate, @Now),
+            t.' + QUOTENAME(@RefUserUpdateCol) + N' = COALESCE(NULLIF(t.' + QUOTENAME(@RefUserUpdateCol) + N', N''''), @AuditUser),
+            t.LastUpdatedDate     = @Now
+        WHEN NOT MATCHED THEN
+            INSERT (
+                BuildingTypeCode, BuildingTypeName, [Description],
+                IsResidential, IsActive, DeletedInd,
+                ' + QUOTENAME(@RefUserCreateCol) + N', CreationDate, ' + QUOTENAME(@RefUserUpdateCol) + N', LastUpdatedDate
+            )
+            VALUES (s.Code, s.Name, s.Descr, s.IsRes, 1, 0, @AuditUser, @Now, @AuditUser, @Now);';
+        EXEC sys.sp_executesql @Sql,
+            N'@AuditUser NVARCHAR(128), @Now DATETIME2(0)',
+            @AuditUser = @AuditUser, @Now = @Now;
+    END;
 
-    IF NOT EXISTS (SELECT 1 FROM dbo.REF_UNITTYPECODE)
-        INSERT INTO dbo.REF_UNITTYPECODE (UnitTypeCode, UnitTypeName, [Description])
-        VALUES (N'APT', N'Apartment unit', N'Apartment'), (N'CONDO', N'Condo unit', N'Condominium unit');
+    IF OBJECT_ID('dbo.REF_UNITTYPECODE', 'U') IS NOT NULL
+    BEGIN
+        SET @Sql = N'
+        MERGE dbo.REF_UNITTYPECODE AS t
+        USING (VALUES
+            (N''APT'',   N''Apartment unit'',   N''Apartment''),
+            (N''CONDO'', N''Condo unit'',       N''Condominium unit'')
+        ) AS s(Code, Name, Descr)
+        ON t.UnitTypeCode = s.Code
+        WHEN MATCHED THEN UPDATE SET
+            t.UnitTypeName      = s.Name,
+            t.[Description]     = s.Descr,
+            t.IsActive          = 1,
+            t.DeletedInd        = 0,
+            t.' + QUOTENAME(@RefUserCreateCol) + N' = COALESCE(NULLIF(t.' + QUOTENAME(@RefUserCreateCol) + N', N''''), @AuditUser),
+            t.CreationDate      = COALESCE(t.CreationDate, @Now),
+            t.' + QUOTENAME(@RefUserUpdateCol) + N' = COALESCE(NULLIF(t.' + QUOTENAME(@RefUserUpdateCol) + N', N''''), @AuditUser),
+            t.LastUpdatedDate   = @Now
+        WHEN NOT MATCHED THEN
+            INSERT (
+                UnitTypeCode, UnitTypeName, [Description],
+                IsActive, DeletedInd, ' + QUOTENAME(@RefUserCreateCol) + N', CreationDate, ' + QUOTENAME(@RefUserUpdateCol) + N', LastUpdatedDate
+            )
+            VALUES (s.Code, s.Name, s.Descr, 1, 0, @AuditUser, @Now, @AuditUser, @Now);';
+        EXEC sys.sp_executesql @Sql,
+            N'@AuditUser NVARCHAR(128), @Now DATETIME2(0)',
+            @AuditUser = @AuditUser, @Now = @Now;
+    END;
+
+    IF OBJECT_ID('dbo.REF_STATUSCODE', 'U') IS NOT NULL
+    BEGIN
+        MERGE dbo.REF_STATUSCODE AS t
+        USING (VALUES
+            (N'ACTIVE',   N'UNIT', N'Active',   N'Active unit'),
+            (N'INACTIVE', N'UNIT', N'Inactive', N'Inactive unit'),
+            (N'VACANT',   N'UNIT', N'Vacant',   N'Vacant unit'),
+            (N'OCCUPIED', N'UNIT', N'Occupied', N'Occupied unit')
+        ) AS s(Code, Entity, Name, Descr)
+        ON t.StatusCode = s.Code AND t.EntityType = s.Entity
+        WHEN MATCHED THEN UPDATE SET
+            t.StatusName          = s.Name,
+            t.[Description]       = s.Descr,
+            t.DeletedInd          = 0,
+            t.CreationUserID      = COALESCE(NULLIF(t.CreationUserID, N''), @AuditUser),
+            t.CreationDate        = COALESCE(t.CreationDate, @Now),
+            t.LastUpdatedUserID   = COALESCE(NULLIF(t.LastUpdatedUserID, N''), @AuditUser),
+            t.LastUpdatedDate     = @Now
+        WHEN NOT MATCHED THEN
+            INSERT (StatusCode, EntityType, StatusName, [Description], DeletedInd, CreationUserID, CreationDate, LastUpdatedUserID, LastUpdatedDate)
+            VALUES (s.Code, s.Entity, s.Name, s.Descr, 0, @AuditUser, @Now, @AuditUser, @Now);
+    END;
 
     /* ========================================================================
-       2. NORMALIZE AddressMaster  
+       2. NORMALIZE AddressMaster
        ======================================================================== */
     IF OBJECT_ID('tempdb..#MA') IS NOT NULL DROP TABLE #MA;
 
+    BEGIN TRY
     SELECT
         ma.MasterAddressID,
         SourceSystem         = N'ADDRESS_MASTER',
@@ -352,6 +577,13 @@ BEGIN TRY
         END
     INTO #MA
     FROM DHCA_Internal.dbo.MasterAddress ma;
+    END TRY
+    BEGIN CATCH
+        THROW 50010,
+            CONCAT(N'Cannot read DHCA_Internal.dbo.MasterAddress: ', ERROR_MESSAGE(),
+                   N' — verify VPN/database access.'),
+            1;
+    END CATCH;
 
     SET @MasterAddressRead = (SELECT COUNT(*) FROM #MA);
 
@@ -360,6 +592,7 @@ BEGIN TRY
        ======================================================================== */
     IF OBJECT_ID('tempdb..#SDAT') IS NOT NULL DROP TABLE #SDAT;
 
+    BEGIN TRY
     SELECT
         KdatRecordID         = TRY_CONVERT(INT, s.RealPropertyTaxInformationID),
         SourceSystem         = N'KDAT',
@@ -424,6 +657,13 @@ BEGIN TRY
         END
     INTO #SDAT
     FROM DHCA_Internal.dbo.RealPropertyTaxInformation s;
+    END TRY
+    BEGIN CATCH
+        THROW 50011,
+            CONCAT(N'Cannot read DHCA_Internal.dbo.RealPropertyTaxInformation: ', ERROR_MESSAGE(),
+                   N' — verify VPN/database access.'),
+            1;
+    END CATCH;
 
     SET @SDATRead = (SELECT COUNT(*) FROM #SDAT);
 
@@ -949,6 +1189,49 @@ BEGIN TRY
     DROP TABLE #UprMergeAddr;
     DROP TABLE #UprMergeFinal;
 
+    /* Final MERGE safety — drop rows that would violate UPR NOT NULL / CHECK */
+    INSERT INTO #ReviewPending (
+        MasterAddressID, KdatRecordID, MatchSource, NormalizedIncomingAddress,
+        ParcelID, SDATAccountNumber, ReasonForNoMatch, ReviewDetail,
+        StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber
+    )
+    SELECT
+        w.MasterAddressID, w.KdatRecordID, w.MatchSource,
+        COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress, N'UNKNOWN'),
+        w.ParcelID, w.SDATAccountNumber,
+        N'SOURCE_RECORD_ERROR', N'Failed final UPR validation before insert',
+        w.StreetNumber, w.StreetName, w.StreetType, w.ZipCode,
+        s.EffectiveSDATAccountNumber
+    FROM #UprMergeSrc s
+    INNER JOIN #Work w
+        ON (w.MasterAddressID IS NOT NULL AND w.MasterAddressID = s.MasterAddressID)
+        OR (w.KdatRecordID IS NOT NULL AND w.KdatRecordID = s.KdatRecordID)
+    WHERE (NULLIF(s.EffectiveStreetNumber, N'') IS NULL
+       OR NULLIF(s.EffectiveStreetName, N'') IS NULL
+       OR NULLIF(s.EffectiveCity, N'') IS NULL
+       OR NULLIF(s.EffectiveNormalizedStreetAddress, N'') IS NULL
+       OR NULLIF(s.EffectiveNormalizedFulldAddress, N'') IS NULL
+       OR dbo.fn_UPR_IsValidZipCode(s.EffectiveZipCode) = 0
+       OR NULLIF(s.EffectiveSDATAccountNumber, N'') IS NULL
+       OR NULLIF(s.EffectiveParcelID, N'') IS NULL)
+      AND NOT EXISTS (
+          SELECT 1
+          FROM #ReviewPending rp
+          WHERE ISNULL(rp.MasterAddressID, -1) = ISNULL(w.MasterAddressID, -1)
+            AND ISNULL(rp.KdatRecordID, -1) = ISNULL(w.KdatRecordID, -1)
+      );
+
+    DELETE s
+    FROM #UprMergeSrc s
+    WHERE NULLIF(s.EffectiveStreetNumber, N'') IS NULL
+       OR NULLIF(s.EffectiveStreetName, N'') IS NULL
+       OR NULLIF(s.EffectiveCity, N'') IS NULL
+       OR NULLIF(s.EffectiveNormalizedStreetAddress, N'') IS NULL
+       OR NULLIF(s.EffectiveNormalizedFulldAddress, N'') IS NULL
+       OR dbo.fn_UPR_IsValidZipCode(s.EffectiveZipCode) = 0
+       OR NULLIF(s.EffectiveSDATAccountNumber, N'') IS NULL
+       OR NULLIF(s.EffectiveParcelID, N'') IS NULL;
+
     SET @UprEligibleRows = (SELECT COUNT(*) FROM #UprMergeSrc);
 
     SET @RowsIncompleteData = (
@@ -992,7 +1275,14 @@ BEGIN TRY
         ),
         upr.UpdatedDate       = @Now,
         upr.UpdatedBy         = @RunUser
-    WHEN NOT MATCHED THEN INSERT (
+    WHEN NOT MATCHED AND NOT EXISTS (
+        SELECT 1
+        FROM dbo.UPROPERTYRECORDS p
+        WHERE p.StreetNumber = s.EffectiveStreetNumber
+          AND p.StreetName   = s.EffectiveStreetName
+          AND p.StreetType   = s.EffectiveStreetType
+          AND p.ZipCode      = s.EffectiveZipCode
+    ) THEN INSERT (
         SDATAccountNumber, ParcelID, PropertyName, Owner,
         StreetNumber, StreetName, StreetType,
         City, [State], ZipCode, NormalizedStreetAddress, NormalizedFulldAddress,
@@ -1067,7 +1357,13 @@ BEGIN TRY
         0, 0, N'N/A', @Now  /* property-level snapshot — client table requires these NOT NULL */
     FROM #UPRMap m
     INNER JOIN dbo.UPROPERTYRECORDS upr ON upr.UPropertyRecordsID = m.UPropertyRecordsID
-    WHERE m.IsNew = 1;
+    WHERE m.IsNew = 1
+      AND NOT EXISTS (
+          SELECT 1
+          FROM dbo.UPRSTATUSHISTORY h
+          WHERE h.UPropertyRecordsID = m.UPropertyRecordsID
+            AND h.ChangeReason = N'Initial load - new UPR record'
+      );
 
     SET @StatusHistoryInserted = @@ROWCOUNT;
 
@@ -1386,7 +1682,13 @@ BEGIN TRY
         dbo.fn_UPR_NormalizeAddressLine(ep.StreetAddress),
         dbo.fn_UPR_NormalizeFullAddressLine(ep.StreetAddress, ep.City, ep.ZipCode)
     FROM DHCA_LicensingAndRegistration.dbo.Property ep';
-    EXEC sys.sp_executesql @Sql;
+    BEGIN TRY
+        EXEC sys.sp_executesql @Sql;
+    END TRY
+    BEGIN CATCH
+        SET @SourceWarning = CONCAT(N'Warning: eProperty source skipped — ', ERROR_MESSAGE());
+        PRINT @SourceWarning;
+    END CATCH;
 
     SET @Sql = N'
     INSERT INTO #ExtAddr (SourceSystemCode, SourceRecordID, SourceEntityType, TaxOrAccount, NormAddress, NormFullAddress)
@@ -1394,7 +1696,13 @@ BEGIN TRY
         dbo.fn_UPR_NormalizeAddressLine(c.StreetAddress),
         dbo.fn_UPR_NormalizeFullAddressLine(c.StreetAddress, c.City, c.ZipCode)
     FROM DHCA_OLTA.dbo.[Case] c';
-    EXEC sys.sp_executesql @Sql;
+    BEGIN TRY
+        EXEC sys.sp_executesql @Sql;
+    END TRY
+    BEGIN CATCH
+        SET @SourceWarning = CONCAT(N'Warning: CASE source skipped — ', ERROR_MESSAGE());
+        PRINT @SourceWarning;
+    END CATCH;
 
     SET @Sql = N'
     INSERT INTO #ExtAddr (SourceSystemCode, SourceRecordID, SourceEntityType, TaxOrAccount, NormAddress, NormFullAddress)
@@ -1402,7 +1710,13 @@ BEGIN TRY
         dbo.fn_UPR_NormalizeAddressLine(mp.StreetAddress),
         dbo.fn_UPR_NormalizeFullAddressLine(mp.StreetAddress, mp.City, mp.ZipCode)
     FROM DHCA_MPDU.dbo.Development mp';
-    EXEC sys.sp_executesql @Sql;
+    BEGIN TRY
+        EXEC sys.sp_executesql @Sql;
+    END TRY
+    BEGIN CATCH
+        SET @SourceWarning = CONCAT(N'Warning: MPDU source skipped — ', ERROR_MESSAGE());
+        PRINT @SourceWarning;
+    END CATCH;
 
     SET @Sql = N'
     INSERT INTO #ExtAddr (SourceSystemCode, SourceRecordID, SourceEntityType, TaxOrAccount, NormAddress, NormFullAddress)
@@ -1411,7 +1725,13 @@ BEGIN TRY
         dbo.fn_UPR_NormalizeFullAddressLine(CONCAT(mf.StreetNumber, N'' '', mf.StreetName, N'' '', mf.StreetType), mf.City, mf.ZipCode)
     FROM DHCA_MultifamilyLoans.dbo.Address mf
     WHERE mf.DeletedInd = 0';
-    EXEC sys.sp_executesql @Sql;
+    BEGIN TRY
+        EXEC sys.sp_executesql @Sql;
+    END TRY
+    BEGIN CATCH
+        SET @SourceWarning = CONCAT(N'Warning: MULTIFAMILY source skipped — ', ERROR_MESSAGE());
+        PRINT @SourceWarning;
+    END CATCH;
 
     /* --- 7a. Property (eProperty): account/TaxID or normalized address --- */
     INSERT INTO #ExtMatch (
@@ -1649,10 +1969,10 @@ BEGIN TRY
        8. CONTACT + PROPERTYCONTACT (owner from SDAT)
        ======================================================================== */
     INSERT INTO dbo.CONTACT (ContactTypeCode, OrganizationName, IsActive, CreatedDate, UpdatedDate)
-    SELECT DISTINCT N'OWNER', w.OwnerName, 1, @Now, @Now
+    SELECT DISTINCT N'OWNER', LEFT(LTRIM(RTRIM(w.OwnerName)), 200), 1, @Now, @Now
     FROM #Work w
-    WHERE w.OwnerName IS NOT NULL
-      AND NOT EXISTS (SELECT 1 FROM dbo.CONTACT c WHERE c.OrganizationName = w.OwnerName);
+    WHERE NULLIF(LTRIM(RTRIM(w.OwnerName)), N'') IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM dbo.CONTACT c WHERE c.OrganizationName = LTRIM(RTRIM(w.OwnerName)));
 
     SET @ContactInserted = @@ROWCOUNT;
 
@@ -1660,8 +1980,8 @@ BEGIN TRY
     SELECT m.UPropertyRecordsID, c.ContactID, N'OWNER', @Now, 1
     FROM #UPRMap m
     INNER JOIN #Work w ON (w.MasterAddressID = m.MasterAddressID OR w.KdatRecordID = m.KdatRecordID)
-    INNER JOIN dbo.CONTACT c ON c.OrganizationName = w.OwnerName
-    WHERE w.OwnerName IS NOT NULL
+    INNER JOIN dbo.CONTACT c ON c.OrganizationName = LTRIM(RTRIM(w.OwnerName))
+    WHERE NULLIF(LTRIM(RTRIM(w.OwnerName)), N'') IS NOT NULL
       AND NOT EXISTS (
           SELECT 1 FROM dbo.PROPERTYCONTACT pc
           WHERE pc.UPropertyRecordsID = m.UPropertyRecordsID AND pc.ContactID = c.ContactID
