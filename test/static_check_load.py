@@ -56,8 +56,8 @@ check("External source TRY/CATCH", "eProperty source skipped" in main_batch)
 check("UPR MERGE address duplicate guard", "WHEN NOT MATCHED AND NOT EXISTS" in main_batch)
 check("Status history idempotent", "Initial load - new UPR record" in main_batch
       and main_batch.count("NOT EXISTS") >= 5)
-check("Uses TRUNCATE not second SELECT INTO #UprMergeSrc",
-      "TRUNCATE TABLE #UprMergeSrc" in main_batch)
+check("Uses single SELECT INTO #UprMergeSrc (no duplicate)",
+      main_batch.count("INTO #UprMergeSrc") == 1)
 
 # MERGE blocks have WHEN NOT MATCHED
 merge_count = len(re.findall(r"\bMERGE\s+dbo\.", main_batch, re.I))
