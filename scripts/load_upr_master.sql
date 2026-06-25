@@ -17,7 +17,7 @@
     External non-match does NOT send rows to Review_Q
 
   MA Unit held in #Work/#UPRMap only — loaded to dbo.Unit (UPR has no unit column).
-  UPR NOT NULL columns per client DDL: SDATAccountNumber, StreetNumber, StreetName,
+  UPR NOT NULL columns DDL: SDATAccountNumber, StreetNumber, StreetName,
   StreetType, City, ZipCode, NormalizedStreetAddress, NormalizedFullAddress, PropertyStatusCode,
   Aligns with docs/ddl.md CHECK: ZipCode #####/#####-####, State 2 uppercase A-Z,
   PropertyStatusCode ACTIVE|INACTIVE|PENDING|RETIRED. Column NormalizedFulldAddress per DDL.
@@ -33,14 +33,13 @@
   ROBUSTNESS:
     Preflight checks required tables/columns before any writes
     REF seeds populate IsActive, CreatedDate, UpdatedDate, audit user IDs
-    DHCA source reads wrapped in TRY/CATCH (external sources warn, MA/SDAT fail clear)
+    Application source reads wrapped in TRY/CATCH (external sources warn, MA/SDAT fail clear)
     UPR MERGE guarded against address duplicates and invalid rows
     Safe to re-run (idempotent MERGE / NOT EXISTS patterns)
 
-  HOW TO RUN: Execute this script in SSMS against your UPR database (e.g. UPRXDB_TEST).
-================================================================================
+  ================================================================================
 */
-USE UPRDB_Test;  /* client: change to UPRXDB_TEST if needed */
+USE UPRXDB_TEST;  
 GO
 /* ---- Inline normalization functions ---- */
 CREATE OR ALTER FUNCTION dbo.fn_UPR_StdStreetToken (@token NVARCHAR(50))
@@ -217,8 +216,9 @@ DECLARE @UprMergeRowsAffected INT = 0;
 DECLARE @Sql NVARCHAR(MAX);
 DECLARE @PreflightErrors NVARCHAR(MAX) = N'';
 DECLARE @SourceWarning NVARCHAR(500);
+DECLARE @ErrorMessage  NVARCHAR(500);
 
-/* Resolve audit-user column names (client DDL variants) */
+/* Resolve audit-user column names */
 DECLARE @RefUserCreateCol SYSNAME = CASE
     WHEN COL_LENGTH('dbo.REF_PROPERTYTYPE', 'CreationUserID')  IS NOT NULL THEN N'CreationUserID'
     WHEN COL_LENGTH('dbo.REF_PROPERTYTYPE', 'CreationUSERID')  IS NOT NULL THEN N'CreationUSERID'
@@ -248,11 +248,23 @@ BEGIN TRY
     ) AS v(ObjName, Label)
     WHERE OBJECT_ID(v.ObjName, N'U') IS NULL;
 
+   
+    -- IF @PreflightErrors IS NOT NULL
+    --     THROW 50001,
+    --        CONCAT(
+    --             N'Missing required tables: ',
+    --             @PreflightErrors,
+     --            N'. Recreate UPR schema DDL (docs/ddl.md), then re-run.'
+     --            ),
+     --       1;
+    SET @ErrorMessage = 
+               CONCAT(
+                N'Missing required tables: ',
+                 @PreflightErrors,
+                 N'. Recreate UPR schema DDL (docs/ddl.md), then re-run.'
+                 );
     IF @PreflightErrors IS NOT NULL
-        THROW 50001,
-            CONCAT(N'Missing required tables: ', @PreflightErrors,
-                   N'. Recreate UPR schema from client DDL (docs/ddl.md), then re-run.'),
-            1;
+       THROW 50001, @ErrorMessage, 1;
 
     IF OBJECT_ID(N'dbo.fn_UPR_NormalizeZipCode', N'FN') IS NULL
         THROW 50002,
@@ -583,13 +595,20 @@ BEGIN TRY
             ELSE 1
         END
     INTO #MA
-    FROM DHCA_Internal.dbo.MasterAddress ma;
+    FROM dbo.MAIncomingTableX1 ma  --DHCA_Internal.dbo.MasterAddress ma;
     END TRY
     BEGIN CATCH
-        THROW 50010,
-            CONCAT(N'Cannot read DHCA_Internal.dbo.MasterAddress: ', ERROR_MESSAGE(),
-                   N' — verify VPN/database access.'),
-            1;
+        --THROW 50010,
+        --    CONCAT(N'Cannot read DHCA_Internal.dbo.MasterAddress: ', ERROR_MESSAGE(),
+        --               N' — verify VPN/database access.'),
+         SET @ErrorMessage = 
+               CONCAT(
+                N'Cannot read DHCA_Internal.dbo.MasterAddress: ',
+                 @PreflightErrors,
+                 N'. Recreate UPR schema DDL (docs/ddl.md), then re-run.'
+                 );
+         IF @PreflightErrors IS NOT NULL
+            THROW 50010, @ErrorMessage, 1;
     END CATCH;
 
     SET @MasterAddressRead = (SELECT COUNT(*) FROM #MA);
@@ -663,13 +682,22 @@ BEGIN TRY
             ELSE 1
         END
     INTO #SDAT
-    FROM DHCA_Internal.dbo.RealPropertyTaxInformation s;
+    FROM dbo.SDATIncomingTableX1 s; --DHCA_Internal.dbo.RealPropertyTaxInformation s;
     END TRY
     BEGIN CATCH
-        THROW 50011,
-            CONCAT(N'Cannot read DHCA_Internal.dbo.RealPropertyTaxInformation: ', ERROR_MESSAGE(),
-                   N' — verify VPN/database access.'),
-            1;
+        --THROW 50011,
+        --    CONCAT(N'Cannot read SDAT: ', ERROR_MESSAGE()),
+        --        --   N' — verify VPN/database access.'),
+        --     1;
+         SET @ErrorMessage = 
+               CONCAT(
+                N'Cannot read SDAT: ',
+                 @PreflightErrors,
+                 N'. - verify VPN/database access.'
+                 );
+         IF @PreflightErrors IS NOT NULL
+            THROW 50011, @ErrorMessage, 1;
+      
     END CATCH;
 
     SET @SDATRead = (SELECT COUNT(*) FROM #SDAT);
@@ -1157,7 +1185,7 @@ BEGIN TRY
     ) THEN INSERT (
         SDATAccountNumber, ParcelID, PropertyName, Owner,
         StreetNumber, StreetName, StreetType,
-        City, [State], ZipCode, NormalizedStreetAddress, NormalizedFulldAddress,
+        City, [State], ZipCode, NormalizedStreetAddress, NormalizedFullAddress,
         Latitude, Longitude,
         PropertyTypeCode, PropertyStatusCode, IsActive,
         CreatedDate, CreatedBy, UpdatedDate, UpdatedBy
@@ -1351,7 +1379,6 @@ BEGIN TRY
         UPropertyRecordsID INT NOT NULL
     );
 
-    /* DUPLICATE → anchor to dedup winner (same account + normalized address) */
     INSERT INTO #ReviewAnchor (MasterAddressID, KdatRecordID, ReasonForNoMatch, UPropertyRecordsID)
     SELECT DISTINCT
         rp.MasterAddressID, rp.KdatRecordID, rp.ReasonForNoMatch, m.UPropertyRecordsID
@@ -1369,7 +1396,6 @@ BEGIN TRY
         OR (w.KdatRecordID IS NOT NULL AND m.KdatRecordID = w.KdatRecordID)
     WHERE rp.ReasonForNoMatch = N'DUPLICATE';
 
-    /* PENDING anchor UPR for Review rows without a winner (NoParcelID / incomplete) */
     INSERT INTO dbo.UPROPERTYRECORDS (
         SDATAccountNumber, ParcelID, PropertyName, Owner,
         StreetNumber, StreetName, StreetType,
@@ -1563,7 +1589,6 @@ BEGIN TRY
         WHERE ProcessingTimestamp >= @Now AND ReasonForNoMatch = N'NO_ADDRESS_MATCH'
     );
 
-    /* Reconcile UPR insert count — exclude PENDING anchor rows used only for Review_Q FK */
     SET @UPRInserted = (
         SELECT COUNT(*) FROM dbo.UPROPERTYRECORDS
         WHERE CreatedDate >= @Now AND CreatedBy = @RunUser AND PropertyStatusCode = N'ACTIVE'
@@ -1818,7 +1843,7 @@ BEGIN TRY
         N'MAIN',
         CONCAT(N'Building ', upr.UPropertyRecordsID),
         N'MAIN',
-        upr.NormalizedFulldAddress,
+        upr.NormalizedFullAddress,
         N'ACTIVE', 1, @Now, @Now, @RunUser, @RunUser
     FROM dbo.UPROPERTYRECORDS upr
     INNER JOIN dbo.REF_PROPERTYTYPE pt ON pt.PropertyTypeCode = upr.PropertyTypeCode
@@ -1905,7 +1930,7 @@ BEGIN TRY
     SET @BatchEndTime = SYSDATETIME();
 
     /* ========================================================================
-       12. PRINT SUMMARY (client format)
+       12. PRINT SUMMARY 
        ======================================================================== */
     PRINT N'============================================================';
     PRINT N' UPR LOAD SUMMARY';
