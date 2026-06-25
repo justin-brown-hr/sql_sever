@@ -1,0 +1,337 @@
+Create and populate new UPropertyRecord (UPR) from 2 incoming tables (MasterAddress and SDAT) and count records read and print totals. Write required data fields from incoming tables to populate data fields in UPR. Ensure no duplicate record in UPropertyRecord.
+Write records to UPropertyRecord_XREF, count and print totals.
+Write records to UPR_StatusHistory, if history update occurs and count and print totals.
+Write records to UPropertyMatchReview_Q, count and print totals
+Create an exception record in UPropertyMatchReview_Q if the incoming record does not match due to missing required property identifier by address. Print totals.
+All tables below are to be created as suggested in this  UnifiedPropertyRecord  Master database project design .
+Normalize address both incoming addresses from both tables, for matching and populate UPR.
+Normalized Address (street number, street address, street type)  Or
+Normalized FullAddress (street number, street address, street type, City, Zipcode)
+Using  (Account and Addresses) fields in the incoming AddressMaster table and the AccountNumber and Premises Addresses) fields in SDAT table match for equality. Typical match: Normalized Address or NormalizedFullAddress and  Account Numbers
+If there is a match,
+Write record to UpropertyRecord table and move values to all fields from incoming tables.
+Use the address to match the address in each Case, MPDU, and eProperty  tables. If there is an address match, write each of the records in
+UPropertyRecords_Xref and assign values to :
+SourceSystem
+MatchMethod
+MatchConfidence
+MatchResult = N0_MATCH
+MatchConfidence = NONE
+ProcessingStatus = PENDING_REVIEW or EXCEPTION
+And move values to all other fields.
+If no address match, move values into the fields and write record to UPROPERTYMATCHREVIEW_Q.
+If there is no match,
+Write record on the UpropertyRecord table. Use the address to match the address in each Case, MPDU, and eProperty  tables. If there is an address match, write each of the records in
+UPropertyRecords_Xref and assign:
+MatchResult = N0_MATCH
+MatchConfidence = NONE
+ProcessingStatus = PENDING_REVIEW or EXCEPTION
+If no address match, write record to UPROPERTYMATCHREVIEW_Q
+MatchResult = N0_MATCH
+MatchConfidence = NONE
+ProcessingStatus = PENDING_REVIEW or EXCEPTION
+Check property record type = ‘CONDO’ from new record written for UPR. If ‘CONDO’ check the REF_PROPERTYTYPE field AllowBuildings and AllowUnits for value ‘1’ allowing creation.  write record to Building and Unit tables. Move values into the fields.
+Write the PropertyContact table and the Contact table with owner information
+Write records to REF_SOURCESYSTEM  to define where records written XREF came from -  Case, eProperty, MPDU’
+Write records to REF_MATCHMETHOD  to define how records were matched in applications -  Case, eProperty, MPDU,  Most matchedMethod code will be by Address.
+Write records to REF_MATCHCONFIDENCE defines how reliable the match was in either Case, eProperty, MPDU, MULTILoans is by address which may be ‘Medium’. Provide score for match confidence.
+Move values to Auditlog and write records
+Print summary of all statistic read and written.
+All tables attributes are provided
+INCOMING DATA Table to populate Unified Property Record (UPR) Master
+MASTERADDRESS
+MasterAddressID(PK) INT NOT NULL
+AddressStatusINT NULL
+AddressTypeINT  NULL
+AddressDateDATETIME
+StreetNumberINT NULL
+StreetSuffixNVARCHAR (3) NULL
+StreetNameNVARCHAR  (22) NULL
+StreetTypeNCHAR (4) NuLL
+StreetSuffixDirectionNCHAR (2) NULL
+UnitNCHAR (6) NULL
+XCoordinateINT NULL
+YCoordinateINT NULL
+FullAddressNVARCHAR (50) NULL
+CityNVARCHAR (22) NULL
+ZipCodeNCHAR (10) NULL
+CommentsNVARCHAR
+AccountNCHAR (8) NULL
+ParcelNumberNCHAR (3)
+PropertyType NCHAR    (35)
+SDAT Table
+AccountNumber       NVARCHAR(max)
+Lot    NVARCHAR(max)
+BlockNVARCHAR(max)
+ParcelNVARCHAR(max)
+TownCodeNVARCHAR(max)
+GeneralZoneNVARCHAR(max)
+PropertyParcelCodeNVARCHAR(max)
+OwnerOccupancyCodeNVARCHAR(max)
+DwellingUnitsINT
+Owner                                                                  NVARCHAR
+TransferDateDATETIME
+YearBuiltINT
+PremisesNumberNVARCHAR(max)
+PremisesDirectionNVARCHAR(max)
+PremisesStreetNameNVARCHAR(max)
+PremisesStreetTypeNVARCHAR(max)
+PremisesCityNVARCHAR(max)
+PremisesStateNVARCHAR(max)
+PremisesZipCodeNVARCHAR(max)
+Tables
+UPROPERTYRECORD (UPR)
+UPropertyRecordID   INT IDENTITY (1,1) NOT NULL     (PK)
+SDATAccountNumber  NVARCHAR (50)  NULL(UK)
+ParcelID NVARCHAR  (50) NULL
+PropertyName NVARCHAR (200) NULL
+StreetNumber  NVARCHAR (20) NOT NUL
+StreetName  NVARCHAR (150) NOT NULL
+StreetSuffix    NVARCHAR (20)  NULL
+StreetType  NVARCHAR (4) NULL
+UnitNumber  NCHAR (6 ) NULL
+City NVARCHAR (100) NOT NULL
+State VARCHAR (2) NULL
+ZipCode VARCHAR (10) NOT NULL
+NormalizedAddress NVARCHAR (100) NOT NULL
+NormalizedFullAddress NVARCHAR (100) NOT NULL
+Latitude  DECIMAL (10,6) NULL
+Longitude  DECIMAL (10,6) NULL
+PropertyType  NVARCHAR (30) NULL
+StatusCode  NVARCHAR (30) NOT NULL
+ISActive   BIT NOT NULL
+CreatedDate   DATETIME2 (0)  NOT NULL
+CreatedBy    NVARCHAR (100)  NULL
+UpdateDate    DATETIME2 (0) NOT NULL
+UpdatedBy  NVARCHAR (100) NULL
+UPROPERTYRECORD_XREF
+UPropertyRecord_XrefID INT IDENTITY (1,1) NOT NULL
+UPropertyRecordID  INT NOT NULL
+SourceSystem VARCHAR (30) NOT NULL
+SourceRecordID VARCHAR (100) NOT NULL
+SourceEntityType VARCHAR (50) NOT NULL
+MatcheMethodCode  VARCHAR (30) NOT NULL
+MatchResult NVARCHAR (30) NOT NULL                                  = MATCH or NO_MATCH
+MatchConfidence NVARCHAR (30) NOT NULL
+ProcessingStatus  NVARCHAR (50)  NULL
+IsActive   BIT NOT NULL
+EffectiveStartDate  DATETIME2 (0) NOT NULL
+EffectiveEndDate DATETIME2 (0) NOT NULL
+Notes  VARCHAR (1000) NULL
+CreatedDate DATETIME2 (0) NOT NULL
+UpdatedDate DATETIME2 (0) NOT NULL
+CreatedBy VARCHAR (100) NULL
+Building
+REF_BUILDINGTYPE
+BuildingTypeID  INT IDENTITY  (1,1)
+BuildingTypeCode  NVARCHAR  (30)  NOT NULL
+BuildingTypeName  NVARCHAR (100) NOT NULL
+Description NVARCHAR  (255) NULL
+IsResidential BIT NOT NULLIsActive  BIT  NOT NULL
+DeletedInd  BIT  NOT NULL
+CreationUSERID  NVARCHAR (128) NOT NULL
+CreationDate  DATETIME2 NOT NULL
+LastUpdatedUserID  NVARCHAR (128) NOT NULL
+LastUpdatedDate  DATETIME2 (0) NOT NULL
+UNITS
+UnitID   INT IDENTITY PRIMARY KEY
+UPropertyRecorfID INT NOT NULL
+BuildingID  INT NOT NULL
+UnitNumber VARCHAR  (50) NOT NULL
+SDATAccountNumber VARCHAR (50) NULL
+UnitTypeCode VARCHAR (30) NOT NULL
+BedroomCount (INT)BathroomCount  DECIMAL (3,1)
+FloorNumber VARCHAR (20) NULL
+UnitStatusCode VARCHAR (30) NULL
+IsMPUD  BIT NOT NULL
+IsActive  BIT NOT NULL
+CreatedDate DATETIME2 (0) NOT NULL
+UpdatedDate DATETIME2 (0) NOT NULL
+CreatedBy VARCHAR (100) NULL
+UpdatedBy VARCHAR (100) NULL
+UNITOWNER
+UnitOwnerID INT IDENTITY (1,1) NOT NULL
+UnitID INT NOT NULL
+ContactID  INT NOT NUL
+OwnershipStartDate  DATETIME2 (0) NOT NULL
+OwnershipEndDate DATETIME2 (0) NULL
+IsPrimaryOwner  BIT NOT NULL
+IsActive  BIT NOT NULL
+CreationUserID NVARCHAR (128) NOT NULL
+CreationDate  DATETIME2 (0) NOT NULL
+LastUpdatedUserID  NVARCHAR (128) NOT NULL
+LastUpdatedDate   DATETIME2 (0) NOT NULL
+UNITCONTACT
+UnitContactID IDENTITY (1,1) NOT NUL
+UnitID INT NOT NULL
+ContactID  INT NOT NULL
+ContactTypeCode NVARCHAR (30) NOT NULL
+FirstName NVARCHAR (100)  NULL
+LastName  NVARCHAR (100) NULL
+OrganizationName NVARCHAR (200) NULL
+Email  NVARCHAR (150) NULL
+Phone NVARCHAR (30) NULL
+MailingAddress1 NVARCHAR (200) NULL
+MailingAddress2 NVARCHAR (200) NULL
+City  NVARCHAR  (100) NULL
+State        CHAR  (2) NULL
+ZipCode   NVARCHAR  (10) NULL
+IsActive  BIT NOT NULL
+CreatedDate  DATETIME2 (0) NOT NULL
+UpdatedDate   DATETIME2 (0) NOT NULL
+AuditLog
+AuditID  INT IDENTITY (1,1) NOT NULL
+EntityName NVARCHAR (100) NOT NULL
+EntityKey NVARCHAR (200) NOT NULL
+OperationType NVARCHAR (20) NOT NULL
+ChangedBy  NVARCHAR  (100) NOT NULL
+ChangedDate DATETIME (3) NOT NUL
+ChangeSummary  NVARCHAR (2000) NULL
+Reference Tables
+REF_PROPERTYTYPE
+PropertyTypeID INT  IDENTITY (1,1) NOT NULL
+PropertyTypeCode  NVARCHAR (6) NOT NULL
+Description/Name  NVARCHAR (128) NOT NULL
+AllowsBuildings BIT NOT NULL
+AllowsUnits BIT NOT NULL
+DeletedInd  BIT  NOT NULL
+CreationUSERID  NVARCHAR (128) NOT NULL
+CreationDate  DATETIME2 NOT NULL
+LastUpdatedUserID  NVARCHAR (128) NOT NULL
+LastUpdatedDate  DATETIME2 (0) NOT NULL
+REF_SOURCESYSTEM
+SourceSystemCodeID INT (1,1) NOT NULL
+SourceSystemCode  NVARCHAR  (30)  NOT NULL
+SourceSystemName  NVARCHAR  (100)  NOT NULL
+Description  NVARCHAR (128) NOT NULL
+IsActive   BIT  NOT NULL
+CreatedDate  DATETIME2 NOT NULL
+UpdatedDate  DATETIME2 (0) NOT NULL
+REF_MATCHMETHOD
+MatchMethodCodeID INT (1,1) NOT NULL
+MatchMethodCode  NVARCHAR  (30)  NOT NULL
+MatchMethodName  NVARCHAR  (100)  NOT NULL
+Description  NVARCHAR (128) NOT NULL
+IsActive   BIT  NOT NULL
+CreatedDate  DATETIME2 NOT NULL
+UpdatedDate  DATETIME2 (0) NOT NULL
+REF_MATCHCONFIDENCE
+MatchConfidenceCodeID INT (1,1) NOT NULL
+MatchConfidenceCode  NVARCHAR  (20)  NOT NULL
+MatchConfidenceName  NVARCHAR  (50)  NOT NULL
+ConfidenceRank INT  NOT NULL
+Description  NVARCHAR (128) NOT NULL
+IsActive   BIT  NOT NULL
+CreationDate  DATETIME2 NOT NULL
+UpdatedDate  DATETIME2 (0) NOT NULL
+ePROPERTY
+PropertyIDINT
+StreetAddressNVALCHAR
+AddressLine2NVALCHAR
+City                        NVALCHAR
+ZipCodeNVALCHAR
+TaxIDNVALCHAR
+YearBuiltINT
+LatitudeDECIMAL
+LongitudeDECIMAL
+CASE
+CaseID
+INT
+CaseNumber
+NVALCHAR
+CaseName
+NVALCHAR
+ComplaintSummary
+NVALCHAR
+CaseTypeID
+INT
+CaseSubTypeID
+INT
+CaseStatusTypeID
+INT
+StreetAddress
+NVALCHAR
+AddressLine2
+NVALCHAR
+City
+NVALCHAR
+ZipCode
+NVALCHAR
+MPDU
+DevelopmentID
+INT
+ProjectName
+NVARCHAR
+AKA
+NVARCHAR
+DevelopmentStatusID
+INT
+SitePlanNumber
+NVARCHAR
+EstimatedMPDUCompletionDate
+DATETIME
+City
+NVARCHAR
+ZipCode
+NVARCHAR
+StreetAddress
+NVARCHAR
+TaxCreditInd
+BIT
+MatchConfidence
+Confidence
+Meaning
+High
+Very reliable match
+Medium
+Likely match, but not guaranteed
+Low
+Uncertain match
+Verified
+Confirmed by human review
+Example full record
+Field
+Value
+MasterPropertyID
+5501
+SourceSystem
+MPDU
+SourceRecordID
+778
+SourceEntityType
+Development
+MatchMethod
+AddressNormalized
+MatchConfidence
+Medium
+. Score the Match Rule
+Each rule contributes to a confidence score.
+Example:
+Rule
+Score
+ParcelID match
+100
+SDAT match
+95
+Exact address
+85
+Normalized address
+75
+GIS proximity
+60
+Fuzzy match
+50
+4. Assign Match Confidence
+Based on score:
+Score
+Confidence
+90–100
+High
+70–89
+Medium
+50–69
+Low
+<50
+No match
+These are examples of address normalization.
+============================================================   3. Normalize MasterAddress   ============================================================ */IF OBJECT_ID('tempdb..#MA') IS NOT NULL DROP TABLE #MA;SELECT    ma.MasterAddressID,    SourceSystem = 'MASTERADDRESS',    SourceRecordID = CONVERT(VARCHAR(100), ma.MasterAddressID),    SourceEntityType = 'MasterAddress',    MasterAddressAccount = NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(50), ma.Account))), ''),    SDATAccountNumber = NULL,    ParcelID = NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(50), ma.ParcelNumber))), ''),    StreetNumber = NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(20), ma.StreetNumber))), ''),    StreetName = NULLIF(UPPER(LTRIM(RTRIM(ma.StreetName))), ''),    StreetSuffix = NULLIF(UPPER(LTRIM(RTRIM(ma.StreetSuffix))), ''),    StreetType =        CASE UPPER(LTRIM(RTRIM(ma.StreetType)))            WHEN 'STREET' THEN 'ST'            WHEN 'ST' THEN 'ST'            WHEN 'AVENUE' THEN 'AVE'            WHEN 'AVE' THEN 'AVE'            WHEN 'ROAD' THEN 'RD'            WHEN 'RD' THEN 'RD'            WHEN 'LANE' THEN 'LN'            WHEN 'LN' THEN 'LN'            WHEN 'COURT' THEN 'CT'            WHEN 'CT' THEN 'CT'            WHEN 'DRIVE' THEN 'DR'            WHEN 'DR' THEN 'DR'            WHEN 'BOULEVARD' THEN 'BLVD'            WHEN 'BLVD' THEN 'BLVD'            WHEN 'PLACE' THEN 'PL'            WHEN 'PL' THEN 'PL'            ELSE NULLIF(UPPER(LTRIM(RTRIM(ma.StreetType))), '')        END,    UnitNumber = NULLIF(LTRIM(RTRIM(ma.Unit)), ''),    City = NULLIF(UPPER(LTRIM(RTRIM(ma.City))), ''),    State = 'MD',    ZipCode = LEFT(NULLIF(LTRIM(RTRIM(ma.ZipCode)), ''), 10),    Latitude = TRY_CONVERT(DECIMAL(10,6), ma.YCoordinate),    Longitude = TRY_CONVERT(DECIMAL(10,6), ma.XCoordinate),    PropertyType = NULLIF(UPPER(LTRIM(RTRIM(ma.PropertyType))), ''),    OwnerName = NULL,    NormalizedAddress =        UPPER(LTRIM(RTRIM(CONCAT(            ISNULL(CONVERT(NVARCHAR(20), ma.StreetNumber), ''), ' ',            ISNULL(ma.StreetName, ''), ' ',            CASE UPPER(LTRIM(RTRIM(ma.StreetType)))                WHEN 'STREET' THEN 'ST'                WHEN 'AVENUE' THEN 'AVE'                WHEN 'ROAD' THEN 'RD'                WHEN 'LANE' THEN 'LN'                WHEN 'COURT' THEN 'CT'                WHEN 'DRIVE' THEN 'DR'                WHEN 'BOULEVARD' THEN 'BLVD'                WHEN 'PLACE' THEN 'PL'                ELSE ISNULL(ma.StreetType, '')            END        )))),    NormalizedFullAddress =        UPPER(LTRIM(RTRIM(CONCAT(            ISNULL(CONVERT(NVARCHAR(20), ma.StreetNumber), ''), ' ',            ISNULL(ma.StreetName, ''), ' ',            CASE UPPER(LTRIM(RTRIM(ma.StreetType)))                WHEN 'STREET' THEN 'ST'                WHEN 'AVENUE' THEN 'AVE'                WHEN 'ROAD' THEN 'RD'                WHEN 'LANE' THEN 'LN'                WHEN 'COURT' THEN 'CT'                WHEN 'DRIVE' THEN 'DR'                WHEN 'BOULEVARD' THEN 'BLVD'                WHEN 'PLACE' THEN 'PL'                ELSE ISNULL(ma.StreetType, '')            END, ' ',            ISNULL(ma.City, ''), ' ',            LEFT(ISNULL(ma.ZipCode, ''), 5)        ))))INTO #MAFROM dbo.MasterAddress ma;/* ============================================================   4. Normalize SDAT   ============================================================ */IF OBJECT_ID('tempdb..#SDAT') IS NOT NULL DROP TABLE #SDAT;SELECT    SourceSystem = 'SDAT',    SourceRecordID = CONVERT(VARCHAR(100), s.AccountNumber),    SourceEntityType = 'SDATProperty',    MasterAddressID = NULL,    MasterAddressAccount = NULL,    SDATAccountNumber = NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(50), s.AccountNumber))), ''),    ParcelID = NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(50), s.Parcel))), ''),    StreetNumber = NULLIF(LTRIM(RTRIM(s.PremisesNumber)), ''),    StreetName = NULLIF(UPPER(LTRIM(RTRIM(s.PremisesStreetName))), ''),    StreetSuffix = NULL,    StreetType =        CASE UPPER(LTRIM(RTRIM(s.PremisesStreetType)))            WHEN 'STREET' THEN 'ST'            WHEN 'ST' THEN 'ST'            WHEN 'AVENUE' THEN 'AVE'            WHEN 'AVE' THEN 'AVE'            WHEN 'ROAD' THEN 'RD'            WHEN 'RD' THEN 'RD'            WHEN 'LANE' THEN 'LN'            WHEN 'LN' THEN 'LN'            WHEN 'COURT' THEN 'CT'            WHEN 'CT' THEN 'CT'            WHEN 'DRIVE' THEN 'DR'            WHEN 'DR' THEN 'DR'            WHEN 'BOULEVARD' THEN 'BLVD'            WHEN 'BLVD' THEN 'BLVD'            WHEN 'PLACE' THEN 'PL'            WHEN 'PL' THEN 'PL'            ELSE NULLIF(UPPER(LTRIM(RTRIM(s.PremisesStreetType))), '')        END,    UnitNumber = NULL,    City = NULLIF(UPPER(LTRIM(RTRIM(s.PremisesCity))), ''),    State = COALESCE(NULLIF(UPPER(LTRIM(RTRIM(s.PremisesState))), ''), 'MD'),    ZipCode = LEFT(NULLIF(LTRIM(RTRIM(s.PremisesZipCode)), ''), 10),    Latitude = NULL,    Longitude = NULL,    PropertyType =        CASE            WHEN ISNULL(s.DwellingUnits, 0) > 1 THEN 'MULTIFAMILY'            ELSE NULL        END,    OwnerName = NULLIF(LTRIM(RTRIM(s.Owner)), ''),    YearBuilt = s.YearBuilt,    DwellingUnits = s.DwellingUnits,    NormalizedAddress =        UPPER(LTRIM(RTRIM(CONCAT(            ISNULL(s.PremisesNumber, ''), ' ',            ISNULL(s.PremisesStreetName, ''), ' ',            CASE UPPER(LTRIM(RTRIM(s.PremisesStreetType)))                WHEN 'STREET' THEN 'ST'                WHEN 'AVENUE' THEN 'AVE'                WHEN 'ROAD' THEN 'RD'                WHEN 'LANE' THEN 'LN'                WHEN 'COURT' THEN 'CT'                WHEN 'DRIVE' THEN 'DR'                WHEN 'BOULEVARD' THEN 'BLVD'                WHEN 'PLACE' THEN 'PL'                ELSE ISNULL(s.PremisesStreetType, '')            END        )))),    NormalizedFullAddress =        UPPER(LTRIM(RTRIM(CONCAT(            ISNULL(s.PremisesNumber, ''), ' ',            ISNULL(s.PremisesStreetName, ''), ' ',            CASE UPPER(LTRIM(RTRIM(s.PremisesStreetType)))                WHEN 'STREET' THEN 'ST'                WHEN 'AVENUE' THEN 'AVE'                WHEN 'ROAD' THEN 'RD'                WHEN 'LANE' THEN 'LN'                WHEN 'COURT' THEN 'CT'                WHEN 'DRIVE' THEN 'DR'                WHEN 'BOULEVARD' THEN 'BLVD'                WHEN 'PLACE' THEN 'PL'                ELSE ISNULL(s.PremisesStreetType, '')            END, ' ',            ISNULL(s.PremisesCity, ''), ' ',            LEFT(ISNULL(s.PremisesZipCode, ''), 5)        ))))INTO #SDATFROM dbo.SDAT s;
