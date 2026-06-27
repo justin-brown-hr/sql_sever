@@ -53,17 +53,16 @@ check("Preflight checks UPROPERTYRECORDS", "dbo.UPROPERTYRECORDS" in main_batch 
 check("Preflight checks REF_MATCHCONFIDENCE.IsActive", "REF_MATCHCONFIDENCE.IsActive" in main_batch)
 check("DHCA MA read TRY/CATCH", "Cannot read DHCA_Internal.dbo.MasterAddress" in main_batch)
 check("External source TRY/CATCH", "eProperty source skipped" in main_batch)
-check("UPR MERGE address duplicate guard", "WHEN NOT MATCHED AND NOT EXISTS" in main_batch
-      or ("WHEN NOT MATCHED" in main_batch and "UQ_UPropertyRecords_Address" in main_batch))
-check("UPR MERGE SDAT account guard", "#UprAccountRanked" in main_batch and "UprMergeFinal" in main_batch)
+check("UPR duplicate-key guard (single pass)", "#UprMergeScored" in main_batch and "#UprMergeLosers" in main_batch)
 check("UPR SDAT account normalization", "fn_UPR_NormalizeSDATAccount" in text)
-check("UPR MERGE parcel insert guard", "p.ParcelID = s.EffectiveParcelID" in main_batch)
+check("UPR MERGE uses direct account join", "ON upr.SDATAccountNumber = s.EffectiveSDATAccountNumber" in main_batch)
+check("Progress PRINT markers", "Step 5b" in main_batch and "Step 5c" in main_batch)
 check("Status history idempotent", "Initial load - new UPR record" in main_batch
       and main_batch.count("NOT EXISTS") >= 5)
 check("Uses single SELECT INTO #UprMergeSrc (no duplicate)",
       main_batch.count("INTO #UprMergeSrc") - main_batch.count("INSERT INTO #UprMergeSrc") == 1)
-check("#UprMergeSrc rebuilt from final safety pass",
-      "INSERT INTO #UprMergeSrc" in main_batch and "#UprMergeFinal" in main_batch)
+check("#UprMergeSrc rebuilt from guard pass",
+      "INSERT INTO #UprMergeSrc" in main_batch and "#UprMergeScored" in main_batch)
 
 # MERGE blocks have WHEN NOT MATCHED
 merge_count = len(re.findall(r"\bMERGE\s+dbo\.", main_batch, re.I))
