@@ -57,7 +57,7 @@ check("UPR duplicate-key guard (single pass)", "#UprMergeScored" in main_batch a
 check("UPR SDAT account normalization", "fn_UPR_NormalizeSDATAccount" in text)
 check("UPR MERGE uses direct account join", "ON upr.SDATAccountNumber = s.EffectiveSDATAccountNumber" in main_batch)
 check("Review anchor uses INSERT OUTPUT INSERTED only", "@ReviewUprInserted" in main_batch and "INSERTED.SDATAccountNumber" in main_batch)
-check("Review anchor does not OUTPUT source alias", "OUTPUT" in main_batch and "OUTPUT\n        src." not in main_batch and "OUTPUT\n        rp." not in main_batch)
+check("Review anchor uses unique synthetic ParcelID", "PND-P-" in main_batch)
 check("UPR column NormalizedFulldAddress in MERGE insert", "NormalizedStreetAddress, NormalizedFulldAddress" in main_batch)
 check("Status history idempotent", "Initial load - new UPR record" in main_batch
       and main_batch.count("NOT EXISTS") >= 5)

@@ -1639,7 +1639,7 @@ BEGIN TRY
         rp.KdatRecordID,
         rp.ReasonForNoMatch,
         N'__PENDING__',
-        NULLIF(LTRIM(RTRIM(rp.ParcelID)), N''),
+        N'__PENDING__',
         LEFT(NULLIF(LTRIM(RTRIM(w.OwnerName)), N''), 100),
         LEFT(CONCAT(
             N'R',
@@ -1676,7 +1676,8 @@ BEGIN TRY
       );
 
     UPDATE #ReviewAnchorSrc
-    SET SDATAccountNumber = LEFT(CONCAT(N'PND-', CONVERT(NVARCHAR(20), SrcKey)), 50)
+    SET SDATAccountNumber = LEFT(CONCAT(N'PND-', CONVERT(NVARCHAR(20), SrcKey)), 50),
+        ParcelID            = LEFT(CONCAT(N'PND-P-', CONVERT(NVARCHAR(20), SrcKey)), 50)
     WHERE SDATAccountNumber = N'__PENDING__';
 
     DECLARE @ReviewUprInserted TABLE (
