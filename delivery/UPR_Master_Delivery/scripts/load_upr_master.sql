@@ -1609,38 +1609,59 @@ BEGIN TRY
 
     IF OBJECT_ID('tempdb..#ReviewAnchorSrc') IS NOT NULL DROP TABLE #ReviewAnchorSrc;
 
+    CREATE TABLE #ReviewAnchorSrc (
+        SrcKey                   INT            IDENTITY(1, 1) NOT NULL PRIMARY KEY,
+        MasterAddressID          INT            NULL,
+        KdatRecordID             INT            NULL,
+        ReasonForNoMatch         NVARCHAR(255)  NOT NULL,
+        SDATAccountNumber        NVARCHAR(50)   NOT NULL,
+        ParcelID                 NVARCHAR(50)   NULL,
+        OwnerName                NVARCHAR(100)  NULL,
+        StreetNumber             NVARCHAR(20)   NOT NULL,
+        StreetName               NVARCHAR(100)  NOT NULL,
+        StreetType               NVARCHAR(4)    NOT NULL,
+        City                     NVARCHAR(100)  NOT NULL,
+        ZipCode                  NVARCHAR(10)   NOT NULL,
+        NormalizedStreetAddress  NVARCHAR(100)  NOT NULL,
+        NormalizedFulldAddress   NVARCHAR(100)  NOT NULL,
+        Latitude                 DECIMAL(10, 6) NULL,
+        Longitude                DECIMAL(10, 6) NULL
+    );
+
+    INSERT INTO #ReviewAnchorSrc (
+        MasterAddressID, KdatRecordID, ReasonForNoMatch, SDATAccountNumber,
+        ParcelID, OwnerName, StreetNumber, StreetName, StreetType,
+        City, ZipCode, NormalizedStreetAddress, NormalizedFulldAddress,
+        Latitude, Longitude
+    )
     SELECT
         rp.MasterAddressID,
         rp.KdatRecordID,
         rp.ReasonForNoMatch,
-        SDATAccountNumber = LEFT(CONCAT(
-            N'PND-',
-            COALESCE(CONVERT(NVARCHAR(20), rp.MasterAddressID), CONVERT(NVARCHAR(20), rp.KdatRecordID))
-        ), 50),
-        ParcelID = NULLIF(LTRIM(RTRIM(rp.ParcelID)), N''),
-        OwnerName = LEFT(NULLIF(LTRIM(RTRIM(w.OwnerName)), N''), 100),
-        StreetNumber = LEFT(CONCAT(
+        N'__PENDING__',
+        NULLIF(LTRIM(RTRIM(rp.ParcelID)), N''),
+        LEFT(NULLIF(LTRIM(RTRIM(w.OwnerName)), N''), 100),
+        LEFT(CONCAT(
             N'R',
             COALESCE(CONVERT(NVARCHAR(20), rp.MasterAddressID), CONVERT(NVARCHAR(20), rp.KdatRecordID))
         ), 20),
-        StreetName = COALESCE(LEFT(NULLIF(UPPER(LTRIM(RTRIM(rp.StreetName))), N''), 100), N'PENDING'),
-        StreetType = LEFT(COALESCE(NULLIF(UPPER(LTRIM(RTRIM(rp.StreetType))), N''), N'UNK'), 4),
-        City = COALESCE(LEFT(NULLIF(UPPER(LTRIM(RTRIM(w.City))), N''), 100), N'PENDING'),
-        ZipCode = CASE
+        COALESCE(LEFT(NULLIF(UPPER(LTRIM(RTRIM(rp.StreetName))), N''), 100), N'PENDING'),
+        LEFT(COALESCE(NULLIF(UPPER(LTRIM(RTRIM(rp.StreetType))), N''), N'UNK'), 4),
+        COALESCE(LEFT(NULLIF(UPPER(LTRIM(RTRIM(w.City))), N''), 100), N'PENDING'),
+        CASE
             WHEN dbo.fn_UPR_IsValidZipCode(rp.ZipCode) = 1 THEN dbo.fn_UPR_NormalizeZipCode(rp.ZipCode)
             ELSE N'00000'
         END,
-        NormalizedStreetAddress = LEFT(COALESCE(
+        LEFT(COALESCE(
             NULLIF(w.NormalizedStreetAddress, N''),
             CONCAT(N'PENDING-', COALESCE(CONVERT(NVARCHAR(20), rp.MasterAddressID), CONVERT(NVARCHAR(20), rp.KdatRecordID)))
         ), 100),
-        NormalizedFulldAddress = LEFT(COALESCE(
+        LEFT(COALESCE(
             NULLIF(w.NormalizedFullAddress, N''),
             CONCAT(N'PENDING-', COALESCE(CONVERT(NVARCHAR(20), rp.MasterAddressID), CONVERT(NVARCHAR(20), rp.KdatRecordID)))
         ), 100),
         w.Latitude,
         w.Longitude
-    INTO #ReviewAnchorSrc
     FROM #ReviewPending rp
     INNER JOIN #Work w
         ON (rp.MasterAddressID IS NOT NULL AND w.MasterAddressID = rp.MasterAddressID)
@@ -1654,33 +1675,68 @@ BEGIN TRY
             AND a.ReasonForNoMatch = rp.ReasonForNoMatch
       );
 
-    MERGE dbo.UPROPERTYRECORDS AS tgt
-    USING #ReviewAnchorSrc AS src
-    ON 1 = 0
-    WHEN NOT MATCHED THEN INSERT (
+    UPDATE #ReviewAnchorSrc
+    SET SDATAccountNumber = LEFT(CONCAT(N'PND-', CONVERT(NVARCHAR(20), SrcKey)), 50)
+    WHERE SDATAccountNumber = N'__PENDING__';
+
+    DECLARE @ReviewUprInserted TABLE (
+        SDATAccountNumber    NVARCHAR(50) NOT NULL PRIMARY KEY,
+        UPropertyRecordsID   INT          NOT NULL
+    );
+
+    INSERT INTO dbo.UPROPERTYRECORDS (
         SDATAccountNumber, ParcelID, PropertyName, Owner,
         StreetNumber, StreetName, StreetType,
         City, [State], ZipCode, NormalizedStreetAddress, NormalizedFulldAddress,
         Latitude, Longitude,
         PropertyTypeCode, PropertyStatusCode, IsActive,
         CreatedDate, CreatedBy, UpdatedDate, UpdatedBy
-    ) VALUES (
-        src.SDATAccountNumber, src.ParcelID, NULL, src.OwnerName,
-        src.StreetNumber, src.StreetName, src.StreetType,
-        src.City, @DefaultState, src.ZipCode,
-        src.NormalizedStreetAddress, src.NormalizedFulldAddress,
-        src.Latitude, src.Longitude,
-        @DefaultSdatPropertyType, N'PENDING', 0,
-        @Now, @RunUser, @Now, @RunUser
     )
     OUTPUT
-        src.MasterAddressID,
-        src.KdatRecordID,
-        src.ReasonForNoMatch,
+        INSERTED.SDATAccountNumber,
         INSERTED.UPropertyRecordsID
-    INTO #ReviewAnchor (MasterAddressID, KdatRecordID, ReasonForNoMatch, UPropertyRecordsID);
+    INTO @ReviewUprInserted (SDATAccountNumber, UPropertyRecordsID)
+    SELECT
+        s.SDATAccountNumber,
+        s.ParcelID,
+        NULL,
+        s.OwnerName,
+        s.StreetNumber,
+        s.StreetName,
+        s.StreetType,
+        s.City,
+        @DefaultState,
+        s.ZipCode,
+        s.NormalizedStreetAddress,
+        s.NormalizedFulldAddress,
+        s.Latitude,
+        s.Longitude,
+        @DefaultSdatPropertyType,
+        N'PENDING',
+        0,
+        @Now,
+        @RunUser,
+        @Now,
+        @RunUser
+    FROM #ReviewAnchorSrc s;
+
+    INSERT INTO #ReviewAnchor (MasterAddressID, KdatRecordID, ReasonForNoMatch, UPropertyRecordsID)
+    SELECT
+        s.MasterAddressID,
+        s.KdatRecordID,
+        s.ReasonForNoMatch,
+        i.UPropertyRecordsID
+    FROM #ReviewAnchorSrc s
+    INNER JOIN @ReviewUprInserted i
+        ON i.SDATAccountNumber = s.SDATAccountNumber;
+
+    DECLARE @ReviewAnchorCount INT = (SELECT COUNT(*) FROM @ReviewUprInserted);
 
     DROP TABLE #ReviewAnchorSrc;
+
+    PRINT N'Step 6b — Review anchor UPR rows created: '
+        + CONVERT(NVARCHAR(20), @ReviewAnchorCount)
+        + N' | ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
 
     IF OBJECT_ID('tempdb..#ReviewXrefStage') IS NOT NULL DROP TABLE #ReviewXrefStage;
     CREATE TABLE #ReviewXrefStage (
