@@ -1391,7 +1391,7 @@ BEGIN TRY
     WHEN NOT MATCHED THEN INSERT (
         SDATAccountNumber, ParcelID, PropertyName, Owner,
         StreetNumber, StreetName, StreetType,
-        City, [State], ZipCode, NormalizedStreetAddress, NormalizedFullAddress,
+        City, [State], ZipCode, NormalizedStreetAddress, NormalizedFulldAddress,
         Latitude, Longitude,
         PropertyTypeCode, PropertyStatusCode, IsActive,
         CreatedDate, CreatedBy, UpdatedDate, UpdatedBy
@@ -1607,52 +1607,44 @@ BEGIN TRY
         OR (w.KdatRecordID IS NOT NULL AND m.KdatRecordID = w.KdatRecordID)
     WHERE rp.ReasonForNoMatch = N'DUPLICATE';
 
-    INSERT INTO dbo.UPROPERTYRECORDS (
-        SDATAccountNumber, ParcelID, PropertyName, Owner,
-        StreetNumber, StreetName, StreetType,
-        City, [State], ZipCode, NormalizedStreetAddress, NormalizedFulldAddress,
-        Latitude, Longitude,
-        PropertyTypeCode, PropertyStatusCode, IsActive,
-        CreatedDate, CreatedBy, UpdatedDate, UpdatedBy
-    )
-    OUTPUT
-        rp.MasterAddressID, rp.KdatRecordID, rp.ReasonForNoMatch, INSERTED.UPropertyRecordsID
-    INTO #ReviewAnchor (MasterAddressID, KdatRecordID, ReasonForNoMatch, UPropertyRecordsID)
+    IF OBJECT_ID('tempdb..#ReviewAnchorSrc') IS NOT NULL DROP TABLE #ReviewAnchorSrc;
+
     SELECT
-        LEFT(CONCAT(
+        rp.MasterAddressID,
+        rp.KdatRecordID,
+        rp.ReasonForNoMatch,
+        SDATAccountNumber = LEFT(CONCAT(
             N'PND-',
             COALESCE(CONVERT(NVARCHAR(20), rp.MasterAddressID), CONVERT(NVARCHAR(20), rp.KdatRecordID))
         ), 50),
-        NULLIF(LTRIM(RTRIM(rp.ParcelID)), N''),
-        NULL,
-        LEFT(NULLIF(LTRIM(RTRIM(w.OwnerName)), N''), 100),
-        LEFT(CONCAT(
+        ParcelID = NULLIF(LTRIM(RTRIM(rp.ParcelID)), N''),
+        OwnerName = LEFT(NULLIF(LTRIM(RTRIM(w.OwnerName)), N''), 100),
+        StreetNumber = LEFT(CONCAT(
             N'R',
             COALESCE(CONVERT(NVARCHAR(20), rp.MasterAddressID), CONVERT(NVARCHAR(20), rp.KdatRecordID))
         ), 20),
-        COALESCE(LEFT(NULLIF(UPPER(LTRIM(RTRIM(rp.StreetName))), N''), 100), N'PENDING'),
-        LEFT(COALESCE(NULLIF(UPPER(LTRIM(RTRIM(rp.StreetType))), N''), N'UNK'), 4),
-        COALESCE(LEFT(NULLIF(UPPER(LTRIM(RTRIM(w.City))), N''), 100), N'PENDING'),
-        @DefaultState,
-        CASE
+        StreetName = COALESCE(LEFT(NULLIF(UPPER(LTRIM(RTRIM(rp.StreetName))), N''), 100), N'PENDING'),
+        StreetType = LEFT(COALESCE(NULLIF(UPPER(LTRIM(RTRIM(rp.StreetType))), N''), N'UNK'), 4),
+        City = COALESCE(LEFT(NULLIF(UPPER(LTRIM(RTRIM(w.City))), N''), 100), N'PENDING'),
+        ZipCode = CASE
             WHEN dbo.fn_UPR_IsValidZipCode(rp.ZipCode) = 1 THEN dbo.fn_UPR_NormalizeZipCode(rp.ZipCode)
             ELSE N'00000'
         END,
-        LEFT(COALESCE(
+        NormalizedStreetAddress = LEFT(COALESCE(
             NULLIF(w.NormalizedStreetAddress, N''),
             CONCAT(N'PENDING-', COALESCE(CONVERT(NVARCHAR(20), rp.MasterAddressID), CONVERT(NVARCHAR(20), rp.KdatRecordID)))
         ), 100),
-        LEFT(COALESCE(
+        NormalizedFulldAddress = LEFT(COALESCE(
             NULLIF(w.NormalizedFullAddress, N''),
             CONCAT(N'PENDING-', COALESCE(CONVERT(NVARCHAR(20), rp.MasterAddressID), CONVERT(NVARCHAR(20), rp.KdatRecordID)))
         ), 100),
-        w.Latitude, w.Longitude,
-        @DefaultSdatPropertyType, N'PENDING', 0,
-        @Now, @RunUser, @Now, @RunUser
+        w.Latitude,
+        w.Longitude
+    INTO #ReviewAnchorSrc
     FROM #ReviewPending rp
     INNER JOIN #Work w
         ON (rp.MasterAddressID IS NOT NULL AND w.MasterAddressID = rp.MasterAddressID)
-        OR (rp.KdatRecordID IS NOT NULL AND w.KdatRecordID = rp.KdatRecordID)
+        OR (rp.KdatRecordID IS NOT NULL AND w.KdatRecordID = rp.KdatRecordID AND rp.MasterAddressID IS NULL)
     WHERE rp.ReasonForNoMatch IN (N'NO_PARCEL_MATCH', N'NO_ADDRESS_MATCH')
       AND NOT EXISTS (
           SELECT 1
@@ -1661,6 +1653,34 @@ BEGIN TRY
             AND ISNULL(a.KdatRecordID, -1) = ISNULL(rp.KdatRecordID, -1)
             AND a.ReasonForNoMatch = rp.ReasonForNoMatch
       );
+
+    MERGE dbo.UPROPERTYRECORDS AS tgt
+    USING #ReviewAnchorSrc AS src
+    ON 1 = 0
+    WHEN NOT MATCHED THEN INSERT (
+        SDATAccountNumber, ParcelID, PropertyName, Owner,
+        StreetNumber, StreetName, StreetType,
+        City, [State], ZipCode, NormalizedStreetAddress, NormalizedFulldAddress,
+        Latitude, Longitude,
+        PropertyTypeCode, PropertyStatusCode, IsActive,
+        CreatedDate, CreatedBy, UpdatedDate, UpdatedBy
+    ) VALUES (
+        src.SDATAccountNumber, src.ParcelID, NULL, src.OwnerName,
+        src.StreetNumber, src.StreetName, src.StreetType,
+        src.City, @DefaultState, src.ZipCode,
+        src.NormalizedStreetAddress, src.NormalizedFulldAddress,
+        src.Latitude, src.Longitude,
+        @DefaultSdatPropertyType, N'PENDING', 0,
+        @Now, @RunUser, @Now, @RunUser
+    )
+    OUTPUT
+        src.MasterAddressID,
+        src.KdatRecordID,
+        src.ReasonForNoMatch,
+        INSERTED.UPropertyRecordsID
+    INTO #ReviewAnchor (MasterAddressID, KdatRecordID, ReasonForNoMatch, UPropertyRecordsID);
+
+    DROP TABLE #ReviewAnchorSrc;
 
     IF OBJECT_ID('tempdb..#ReviewXrefStage') IS NOT NULL DROP TABLE #ReviewXrefStage;
     CREATE TABLE #ReviewXrefStage (
@@ -2060,7 +2080,7 @@ BEGIN TRY
         N'MAIN',
         CONCAT(N'Building ', upr.UPropertyRecordsID),
         N'MAIN',
-        upr.NormalizedFullAddress,
+        upr.NormalizedFulldAddress,
         N'ACTIVE', 1, @Now, @Now, @RunUser, @RunUser
     FROM dbo.UPROPERTYRECORDS upr
     INNER JOIN dbo.REF_PROPERTYTYPE pt ON pt.PropertyTypeCode = upr.PropertyTypeCode

@@ -56,7 +56,8 @@ check("External source TRY/CATCH", "eProperty source skipped" in main_batch)
 check("UPR duplicate-key guard (single pass)", "#UprMergeScored" in main_batch and "#UprMergeLosers" in main_batch)
 check("UPR SDAT account normalization", "fn_UPR_NormalizeSDATAccount" in text)
 check("UPR MERGE uses direct account join", "ON upr.SDATAccountNumber = s.EffectiveSDATAccountNumber" in main_batch)
-check("Progress PRINT markers", "Step 5b" in main_batch and "Step 5c" in main_batch)
+check("Review anchor uses MERGE OUTPUT (not INSERT OUTPUT rp)", "#ReviewAnchorSrc" in main_batch and "USING #ReviewAnchorSrc AS src" in main_batch)
+check("UPR column NormalizedFulldAddress in MERGE insert", "NormalizedStreetAddress, NormalizedFulldAddress" in main_batch)
 check("Status history idempotent", "Initial load - new UPR record" in main_batch
       and main_batch.count("NOT EXISTS") >= 5)
 check("Uses single SELECT INTO #UprMergeSrc (no duplicate)",
