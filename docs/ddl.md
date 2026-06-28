@@ -240,7 +240,10 @@ CREATE TABLE dbo.UPRMATCHREVIEW_Q
         CHECK (ReasonForNoMatch IN
         (
             'NO_PARCEL_MATCH',
+            'NO_SDAT_MATCH',
             'NO_ADDRESS_MATCH',
+            'INSUFFICIENT_DATA',
+            'AMBIGUOUS_CANDIDATES',
             'DUPLICATE',
             'LOW_CONFIDENCE_ONLY',
             'SOURCE_RECORD_ERROR',
