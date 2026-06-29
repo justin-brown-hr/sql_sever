@@ -39,7 +39,7 @@ City                    NVARCHAR (100) NOT NULL,
 State                   NVARCHAR (2) NULL,
 ZipCode                 NVARCHAR (10) NOT NULL,
 NormalizedStreetAddress       NVARCHAR (100) NOT NULL,
-NormalizedFulldAddress   NVARCHAR (100) NOT NULL,
+NormalizedFullAddress   NVARCHAR (100) NOT NULL,
 
 Latitude	             DECIMAL (10,6) NULL,
 Longitude	             DECIMAL (10,6) NULL,
