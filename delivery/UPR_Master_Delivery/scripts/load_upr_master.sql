@@ -219,6 +219,8 @@ DECLARE @CaseXrefInserted INT = 0, @MPDUXrefInserted INT = 0, @EPropertyXrefInse
 DECLARE @ReviewIncomingInserted INT = 0, @ReviewExternalInserted INT = 0, @ReviewInserted INT = 0;
 DECLARE @ReviewNoParcel INT = 0, @ReviewDuplicate INT = 0, @ReviewIncomplete INT = 0;
 DECLARE @ReviewSkippedNoAnchor INT = 0;
+DECLARE @ReviewAnchorCount INT = 0;
+DECLARE @ReviewAnchorStaged INT = 0;
 DECLARE @EPropertyXrefNoMatch INT = 0, @CaseXrefNoMatch INT = 0;
 DECLARE @MPDUXrefNoMatch INT = 0, @MultifamilyXrefNoMatch INT = 0;
 DECLARE @StatusHistoryInserted INT = 0, @AuditInserted INT = 0;
@@ -343,7 +345,7 @@ BEGIN TRY
             N'REF_PROPERTYTYPE audit columns (CreationUserID / LastUpdatedUserID) missing. Recreate from client DDL.',
             1;
 
-    PRINT N'Preflight OK — database: ' + DB_NAME()
+    PRINT N'Preflight OK - database: ' + DB_NAME()
         + N' | started: ' + CONVERT(NVARCHAR(30), @BatchStartTime, 120);
 
     /* ========================================================================
@@ -668,9 +670,7 @@ BEGIN TRY
     END CATCH;
 
     SET @MasterAddressRead = (SELECT COUNT(*) FROM #MA);
-    PRINT N'Step 2 complete — MasterAddress rows: '
-        + CONVERT(NVARCHAR(20), @MasterAddressRead)
-        + N' | ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
+    PRINT N'Step 2 complete - MasterAddress rows: ' + CONVERT(NVARCHAR(20), @MasterAddressRead);
 
     /* ========================================================================
        3. NORMALIZE SDAT  
@@ -751,9 +751,7 @@ BEGIN TRY
     END CATCH;
 
     SET @SDATRead = (SELECT COUNT(*) FROM #SDAT);
-    PRINT N'Step 3 complete — SDAT rows: '
-        + CONVERT(NVARCHAR(20), @SDATRead)
-        + N' | ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
+    PRINT N'Step 3 complete - SDAT rows: ' + CONVERT(NVARCHAR(20), @SDATRead);
 
     /* ========================================================================
        4. MATCH AddressMaster <-> SDAT → unified #Work
@@ -956,9 +954,7 @@ BEGIN TRY
     CREATE NONCLUSTERED INDEX IX_Work_KdatRecordID ON #Work(KdatRecordID)
         WHERE KdatRecordID IS NOT NULL;
 
-    PRINT N'Step 4 complete — unified #Work rows: '
-        + CONVERT(NVARCHAR(20), @IncomingUnifiedRows)
-        + N' | ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
+    PRINT N'Step 4 complete - unified #Work rows: ' + CONVERT(NVARCHAR(20), @IncomingUnifiedRows);
 
     /* ========================================================================
        5. INSERT UPROPERTYRECORDS (idempotent - no duplicates)
@@ -1099,7 +1095,7 @@ BEGIN TRY
                  THEN N'KDAT-' + CONVERT(NVARCHAR(20), w.KdatRecordID) END,
             N'ADDR-' + CONVERT(NVARCHAR(20), ABS(CHECKSUM(
                 COALESCE(NULLIF(w.NormalizedFullAddress, N''), w.NormalizedStreetAddress, N'UNKNOWN')
-            ))))
+            )))
         )
     FROM #Work w
     INNER JOIN #UprCandidate c
@@ -1211,7 +1207,7 @@ BEGIN TRY
     );
 
     /* UQ guard — one scored pass; losers → Review_Q DUPLICATE (set-based, indexed) */
-    PRINT N'Step 5b — UPR duplicate-key guard started: ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
+    PRINT N'Step 5b - UPR duplicate-key guard started: ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
 
     IF OBJECT_ID('tempdb..#ExistingUprKeys') IS NOT NULL DROP TABLE #ExistingUprKeys;
 
@@ -1378,9 +1374,7 @@ BEGIN TRY
     CREATE NONCLUSTERED INDEX IX_UprMergeSrc_Acct ON #UprMergeSrc(EffectiveSDATAccountNumber);
 
     SET @UprEligibleRows = (SELECT COUNT(*) FROM #UprMergeSrc);
-    PRINT N'Step 5b complete — UPR MERGE candidates: '
-        + CONVERT(NVARCHAR(20), @UprEligibleRows)
-        + N' | ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
+    PRINT N'Step 5b complete - UPR MERGE candidates: ' + CONVERT(NVARCHAR(20), @UprEligibleRows);
 
     SET @RowsReviewDuplicate = (
         SELECT COUNT(*)
@@ -1409,7 +1403,7 @@ BEGIN TRY
     )
         THROW 50032, N'Internal guard: duplicate EffectiveParcelID in #UprMergeSrc.', 1;
 
-    PRINT N'Step 5c — UPR MERGE started: ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
+    PRINT N'Step 5c - UPR MERGE started: ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
 
     MERGE dbo.UPROPERTYRECORDS AS upr
     USING #UprMergeSrc AS s
@@ -1456,7 +1450,7 @@ BEGIN TRY
         @Now, @RunUser, @Now, @RunUser
     );
 
-    PRINT N'Step 5c complete — UPR MERGE finished: ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
+    PRINT N'Step 5c complete - UPR MERGE finished: ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
 
     SET @UprMergeRowsAffected = @@ROWCOUNT;
     SET @UPRInserted = (
@@ -1624,11 +1618,7 @@ BEGIN TRY
            All #ReviewPending rows are written (PENDING anchor UPR when no winner).
        ======================================================================== */
     SET @RowsSentToReview = (SELECT COUNT(*) FROM #ReviewPending);
-    PRINT N'Step 6b — Review_Q processing started: '
-        + CONVERT(NVARCHAR(20), @RowsSentToReview)
-        + N' candidates | ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
-    DECLARE @ReviewAnchorCount INT = 0;
-    DECLARE @ReviewAnchorStaged INT = 0;
+    PRINT N'Step 6b - Review_Q processing started: ' + CONVERT(NVARCHAR(20), @RowsSentToReview) + N' candidates';
     DECLARE @ReviewXrefOut TABLE (
         UPropertyRecords_XrefID INT NOT NULL,
         MasterAddressID         INT NULL,
@@ -1798,9 +1788,7 @@ BEGIN TRY
         THROW 50035, N'Internal guard: duplicate synthetic ParcelID in #ReviewAnchorSrc.', 1;
 
     SET @ReviewAnchorStaged = (SELECT COUNT(*) FROM #ReviewAnchorSrc);
-    PRINT N'Step 6b — PENDING anchor rows staged: '
-        + CONVERT(NVARCHAR(20), @ReviewAnchorStaged)
-        + N' | ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
+    PRINT N'Step 6b - PENDING anchor rows staged: ' + CONVERT(NVARCHAR(20), @ReviewAnchorStaged);
 
     DECLARE @ReviewUprInserted TABLE (
         SDATAccountNumber    NVARCHAR(50) NOT NULL PRIMARY KEY,
@@ -1855,9 +1843,7 @@ BEGIN TRY
     );
 
     SET @ReviewAnchorCount = (SELECT COUNT(*) FROM @ReviewUprInserted);
-    PRINT N'Step 6b — PENDING anchor UPR rows ready: '
-        + CONVERT(NVARCHAR(20), @ReviewAnchorCount)
-        + N' | ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
+    PRINT N'Step 6b - PENDING anchor UPR rows ready: ' + CONVERT(NVARCHAR(20), @ReviewAnchorCount);
 
     INSERT INTO #ReviewAnchor (MasterAddressID, KdatRecordID, ReasonForNoMatch, UPropertyRecordsID)
     SELECT
@@ -1871,9 +1857,8 @@ BEGIN TRY
 
     DROP TABLE #ReviewAnchorSrc;
 
-    PRINT N'Step 6b — Review anchor UPR rows created: '
-        + CONVERT(NVARCHAR(20), @ReviewAnchorCount)
-        + N' | ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
+    SET @ReviewAnchorCount = (SELECT COUNT(*) FROM @ReviewUprInserted);
+    PRINT N'Step 6b - Review anchor UPR rows created: ' + CONVERT(NVARCHAR(20), @ReviewAnchorCount);
 
     IF OBJECT_ID('tempdb..#ReviewXrefStage') IS NOT NULL DROP TABLE #ReviewXrefStage;
     CREATE TABLE #ReviewXrefStage (
@@ -2029,9 +2014,7 @@ BEGIN TRY
 
     SET @ReviewIncomingInserted = @@ROWCOUNT;
 
-    PRINT N'Step 6c — Review_Q rows inserted: '
-        + CONVERT(NVARCHAR(20), @ReviewIncomingInserted)
-        + N' | ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
+    PRINT N'Step 6c - Review_Q rows inserted: ' + CONVERT(NVARCHAR(20), @ReviewIncomingInserted);
     SET @ReviewNoParcel = (
         SELECT COUNT(*) FROM dbo.UPRMATCHREVIEW_Q
         WHERE ProcessingTimestamp >= @Now AND ReasonForNoMatch = N'NO_PARCEL_MATCH'
@@ -2419,9 +2402,9 @@ BEGIN TRY
     PRINT N'UPR total processed this run: ' + CONVERT(VARCHAR(20), @UPRInserted + @UPRUpdated);
     PRINT N' ';
     PRINT N'Review_Q staged (total candidates): ' + CONVERT(VARCHAR(20), @RowsSentToReview);
-    PRINT N'Review_Q — NoParcelID (NO_PARCEL_MATCH): ' + CONVERT(VARCHAR(20), @ReviewNoParcel);
-    PRINT N'Review_Q — incomplete (NO_ADDRESS_MATCH): ' + CONVERT(VARCHAR(20), @ReviewIncomplete);
-    PRINT N'Review_Q — Duplicate: ' + CONVERT(VARCHAR(20), @ReviewDuplicate);
+    PRINT N'Review_Q - NoParcelID (NO_PARCEL_MATCH): ' + CONVERT(VARCHAR(20), @ReviewNoParcel);
+    PRINT N'Review_Q - incomplete (NO_ADDRESS_MATCH): ' + CONVERT(VARCHAR(20), @ReviewIncomplete);
+    PRINT N'Review_Q - Duplicate: ' + CONVERT(VARCHAR(20), @ReviewDuplicate);
     PRINT N'Review_Q records inserted: ' + CONVERT(VARCHAR(20), @ReviewIncomingInserted);
     IF @ReviewSkippedNoAnchor > 0
         PRINT N'Review_Q skipped (no anchor): ' + CONVERT(VARCHAR(20), @ReviewSkippedNoAnchor);
