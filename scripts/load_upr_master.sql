@@ -241,6 +241,50 @@ DECLARE @RefUserUpdateCol SYSNAME = CASE
     WHEN COL_LENGTH('dbo.REF_PROPERTYTYPE', 'LastUpdatedUSERID')  IS NOT NULL THEN N'LastUpdatedUSERID'
     ELSE NULL END;
 
+/* ========================================================================
+   SCHEMA FIX (outside transaction — must persist even if load fails/rolls back)
+   Client DB CHECK on ReasonForNoMatch often omits DUPLICATE; drop ALL such
+   constraints (any name) and recreate one canonical CHECK.
+   ======================================================================== */
+IF OBJECT_ID(N'dbo.UPRMATCHREVIEW_Q', N'U') IS NOT NULL
+BEGIN
+    DECLARE @ReviewCkDrop NVARCHAR(MAX) = N'';
+    SELECT @ReviewCkDrop = @ReviewCkDrop
+        + N'ALTER TABLE dbo.UPRMATCHREVIEW_Q DROP CONSTRAINT '
+        + QUOTENAME(cc.name) + N';' + CHAR(13)
+    FROM sys.check_constraints cc
+    WHERE cc.parent_object_id = OBJECT_ID(N'dbo.UPRMATCHREVIEW_Q')
+      AND cc.definition LIKE N'%ReasonForNoMatch%';
+
+    IF @ReviewCkDrop <> N''
+    BEGIN
+        EXEC sys.sp_executesql @ReviewCkDrop;
+        PRINT N'Schema: dropped existing ReasonForNoMatch CHECK constraint(s) on UPRMATCHREVIEW_Q.';
+    END
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM sys.check_constraints cc
+        WHERE cc.parent_object_id = OBJECT_ID(N'dbo.UPRMATCHREVIEW_Q')
+          AND cc.name = N'CK_UPRMATCHREVIEW_Q_ReasonForNoMatch'
+    )
+    BEGIN
+        ALTER TABLE dbo.UPRMATCHREVIEW_Q ADD CONSTRAINT CK_UPRMATCHREVIEW_Q_ReasonForNoMatch
+            CHECK (ReasonForNoMatch IN (
+                N'NO_PARCEL_MATCH',
+                N'NO_SDAT_MATCH',
+                N'NO_ADDRESS_MATCH',
+                N'INSUFFICIENT_DATA',
+                N'AMBIGUOUS_CANDIDATES',
+                N'DUPLICATE',
+                N'LOW_CONFIDENCE_ONLY',
+                N'SOURCE_RECORD_ERROR',
+                N'OTHER'
+            ));
+        PRINT N'Schema: CK_UPRMATCHREVIEW_Q_ReasonForNoMatch rebuilt (includes DUPLICATE).';
+    END
+END
+
 BEGIN TRY
     BEGIN TRANSACTION;
 
@@ -294,39 +338,6 @@ BEGIN TRY
         THROW 50004,
             N'REF_PROPERTYTYPE audit columns (CreationUserID / LastUpdatedUserID) missing. Recreate from client DDL.',
             1;
-
-    /* Client DB may lack DUPLICATE on Review_Q CHECK — extend idempotently (approved reason code) */
-    IF OBJECT_ID(N'dbo.UPRMATCHREVIEW_Q', N'U') IS NOT NULL
-       AND NOT EXISTS (
-            SELECT 1
-            FROM sys.check_constraints cc
-            WHERE cc.parent_object_id = OBJECT_ID(N'dbo.UPRMATCHREVIEW_Q')
-              AND cc.name = N'CK_UPRMATCHREVIEW_Q_ReasonForNoMatch'
-              AND cc.definition LIKE N'%DUPLICATE%'
-       )
-    BEGIN
-        IF EXISTS (
-            SELECT 1
-            FROM sys.check_constraints cc
-            WHERE cc.parent_object_id = OBJECT_ID(N'dbo.UPRMATCHREVIEW_Q')
-              AND cc.name = N'CK_UPRMATCHREVIEW_Q_ReasonForNoMatch'
-        )
-            ALTER TABLE dbo.UPRMATCHREVIEW_Q DROP CONSTRAINT CK_UPRMATCHREVIEW_Q_ReasonForNoMatch;
-
-        ALTER TABLE dbo.UPRMATCHREVIEW_Q ADD CONSTRAINT CK_UPRMATCHREVIEW_Q_ReasonForNoMatch
-            CHECK (ReasonForNoMatch IN (
-                N'NO_PARCEL_MATCH',
-                N'NO_SDAT_MATCH',
-                N'NO_ADDRESS_MATCH',
-                N'INSUFFICIENT_DATA',
-                N'AMBIGUOUS_CANDIDATES',
-                N'DUPLICATE',
-                N'LOW_CONFIDENCE_ONLY',
-                N'SOURCE_RECORD_ERROR',
-                N'OTHER'
-            ));
-        PRINT N'Preflight: CK_UPRMATCHREVIEW_Q_ReasonForNoMatch updated to include DUPLICATE.';
-    END
 
     PRINT N'Preflight OK — database: ' + DB_NAME()
         + N' | started: ' + CONVERT(NVARCHAR(30), @BatchStartTime, 120);
@@ -1898,6 +1909,23 @@ BEGIN TRY
 
     DROP TABLE #ReviewXrefStageDeduped;
     DROP TABLE #ReviewAnchor;
+
+    IF EXISTS (
+        SELECT 1
+        FROM #ReviewPending rp
+        INNER JOIN @ReviewXrefOut rx
+            ON ISNULL(rx.MasterAddressID, -1) = ISNULL(rp.MasterAddressID, -1)
+           AND ISNULL(rx.KdatRecordID, -1) = ISNULL(rp.KdatRecordID, -1)
+           AND rx.ReasonForNoMatch = rp.ReasonForNoMatch
+        WHERE rp.ReasonForNoMatch NOT IN (
+            N'NO_PARCEL_MATCH', N'NO_SDAT_MATCH', N'NO_ADDRESS_MATCH',
+            N'INSUFFICIENT_DATA', N'AMBIGUOUS_CANDIDATES', N'DUPLICATE',
+            N'LOW_CONFIDENCE_ONLY', N'SOURCE_RECORD_ERROR', N'OTHER'
+        )
+    )
+        THROW 50020,
+            N'Review_Q insert blocked: ReasonForNoMatch value not in allowed CHECK list. Re-run script from top (schema fix runs before transaction).',
+            1;
 
     INSERT INTO dbo.UPRMATCHREVIEW_Q (
         UPropertyRecords_XrefID, IncomingSourceSystem, NormalizedIncomingAddress,
