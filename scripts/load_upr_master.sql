@@ -242,9 +242,8 @@ DECLARE @RefUserUpdateCol SYSNAME = CASE
     ELSE NULL END;
 
 /* ========================================================================
-   SCHEMA FIX (outside transaction — must persist even if load fails/rolls back)
-   Client DB CHECK on ReasonForNoMatch often omits DUPLICATE; drop ALL such
-   constraints (any name) and recreate one canonical CHECK.
+   SCHEMA FIX (outside transaction — persists even if load fails/rolls back)
+   Rebuild Review_Q ReasonForNoMatch CHECK every run; verify DUPLICATE allowed.
    ======================================================================== */
 IF OBJECT_ID(N'dbo.UPRMATCHREVIEW_Q', N'U') IS NOT NULL
 BEGIN
@@ -257,32 +256,41 @@ BEGIN
       AND cc.definition LIKE N'%ReasonForNoMatch%';
 
     IF @ReviewCkDrop <> N''
-    BEGIN
         EXEC sys.sp_executesql @ReviewCkDrop;
-        PRINT N'Schema: dropped existing ReasonForNoMatch CHECK constraint(s) on UPRMATCHREVIEW_Q.';
-    END
+
+    IF EXISTS (
+        SELECT 1
+        FROM sys.check_constraints cc
+        WHERE cc.parent_object_id = OBJECT_ID(N'dbo.UPRMATCHREVIEW_Q')
+          AND cc.name = N'CK_UPRMATCHREVIEW_Q_ReasonForNoMatch'
+    )
+        ALTER TABLE dbo.UPRMATCHREVIEW_Q DROP CONSTRAINT CK_UPRMATCHREVIEW_Q_ReasonForNoMatch;
+
+    ALTER TABLE dbo.UPRMATCHREVIEW_Q ADD CONSTRAINT CK_UPRMATCHREVIEW_Q_ReasonForNoMatch
+        CHECK (ReasonForNoMatch IN (
+            N'NO_PARCEL_MATCH',
+            N'NO_SDAT_MATCH',
+            N'NO_ADDRESS_MATCH',
+            N'INSUFFICIENT_DATA',
+            N'AMBIGUOUS_CANDIDATES',
+            N'DUPLICATE',
+            N'LOW_CONFIDENCE_ONLY',
+            N'SOURCE_RECORD_ERROR',
+            N'OTHER'
+        ));
 
     IF NOT EXISTS (
         SELECT 1
         FROM sys.check_constraints cc
         WHERE cc.parent_object_id = OBJECT_ID(N'dbo.UPRMATCHREVIEW_Q')
           AND cc.name = N'CK_UPRMATCHREVIEW_Q_ReasonForNoMatch'
+          AND cc.definition LIKE N'%DUPLICATE%'
     )
-    BEGIN
-        ALTER TABLE dbo.UPRMATCHREVIEW_Q ADD CONSTRAINT CK_UPRMATCHREVIEW_Q_ReasonForNoMatch
-            CHECK (ReasonForNoMatch IN (
-                N'NO_PARCEL_MATCH',
-                N'NO_SDAT_MATCH',
-                N'NO_ADDRESS_MATCH',
-                N'INSUFFICIENT_DATA',
-                N'AMBIGUOUS_CANDIDATES',
-                N'DUPLICATE',
-                N'LOW_CONFIDENCE_ONLY',
-                N'SOURCE_RECORD_ERROR',
-                N'OTHER'
-            ));
-        PRINT N'Schema: CK_UPRMATCHREVIEW_Q_ReasonForNoMatch rebuilt (includes DUPLICATE).';
-    END
+        THROW 50021,
+            N'Schema repair failed: UPRMATCHREVIEW_Q ReasonForNoMatch CHECK must allow DUPLICATE. Run as user with ALTER permission.',
+            1;
+
+    PRINT N'Schema: Review_Q ReasonForNoMatch CHECK rebuilt and verified (includes DUPLICATE).';
 END
 
 BEGIN TRY
@@ -658,17 +666,13 @@ BEGIN TRY
     FROM dbo.MAIncomingTableX1 ma  --DHCA_Internal.dbo.MasterAddress ma;
     END TRY
     BEGIN CATCH
-        --THROW 50010,
-        --    CONCAT(N'Cannot read DHCA_Internal.dbo.MasterAddress: ', ERROR_MESSAGE(),
-        --               N' — verify VPN/database access.'),
-         SET @ErrorMessage = 
-               CONCAT(
-                N'Cannot read DHCA_Internal.dbo.MasterAddress: ',
-                 @PreflightErrors,
-                 N'. Recreate UPR schema DDL (docs/ddl.md), then re-run.'
-                 );
-         IF @PreflightErrors IS NOT NULL
-            THROW 50010, @ErrorMessage, 1;
+        THROW 50010,
+            CONCAT(
+                N'Cannot read MasterAddress source: ',
+                ERROR_MESSAGE(),
+                N' — verify table access (dbo.MAIncomingTableX1 or DHCA_Internal.dbo.MasterAddress).'
+            ),
+            1;
     END CATCH;
 
     SET @MasterAddressRead = (SELECT COUNT(*) FROM #MA);
@@ -749,19 +753,13 @@ BEGIN TRY
     FROM dbo.SDATIncomingTableX1 s; --DHCA_Internal.dbo.RealPropertyTaxInformation s;
     END TRY
     BEGIN CATCH
-        --THROW 50011,
-        --    CONCAT(N'Cannot read SDAT: ', ERROR_MESSAGE()),
-        --        --   N' — verify VPN/database access.'),
-        --     1;
-         SET @ErrorMessage = 
-               CONCAT(
-                N'Cannot read SDAT: ',
-                 @PreflightErrors,
-                 N'. - verify VPN/database access.'
-                 );
-         IF @PreflightErrors IS NOT NULL
-            THROW 50011, @ErrorMessage, 1;
-      
+        THROW 50011,
+            CONCAT(
+                N'Cannot read SDAT source: ',
+                ERROR_MESSAGE(),
+                N' — verify table access (dbo.SDATIncomingTableX1 or DHCA_Internal.dbo.RealPropertyTaxInformation).'
+            ),
+            1;
     END CATCH;
 
     SET @SDATRead = (SELECT COUNT(*) FROM #SDAT);
@@ -1402,6 +1400,27 @@ BEGIN TRY
         WHERE rp.ReasonForNoMatch = N'DUPLICATE'
     );
 
+    /* Hard stop if #UprMergeSrc still has duplicate UPR keys (would fail MERGE) */
+    IF EXISTS (
+        SELECT 1 FROM #UprMergeSrc
+        GROUP BY EffectiveSDATAccountNumber HAVING COUNT(*) > 1
+    )
+        THROW 50030, N'Internal guard: duplicate EffectiveSDATAccountNumber in #UprMergeSrc.', 1;
+
+    IF EXISTS (
+        SELECT 1 FROM #UprMergeSrc
+        GROUP BY EffectiveStreetNumber, EffectiveStreetName, EffectiveStreetType, EffectiveZipCode
+        HAVING COUNT(*) > 1
+    )
+        THROW 50031, N'Internal guard: duplicate address key in #UprMergeSrc.', 1;
+
+    IF EXISTS (
+        SELECT 1 FROM #UprMergeSrc
+        WHERE EffectiveParcelID IS NOT NULL
+        GROUP BY EffectiveParcelID HAVING COUNT(*) > 1
+    )
+        THROW 50032, N'Internal guard: duplicate EffectiveParcelID in #UprMergeSrc.', 1;
+
     PRINT N'Step 5c — UPR MERGE started: ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
 
     MERGE dbo.UPROPERTYRECORDS AS upr
@@ -1635,20 +1654,29 @@ BEGIN TRY
     );
 
     INSERT INTO #ReviewAnchor (MasterAddressID, KdatRecordID, ReasonForNoMatch, UPropertyRecordsID)
-    SELECT DISTINCT
-        rp.MasterAddressID, rp.KdatRecordID, rp.ReasonForNoMatch, m.UPropertyRecordsID
+    SELECT
+        rp.MasterAddressID,
+        rp.KdatRecordID,
+        rp.ReasonForNoMatch,
+        win.UPropertyRecordsID
     FROM #ReviewPending rp
-    INNER JOIN #UprCandidate lc
-        ON (rp.MasterAddressID IS NOT NULL AND lc.MasterAddressID = rp.MasterAddressID)
-        OR (rp.KdatRecordID IS NOT NULL AND lc.KdatRecordID = rp.KdatRecordID)
-    INNER JOIN #UprMergeRanked w
-        ON w.PropertyRn = 1
-       AND w.EffectiveSDATAccountNumber = lc.EffectiveSDATAccountNumber
-       AND COALESCE(w.EffectiveNormalizedFulldAddress, w.EffectiveNormalizedStreetAddress)
-           = COALESCE(lc.EffectiveNormalizedFulldAddress, lc.EffectiveNormalizedStreetAddress)
-    INNER JOIN #UPRMap m
-        ON (w.MasterAddressID IS NOT NULL AND m.MasterAddressID = w.MasterAddressID)
-        OR (w.KdatRecordID IS NOT NULL AND m.KdatRecordID = w.KdatRecordID)
+    CROSS APPLY (
+        SELECT TOP 1 m.UPropertyRecordsID
+        FROM #UprCandidate lc
+        INNER JOIN #UprMergeRanked r
+            ON r.PropertyRn = 1
+           AND r.EffectiveSDATAccountNumber = lc.EffectiveSDATAccountNumber
+           AND COALESCE(r.EffectiveNormalizedFulldAddress, r.EffectiveNormalizedStreetAddress)
+               = COALESCE(lc.EffectiveNormalizedFulldAddress, lc.EffectiveNormalizedStreetAddress)
+        INNER JOIN #UPRMap m
+            ON (r.MasterAddressID IS NOT NULL AND m.MasterAddressID = r.MasterAddressID)
+            OR (r.KdatRecordID IS NOT NULL AND m.KdatRecordID = r.KdatRecordID)
+        WHERE (rp.MasterAddressID IS NOT NULL AND lc.MasterAddressID = rp.MasterAddressID)
+           OR (rp.KdatRecordID IS NOT NULL AND lc.KdatRecordID = rp.KdatRecordID)
+        ORDER BY
+            CASE WHEN r.MatchSource = N'BOTH' THEN 1 WHEN r.MatchSource = N'KDAT' THEN 2 ELSE 3 END,
+            m.UPropertyRecordsID
+    ) win
     WHERE rp.ReasonForNoMatch = N'DUPLICATE';
 
     IF OBJECT_ID('tempdb..#ReviewAnchorSrc') IS NOT NULL DROP TABLE #ReviewAnchorSrc;
@@ -1685,10 +1713,7 @@ BEGIN TRY
         N'__PENDING__',
         N'__PENDING__',
         LEFT(NULLIF(LTRIM(RTRIM(w.OwnerName)), N''), 100),
-        LEFT(CONCAT(
-            N'R',
-            COALESCE(CONVERT(NVARCHAR(20), rp.MasterAddressID), CONVERT(NVARCHAR(20), rp.KdatRecordID))
-        ), 20),
+        N'0',
         COALESCE(LEFT(NULLIF(UPPER(LTRIM(RTRIM(rp.StreetName))), N''), 100), N'PENDING'),
         LEFT(COALESCE(NULLIF(UPPER(LTRIM(RTRIM(rp.StreetType))), N''), N'UNK'), 4),
         COALESCE(LEFT(NULLIF(UPPER(LTRIM(RTRIM(w.City))), N''), 100), N'PENDING'),
@@ -1742,14 +1767,59 @@ BEGIN TRY
       );
 
     UPDATE #ReviewAnchorSrc
-    SET SDATAccountNumber = LEFT(CONCAT(N'PND-', CONVERT(NVARCHAR(20), SrcKey)), 50),
-        ParcelID            = LEFT(CONCAT(N'PND-P-', CONVERT(NVARCHAR(20), SrcKey)), 50)
+    SET SDATAccountNumber = LEFT(
+            CASE
+                WHEN MasterAddressID IS NOT NULL
+                    THEN CONCAT(N'PND-MA-', CONVERT(NVARCHAR(20), MasterAddressID))
+                ELSE CONCAT(N'PND-KD-', CONVERT(NVARCHAR(20), KdatRecordID))
+            END, 50),
+        ParcelID = LEFT(
+            CASE
+                WHEN MasterAddressID IS NOT NULL
+                    THEN CONCAT(N'PND-P-MA-', CONVERT(NVARCHAR(20), MasterAddressID))
+                ELSE CONCAT(N'PND-P-KD-', CONVERT(NVARCHAR(20), KdatRecordID))
+            END, 50),
+        StreetNumber = LEFT(
+            CASE
+                WHEN MasterAddressID IS NOT NULL
+                    THEN CONCAT(N'RMA', CONVERT(NVARCHAR(20), MasterAddressID))
+                ELSE CONCAT(N'RKD', CONVERT(NVARCHAR(20), KdatRecordID))
+            END, 20)
     WHERE SDATAccountNumber = N'__PENDING__';
+
+    IF EXISTS (
+        SELECT 1 FROM #ReviewAnchorSrc
+        GROUP BY SDATAccountNumber HAVING COUNT(*) > 1
+    )
+        THROW 50033, N'Internal guard: duplicate synthetic SDATAccountNumber in #ReviewAnchorSrc.', 1;
+
+    IF EXISTS (
+        SELECT 1 FROM #ReviewAnchorSrc
+        GROUP BY StreetNumber, StreetName, StreetType, ZipCode HAVING COUNT(*) > 1
+    )
+        THROW 50034, N'Internal guard: duplicate address key in #ReviewAnchorSrc.', 1;
+
+    IF EXISTS (
+        SELECT 1 FROM #ReviewAnchorSrc
+        WHERE ParcelID IS NOT NULL
+        GROUP BY ParcelID HAVING COUNT(*) > 1
+    )
+        THROW 50035, N'Internal guard: duplicate synthetic ParcelID in #ReviewAnchorSrc.', 1;
+
+    PRINT N'Step 6b — PENDING anchor rows staged: '
+        + CONVERT(NVARCHAR(20), (SELECT COUNT(*) FROM #ReviewAnchorSrc))
+        + N' | ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
 
     DECLARE @ReviewUprInserted TABLE (
         SDATAccountNumber    NVARCHAR(50) NOT NULL PRIMARY KEY,
         UPropertyRecordsID   INT          NOT NULL
     );
+
+    INSERT INTO @ReviewUprInserted (SDATAccountNumber, UPropertyRecordsID)
+    SELECT s.SDATAccountNumber, upr.UPropertyRecordsID
+    FROM #ReviewAnchorSrc s
+    INNER JOIN dbo.UPROPERTYRECORDS upr
+        ON upr.SDATAccountNumber = s.SDATAccountNumber;
 
     INSERT INTO dbo.UPROPERTYRECORDS (
         SDATAccountNumber, ParcelID, PropertyName, Owner,
@@ -1785,7 +1855,12 @@ BEGIN TRY
         @RunUser,
         @Now,
         @RunUser
-    FROM #ReviewAnchorSrc s;
+    FROM #ReviewAnchorSrc s
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM @ReviewUprInserted i
+        WHERE i.SDATAccountNumber = s.SDATAccountNumber
+    );
 
     INSERT INTO #ReviewAnchor (MasterAddressID, KdatRecordID, ReasonForNoMatch, UPropertyRecordsID)
     SELECT
@@ -1913,18 +1988,23 @@ BEGIN TRY
     IF EXISTS (
         SELECT 1
         FROM #ReviewPending rp
-        INNER JOIN @ReviewXrefOut rx
-            ON ISNULL(rx.MasterAddressID, -1) = ISNULL(rp.MasterAddressID, -1)
-           AND ISNULL(rx.KdatRecordID, -1) = ISNULL(rp.KdatRecordID, -1)
-           AND rx.ReasonForNoMatch = rp.ReasonForNoMatch
         WHERE rp.ReasonForNoMatch NOT IN (
-            N'NO_PARCEL_MATCH', N'NO_SDAT_MATCH', N'NO_ADDRESS_MATCH',
-            N'INSUFFICIENT_DATA', N'AMBIGUOUS_CANDIDATES', N'DUPLICATE',
-            N'LOW_CONFIDENCE_ONLY', N'SOURCE_RECORD_ERROR', N'OTHER'
+            N'NO_PARCEL_MATCH', N'NO_ADDRESS_MATCH', N'DUPLICATE'
         )
     )
-        THROW 50020,
-            N'Review_Q insert blocked: ReasonForNoMatch value not in allowed CHECK list. Re-run script from top (schema fix runs before transaction).',
+        THROW 50036,
+            N'Review_Q blocked: #ReviewPending contains ReasonForNoMatch outside allowed load values.',
+            1;
+
+    IF NOT EXISTS (
+        SELECT 1
+        FROM sys.check_constraints cc
+        WHERE cc.parent_object_id = OBJECT_ID(N'dbo.UPRMATCHREVIEW_Q')
+          AND cc.name = N'CK_UPRMATCHREVIEW_Q_ReasonForNoMatch'
+          AND cc.definition LIKE N'%DUPLICATE%'
+    )
+        THROW 50037,
+            N'Review_Q blocked: ReasonForNoMatch CHECK missing DUPLICATE. Re-run full script from top.',
             1;
 
     INSERT INTO dbo.UPRMATCHREVIEW_Q (
@@ -1944,11 +2024,7 @@ BEGIN TRY
         ON ISNULL(rx.MasterAddressID, -1) = ISNULL(rp.MasterAddressID, -1)
        AND ISNULL(rx.KdatRecordID, -1) = ISNULL(rp.KdatRecordID, -1)
        AND rx.ReasonForNoMatch = rp.ReasonForNoMatch
-    WHERE rp.ReasonForNoMatch IN (
-            N'NO_PARCEL_MATCH', N'NO_ADDRESS_MATCH', N'DUPLICATE',
-            N'NO_SDAT_MATCH', N'INSUFFICIENT_DATA', N'AMBIGUOUS_CANDIDATES',
-            N'LOW_CONFIDENCE_ONLY', N'SOURCE_RECORD_ERROR', N'OTHER'
-        )
+    WHERE rp.ReasonForNoMatch IN (N'NO_PARCEL_MATCH', N'NO_ADDRESS_MATCH', N'DUPLICATE')
       AND NOT EXISTS (
         SELECT 1
         FROM dbo.UPRMATCHREVIEW_Q q
@@ -1957,6 +2033,10 @@ BEGIN TRY
     );
 
     SET @ReviewIncomingInserted = @@ROWCOUNT;
+
+    PRINT N'Step 6c — Review_Q rows inserted: '
+        + CONVERT(NVARCHAR(20), @ReviewIncomingInserted)
+        + N' | ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
     SET @RowsSentToReview = (SELECT COUNT(*) FROM #ReviewPending);
     SET @ReviewNoParcel = (
         SELECT COUNT(*) FROM dbo.UPRMATCHREVIEW_Q
