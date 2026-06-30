@@ -316,16 +316,7 @@ BEGIN TRY
     WHERE OBJECT_ID(v.ObjName, N'U') IS NULL;
 
    
-    -- IF @PreflightErrors IS NOT NULL
-    --     THROW 50001,
-    --        CONCAT(
-    --             N'Missing required tables: ',
-    --             @PreflightErrors,
-     --            N'. Recreate UPR schema DDL (docs/ddl.md), then re-run.'
-     --            ),
-     --       1;
-    SET @ErrorMessage = 
-               N'Missing required tables: ' + @PreflightErrors + N'. Recreate UPR schema DDL (docs/ddl.md), then re-run.';
+    SET @ErrorMessage = N'Missing required tables: ' + @PreflightErrors + N'. Recreate UPR schema DDL (docs/ddl.md), then re-run.';
     IF @PreflightErrors IS NOT NULL
        THROW 50001, @ErrorMessage, 1;
 
@@ -630,28 +621,28 @@ BEGIN TRY
         DwellingUnits        = CAST(NULL AS INT),
         Latitude             = TRY_CONVERT(DECIMAL(10, 6), NULLIF(ma.YCoordinate, 0)),
         Longitude            = TRY_CONVERT(DECIMAL(10, 6), NULLIF(ma.XCoordinate, 0)),
-        NormalizedStreetAddress    = UPPER(LTRIM(RTRIM(CONCAT(
-            ISNULL(dbo.fn_UPR_NormalizeStreetNumber(CONVERT(NVARCHAR(20), ma.StreetNumber)), N''), N' ',
-            ISNULL(UPPER(LTRIM(RTRIM(ma.StreetName))), N''), N' ',
+        NormalizedStreetAddress    = UPPER(LTRIM(RTRIM(
+            ISNULL(dbo.fn_UPR_NormalizeStreetNumber(CONVERT(NVARCHAR(20), ma.StreetNumber)), N'') + N' ' +
+            ISNULL(UPPER(LTRIM(RTRIM(ma.StreetName))), N'') + N' ' +
             CASE UPPER(LTRIM(RTRIM(ma.StreetType)))
                 WHEN N'STREET' THEN N'ST' WHEN N'AVENUE' THEN N'AVE' WHEN N'ROAD' THEN N'RD'
                 WHEN N'LANE' THEN N'LN'   WHEN N'COURT' THEN N'CT'  WHEN N'DRIVE' THEN N'DR'
                 WHEN N'BOULEVARD' THEN N'BLVD' WHEN N'PLACE' THEN N'PL'
                 ELSE ISNULL(UPPER(LTRIM(RTRIM(ma.StreetType))), N'')
             END
-        )))),
-        NormalizedFullAddress = UPPER(LTRIM(RTRIM(CONCAT(
-            ISNULL(dbo.fn_UPR_NormalizeStreetNumber(CONVERT(NVARCHAR(20), ma.StreetNumber)), N''), N' ',
-            ISNULL(UPPER(LTRIM(RTRIM(ma.StreetName))), N''), N' ',
+        ))),
+        NormalizedFullAddress = UPPER(LTRIM(RTRIM(
+            ISNULL(dbo.fn_UPR_NormalizeStreetNumber(CONVERT(NVARCHAR(20), ma.StreetNumber)), N'') + N' ' +
+            ISNULL(UPPER(LTRIM(RTRIM(ma.StreetName))), N'') + N' ' +
             CASE UPPER(LTRIM(RTRIM(ma.StreetType)))
                 WHEN N'STREET' THEN N'ST' WHEN N'AVENUE' THEN N'AVE' WHEN N'ROAD' THEN N'RD'
                 WHEN N'LANE' THEN N'LN'   WHEN N'COURT' THEN N'CT'  WHEN N'DRIVE' THEN N'DR'
                 WHEN N'BOULEVARD' THEN N'BLVD' WHEN N'PLACE' THEN N'PL'
                 ELSE ISNULL(UPPER(LTRIM(RTRIM(ma.StreetType))), N'')
-            END, N' ',
-            ISNULL(UPPER(LTRIM(RTRIM(ma.City))), N''), N' ',
+            END + N' ' +
+            ISNULL(UPPER(LTRIM(RTRIM(ma.City))), N'') + N' ' +
             LEFT(REPLACE(dbo.fn_UPR_NormalizeZipCode(ma.ZipCode), N'-', N''), 5)
-        )))),
+        ))),
         HasRequiredAddress   = CASE
             WHEN NULLIF(UPPER(LTRIM(RTRIM(ma.StreetName))), N'') IS NULL THEN 0
             WHEN NULLIF(UPPER(LTRIM(RTRIM(ma.City))), N'') IS NULL THEN 0
@@ -711,28 +702,28 @@ BEGIN TRY
         DwellingUnits        = TRY_CONVERT(INT, s.DwellingUnits),
         Latitude             = CAST(NULL AS DECIMAL(10, 6)),
         Longitude            = CAST(NULL AS DECIMAL(10, 6)),
-        NormalizedStreetAddress    = UPPER(LTRIM(RTRIM(CONCAT(
-            ISNULL(dbo.fn_UPR_NormalizeStreetNumber(LTRIM(RTRIM(s.PremisesNumber))), N''), N' ',
-            ISNULL(UPPER(LTRIM(RTRIM(s.PremisesStreetName))), N''), N' ',
+        NormalizedStreetAddress    = UPPER(LTRIM(RTRIM(
+            ISNULL(dbo.fn_UPR_NormalizeStreetNumber(LTRIM(RTRIM(s.PremisesNumber))), N'') + N' ' +
+            ISNULL(UPPER(LTRIM(RTRIM(s.PremisesStreetName))), N'') + N' ' +
             CASE UPPER(LTRIM(RTRIM(s.PremisesStreetType)))
                 WHEN N'STREET' THEN N'ST' WHEN N'AVENUE' THEN N'AVE' WHEN N'ROAD' THEN N'RD'
                 WHEN N'LANE' THEN N'LN'   WHEN N'COURT' THEN N'CT'  WHEN N'DRIVE' THEN N'DR'
                 WHEN N'BOULEVARD' THEN N'BLVD' WHEN N'PLACE' THEN N'PL'
                 ELSE ISNULL(UPPER(LTRIM(RTRIM(s.PremisesStreetType))), N'')
             END
-        )))),
-        NormalizedFullAddress = UPPER(LTRIM(RTRIM(CONCAT(
-            ISNULL(dbo.fn_UPR_NormalizeStreetNumber(LTRIM(RTRIM(s.PremisesNumber))), N''), N' ',
-            ISNULL(UPPER(LTRIM(RTRIM(s.PremisesStreetName))), N''), N' ',
+        ))),
+        NormalizedFullAddress = UPPER(LTRIM(RTRIM(
+            ISNULL(dbo.fn_UPR_NormalizeStreetNumber(LTRIM(RTRIM(s.PremisesNumber))), N'') + N' ' +
+            ISNULL(UPPER(LTRIM(RTRIM(s.PremisesStreetName))), N'') + N' ' +
             CASE UPPER(LTRIM(RTRIM(s.PremisesStreetType)))
                 WHEN N'STREET' THEN N'ST' WHEN N'AVENUE' THEN N'AVE' WHEN N'ROAD' THEN N'RD'
                 WHEN N'LANE' THEN N'LN'   WHEN N'COURT' THEN N'CT'  WHEN N'DRIVE' THEN N'DR'
                 WHEN N'BOULEVARD' THEN N'BLVD' WHEN N'PLACE' THEN N'PL'
                 ELSE ISNULL(UPPER(LTRIM(RTRIM(s.PremisesStreetType))), N'')
-            END, N' ',
-            ISNULL(UPPER(LTRIM(RTRIM(s.PremisesCity))), N''), N' ',
+            END + N' ' +
+            ISNULL(UPPER(LTRIM(RTRIM(s.PremisesCity))), N'') + N' ' +
             LEFT(REPLACE(dbo.fn_UPR_NormalizeZipCode(s.PremisesZipCode), N'-', N''), 5)
-        )))),
+        ))),
         HasRequiredAddress   = CASE
             WHEN NULLIF(UPPER(LTRIM(RTRIM(s.PremisesStreetName))), N'') IS NULL THEN 0
             WHEN NULLIF(UPPER(LTRIM(RTRIM(s.PremisesCity))), N'') IS NULL THEN 0
@@ -998,13 +989,11 @@ BEGIN TRY
             COALESCE(
                 NULLIF(LTRIM(RTRIM(w.NormalizedFullAddress)), N''),
                 NULLIF(LTRIM(RTRIM(w.NormalizedStreetAddress)), N''),
-                CONCAT(
-                    LEFT(NULLIF(dbo.fn_UPR_NormalizeStreetNumber(w.StreetNumber), N''), 20), N' ',
-                    LEFT(NULLIF(UPPER(LTRIM(RTRIM(w.StreetName))), N''), 100), N' ',
-                    LEFT(COALESCE(NULLIF(UPPER(LTRIM(RTRIM(w.StreetType))), N''), N'UNK'), 4), N' ',
-                    LEFT(NULLIF(UPPER(LTRIM(RTRIM(w.City))), N''), 100), N' ',
-                    dbo.fn_UPR_NormalizeZipCode(w.ZipCode)
-                )
+                LEFT(NULLIF(dbo.fn_UPR_NormalizeStreetNumber(w.StreetNumber), N''), 20) + N' ' +
+                LEFT(NULLIF(UPPER(LTRIM(RTRIM(w.StreetName))), N''), 100) + N' ' +
+                LEFT(COALESCE(NULLIF(UPPER(LTRIM(RTRIM(w.StreetType))), N''), N'UNK'), 4) + N' ' +
+                LEFT(NULLIF(UPPER(LTRIM(RTRIM(w.City))), N''), 100) + N' ' +
+                dbo.fn_UPR_NormalizeZipCode(w.ZipCode)
             ), 100),
         EffectiveOwnerName    = LEFT(NULLIF(LTRIM(RTRIM(w.OwnerName)), N''), 100),
         EffectiveLatitude     = w.Latitude,
@@ -1402,6 +1391,17 @@ BEGIN TRY
     )
         THROW 50032, N'Internal guard: duplicate EffectiveParcelID in #UprMergeSrc.', 1;
 
+    IF COL_LENGTH('tempdb..#UprMergeSrc', 'ParcelConflict') IS NULL
+        ALTER TABLE #UprMergeSrc ADD ParcelConflict BIT NOT NULL DEFAULT 0;
+
+    UPDATE s
+    SET ParcelConflict = 1
+    FROM #UprMergeSrc s
+    INNER JOIN #ExistingUprKeys ep
+        ON ep.ParcelID = s.EffectiveParcelID
+       AND ep.SDATAccountNumber <> s.EffectiveSDATAccountNumber
+    WHERE NULLIF(s.EffectiveParcelID, N'') IS NOT NULL;
+
     PRINT N'Step 5c - UPR MERGE started: ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
 
     MERGE dbo.UPROPERTYRECORDS AS upr
@@ -1409,13 +1409,7 @@ BEGIN TRY
     ON upr.SDATAccountNumber = s.EffectiveSDATAccountNumber
     WHEN MATCHED THEN UPDATE SET
         upr.ParcelID          = CASE
-            WHEN NULLIF(s.EffectiveParcelID, N'') IS NOT NULL
-                 AND EXISTS (
-                     SELECT 1
-                     FROM #ExistingUprKeys ep
-                     WHERE ep.ParcelID = s.EffectiveParcelID
-                       AND ep.SDATAccountNumber <> s.EffectiveSDATAccountNumber
-                 ) THEN upr.ParcelID
+            WHEN NULLIF(s.EffectiveParcelID, N'') IS NOT NULL AND s.ParcelConflict = 1 THEN upr.ParcelID
             ELSE COALESCE(
                 NULLIF(LTRIM(RTRIM(s.ParcelID)), N''),
                 upr.ParcelID,

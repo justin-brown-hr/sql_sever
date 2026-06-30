@@ -64,7 +64,8 @@ check("Review anchor unique synthetic keys", "PND-MA-" in main_batch and "50034"
 check("Review anchor re-run idempotent", "NOT EXISTS" in main_batch and "PND-MA-" in main_batch)
 check("UPR column NormalizedFullAddress in MERGE insert", "NormalizedStreetAddress, NormalizedFullAddress" in main_batch)
 check("No PRINT with inline SELECT subquery", not re.search(r"PRINT[^\n]*\(SELECT", main_batch, re.I))
-check("MERGE parcel guard uses #ExistingUprKeys not self-subquery", "#ExistingUprKeys ep" in main_batch and "FROM dbo.UPROPERTYRECORDS p" not in main_batch)
+check("MERGE parcel guard uses flag not subquery", "ParcelConflict" in main_batch and "EXISTS (" not in main_batch.split("MERGE dbo.UPROPERTYRECORDS")[1].split("DROP TABLE #ExistingUprKeys")[0])
+check("No CONCAT in main batch", "CONCAT(" not in main_batch)
 check("Status history idempotent", "Initial load - new UPR record" in main_batch
       and main_batch.count("NOT EXISTS") >= 5)
 check("Uses single SELECT INTO #UprMergeSrc (no duplicate)",
