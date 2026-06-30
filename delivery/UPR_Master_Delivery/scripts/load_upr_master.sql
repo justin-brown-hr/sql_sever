@@ -345,8 +345,7 @@ BEGIN TRY
             N'REF_PROPERTYTYPE audit columns (CreationUserID / LastUpdatedUserID) missing. Recreate from client DDL.',
             1;
 
-    PRINT N'Preflight OK - database: ' + DB_NAME()
-        + N' | started: ' + CONVERT(NVARCHAR(30), @BatchStartTime, 120);
+    PRINT N'Preflight OK - database: ' + DB_NAME() + N' | started: ' + CONVERT(NVARCHAR(30), @BatchStartTime, 120);
 
     /* ========================================================================
        1. ENSURE REFERENCE DATA (idempotent — all NOT NULL / audit columns per DDL)
@@ -1369,7 +1368,7 @@ BEGIN TRY
 
     DROP TABLE #UprMergeScored;
     DROP TABLE #UprMergeLosers;
-    DROP TABLE #ExistingUprKeys;
+    /* keep #ExistingUprKeys until after MERGE (parcel conflict check uses temp table, not target table) */
 
     CREATE NONCLUSTERED INDEX IX_UprMergeSrc_Acct ON #UprMergeSrc(EffectiveSDATAccountNumber);
 
@@ -1413,9 +1412,9 @@ BEGIN TRY
             WHEN NULLIF(s.EffectiveParcelID, N'') IS NOT NULL
                  AND EXISTS (
                      SELECT 1
-                     FROM dbo.UPROPERTYRECORDS p
-                     WHERE p.ParcelID = s.EffectiveParcelID
-                       AND p.UPropertyRecordsID <> upr.UPropertyRecordsID
+                     FROM #ExistingUprKeys ep
+                     WHERE ep.ParcelID = s.EffectiveParcelID
+                       AND ep.SDATAccountNumber <> s.EffectiveSDATAccountNumber
                  ) THEN upr.ParcelID
             ELSE COALESCE(
                 NULLIF(LTRIM(RTRIM(s.ParcelID)), N''),
@@ -1449,6 +1448,8 @@ BEGIN TRY
         s.EffectivePropertyType, N'ACTIVE', 1,
         @Now, @RunUser, @Now, @RunUser
     );
+
+    DROP TABLE #ExistingUprKeys;
 
     PRINT N'Step 5c complete - UPR MERGE finished: ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
 
