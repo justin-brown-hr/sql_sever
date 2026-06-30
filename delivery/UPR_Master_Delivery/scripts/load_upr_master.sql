@@ -654,9 +654,9 @@ BEGIN TRY
     FROM dbo.MAIncomingTableX1 ma  --DHCA_Internal.dbo.MasterAddress ma;
     END TRY
     BEGIN CATCH
-        THROW 50010,
-            N'Cannot read MasterAddress source: ' + ERROR_MESSAGE() + N' — verify table access (dbo.MAIncomingTableX1 or DHCA_Internal.dbo.MasterAddress).',
-            1;
+        SET @ErrorMessage = N'Cannot read MasterAddress source: ' + ERROR_MESSAGE()
+            + N' - verify table access (dbo.MAIncomingTableX1 or DHCA_Internal.dbo.MasterAddress).';
+        THROW 50010, @ErrorMessage, 1;
     END CATCH;
 
     SET @MasterAddressRead = (SELECT COUNT(*) FROM #MA);
@@ -735,9 +735,9 @@ BEGIN TRY
     FROM dbo.SDATIncomingTableX1 s; --DHCA_Internal.dbo.RealPropertyTaxInformation s;
     END TRY
     BEGIN CATCH
-        THROW 50011,
-            N'Cannot read SDAT source: ' + ERROR_MESSAGE() + N' — verify table access (dbo.SDATIncomingTableX1 or DHCA_Internal.dbo.RealPropertyTaxInformation).',
-            1;
+        SET @ErrorMessage = N'Cannot read SDAT source: ' + ERROR_MESSAGE()
+            + N' - verify table access (dbo.SDATIncomingTableX1 or DHCA_Internal.dbo.RealPropertyTaxInformation).';
+        THROW 50011, @ErrorMessage, 1;
     END CATCH;
 
     SET @SDATRead = (SELECT COUNT(*) FROM #SDAT);
@@ -1372,40 +1372,75 @@ BEGIN TRY
 
     /* Hard stop if #UprMergeSrc still has duplicate UPR keys (would fail MERGE) */
     IF EXISTS (
-        SELECT 1 FROM #UprMergeSrc
-        GROUP BY EffectiveSDATAccountNumber HAVING COUNT(*) > 1
+        SELECT 1
+        FROM (
+            SELECT EffectiveSDATAccountNumber
+            FROM #UprMergeSrc
+            GROUP BY EffectiveSDATAccountNumber
+            HAVING COUNT(*) > 1
+        ) dup
     )
         THROW 50030, N'Internal guard: duplicate EffectiveSDATAccountNumber in #UprMergeSrc.', 1;
 
     IF EXISTS (
-        SELECT 1 FROM #UprMergeSrc
-        GROUP BY EffectiveStreetNumber, EffectiveStreetName, EffectiveStreetType, EffectiveZipCode
-        HAVING COUNT(*) > 1
+        SELECT 1
+        FROM (
+            SELECT EffectiveStreetNumber, EffectiveStreetName, EffectiveStreetType, EffectiveZipCode
+            FROM #UprMergeSrc
+            GROUP BY EffectiveStreetNumber, EffectiveStreetName, EffectiveStreetType, EffectiveZipCode
+            HAVING COUNT(*) > 1
+        ) dup
     )
         THROW 50031, N'Internal guard: duplicate address key in #UprMergeSrc.', 1;
 
     IF EXISTS (
-        SELECT 1 FROM #UprMergeSrc
-        WHERE EffectiveParcelID IS NOT NULL
-        GROUP BY EffectiveParcelID HAVING COUNT(*) > 1
+        SELECT 1
+        FROM (
+            SELECT EffectiveParcelID
+            FROM #UprMergeSrc
+            WHERE EffectiveParcelID IS NOT NULL
+            GROUP BY EffectiveParcelID
+            HAVING COUNT(*) > 1
+        ) dup
     )
         THROW 50032, N'Internal guard: duplicate EffectiveParcelID in #UprMergeSrc.', 1;
 
-    IF COL_LENGTH('tempdb..#UprMergeSrc', 'ParcelConflict') IS NULL
-        ALTER TABLE #UprMergeSrc ADD ParcelConflict BIT NOT NULL DEFAULT 0;
+    IF OBJECT_ID('tempdb..#UprMergeReady') IS NOT NULL DROP TABLE #UprMergeReady;
 
-    UPDATE s
-    SET ParcelConflict = 1
+    SELECT
+        s.MasterAddressID,
+        s.KdatRecordID,
+        s.MatchSource,
+        s.HasRequiredAddress,
+        s.SDATAccountNumber,
+        s.ParcelID,
+        s.OwnerName,
+        s.EffectiveSDATAccountNumber,
+        s.EffectiveParcelID,
+        s.EffectiveStreetNumber,
+        s.EffectiveStreetName,
+        s.EffectiveStreetType,
+        s.EffectiveCity,
+        s.EffectiveState,
+        s.EffectiveZipCode,
+        s.EffectiveNormalizedStreetAddress,
+        s.EffectiveNormalizedFullAddress,
+        s.EffectiveLatitude,
+        s.EffectiveLongitude,
+        s.EffectiveOwnerName,
+        s.EffectivePropertyType,
+        CAST(CASE WHEN ep.ParcelID IS NOT NULL THEN 1 ELSE 0 END AS BIT) AS ParcelConflict
+    INTO #UprMergeReady
     FROM #UprMergeSrc s
-    INNER JOIN #ExistingUprKeys ep
+    LEFT JOIN #ExistingUprKeys ep
         ON ep.ParcelID = s.EffectiveParcelID
        AND ep.SDATAccountNumber <> s.EffectiveSDATAccountNumber
-    WHERE NULLIF(s.EffectiveParcelID, N'') IS NOT NULL;
+       AND NULLIF(s.EffectiveParcelID, N'') IS NOT NULL;
 
     PRINT N'Step 5c - UPR MERGE started: ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
 
     MERGE dbo.UPROPERTYRECORDS AS upr
-    USING #UprMergeSrc AS s
+    USING #UprMergeReady AS s
     ON upr.SDATAccountNumber = s.EffectiveSDATAccountNumber
     WHEN MATCHED THEN UPDATE SET
         upr.ParcelID          = CASE
@@ -1444,6 +1479,7 @@ BEGIN TRY
     );
 
     DROP TABLE #ExistingUprKeys;
+    DROP TABLE #UprMergeReady;
 
     PRINT N'Step 5c complete - UPR MERGE finished: ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
 
