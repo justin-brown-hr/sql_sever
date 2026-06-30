@@ -214,6 +214,8 @@ DECLARE @DefaultSdatPropertyType NVARCHAR(10) = N'CONDO';  /* SDAT-only default 
 DECLARE @MasterAddressRead INT = 0, @SDATRead INT = 0, @IncomingUnifiedRows INT = 0;
 DECLARE @RowsIncompleteData INT = 0, @RowsReviewDuplicate INT = 0, @RowsSentToReview INT = 0;
 DECLARE @UPRInserted INT = 0, @UPRUpdated INT = 0, @UprEligibleRows INT = 0;
+DECLARE @UPRActiveInserted INT = 0, @UPRPendingInserted INT = 0;
+DECLARE @UPRTotalInsertedThisRun INT = 0, @UPRTableCountAfter INT = 0;
 DECLARE @MasterAddressXrefInserted INT = 0, @SDATXrefInserted INT = 0;
 DECLARE @CaseXrefInserted INT = 0, @MPDUXrefInserted INT = 0, @EPropertyXrefInserted INT = 0, @MultifamilyXrefInserted INT = 0, @TotalXrefInserted INT = 0;
 DECLARE @ReviewIncomingInserted INT = 0, @ReviewExternalInserted INT = 0, @ReviewInserted INT = 0;
@@ -1479,12 +1481,13 @@ BEGIN TRY
     );
 
     SET @UprMergeRowsAffected = @@ROWCOUNT;
-    SET @UPRInserted = (
+    SET @UPRActiveInserted = (
         SELECT COUNT(*) FROM dbo.UPROPERTYRECORDS
         WHERE CreatedDate >= @Now AND CreatedBy = @RunUser AND PropertyStatusCode = N'ACTIVE'
     );
+    SET @UPRInserted = @UPRActiveInserted;
     SET @UPRUpdated = CASE
-        WHEN @UprMergeRowsAffected > @UPRInserted THEN @UprMergeRowsAffected - @UPRInserted
+        WHEN @UprMergeRowsAffected > @UPRActiveInserted THEN @UprMergeRowsAffected - @UPRActiveInserted
         ELSE 0
     END;
 
@@ -1875,6 +1878,8 @@ BEGIN TRY
         FROM @ReviewUprInserted i
         WHERE i.SDATAccountNumber = s.SDATAccountNumber
     );
+
+    SET @UPRPendingInserted = @@ROWCOUNT;
 
     SET @ReviewAnchorCount = (SELECT COUNT(*) FROM @ReviewUprInserted);
     PRINT N'Step 6b - PENDING anchor UPR rows ready: ' + CONVERT(NVARCHAR(20), @ReviewAnchorCount);
@@ -2397,14 +2402,30 @@ BEGIN TRY
 
     SET @BatchEndTime = SYSDATETIME();
 
-    SET @UPRInserted = (
-        SELECT COUNT(*) FROM dbo.UPROPERTYRECORDS
-        WHERE CreatedDate >= @Now AND CreatedBy = @RunUser AND PropertyStatusCode = N'ACTIVE'
+    SET @UPRTableCountAfter = (SELECT COUNT(*) FROM dbo.UPROPERTYRECORDS);
+    SET @UPRTotalInsertedThisRun = @UPRTableCountAfter - @UprCountBefore;
+    SET @UPRActiveInserted = (
+        SELECT COUNT(*)
+        FROM dbo.UPROPERTYRECORDS
+        WHERE CreatedDate >= @Now
+          AND CreatedBy = @RunUser
+          AND PropertyStatusCode = N'ACTIVE'
     );
-    SET @UPRUpdated = CASE
-        WHEN @UprMergeRowsAffected > @UPRInserted THEN @UprMergeRowsAffected - @UPRInserted
-        ELSE 0
-    END;
+    SET @UPRPendingInserted = (
+        SELECT COUNT(*)
+        FROM dbo.UPROPERTYRECORDS
+        WHERE CreatedDate >= @Now
+          AND CreatedBy = @RunUser
+          AND PropertyStatusCode = N'PENDING'
+    );
+    SET @UPRInserted = @UPRActiveInserted;
+    SET @UPRUpdated = (
+        SELECT COUNT(*)
+        FROM dbo.UPROPERTYRECORDS
+        WHERE UpdatedDate >= @Now
+          AND UpdatedBy = @RunUser
+          AND CreatedDate < @Now
+    );
 
     /* ========================================================================
        12. PRINT SUMMARY (vertical report — original specification)
@@ -2421,9 +2442,12 @@ BEGIN TRY
     PRINT N'Unified property rows prepared: ' + CONVERT(VARCHAR(20), @IncomingUnifiedRows);
     PRINT N' ';
     PRINT N'UPR eligible rows (account + address + parcel): ' + CONVERT(VARCHAR(20), @UprEligibleRows);
-    PRINT N'UPR records inserted (new ACTIVE): ' + CONVERT(VARCHAR(20), @UPRInserted);
-    PRINT N'UPR records updated (existing): ' + CONVERT(VARCHAR(20), @UPRUpdated);
-    PRINT N'UPR total processed this run: ' + CONVERT(VARCHAR(20), @UPRInserted + @UPRUpdated);
+    PRINT N'UPR table count before load: ' + CONVERT(VARCHAR(20), @UprCountBefore);
+    PRINT N'UPR table count after load: ' + CONVERT(VARCHAR(20), @UPRTableCountAfter);
+    PRINT N'UPR rows written this run (total new): ' + CONVERT(VARCHAR(20), @UPRTotalInsertedThisRun);
+    PRINT N'UPR rows written this run - ACTIVE: ' + CONVERT(VARCHAR(20), @UPRActiveInserted);
+    PRINT N'UPR rows written this run - PENDING (Review anchors): ' + CONVERT(VARCHAR(20), @UPRPendingInserted);
+    PRINT N'UPR existing rows updated this run: ' + CONVERT(VARCHAR(20), @UPRUpdated);
     PRINT N' ';
     PRINT N'Review_Q staged (total candidates): ' + CONVERT(VARCHAR(20), @RowsSentToReview);
     PRINT N'Review_Q - NoParcelID (NO_PARCEL_MATCH): ' + CONVERT(VARCHAR(20), @ReviewNoParcel);
