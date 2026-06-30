@@ -1478,17 +1478,20 @@ BEGIN TRY
         @Now, @RunUser, @Now, @RunUser
     );
 
-    DROP TABLE #ExistingUprKeys;
-    DROP TABLE #UprMergeReady;
-
-    PRINT N'Step 5c complete - UPR MERGE finished: ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
-
     SET @UprMergeRowsAffected = @@ROWCOUNT;
     SET @UPRInserted = (
         SELECT COUNT(*) FROM dbo.UPROPERTYRECORDS
         WHERE CreatedDate >= @Now AND CreatedBy = @RunUser AND PropertyStatusCode = N'ACTIVE'
     );
-    SET @UPRUpdated = @UprMergeRowsAffected - @UPRInserted;
+    SET @UPRUpdated = CASE
+        WHEN @UprMergeRowsAffected > @UPRInserted THEN @UprMergeRowsAffected - @UPRInserted
+        ELSE 0
+    END;
+
+    DROP TABLE #ExistingUprKeys;
+    DROP TABLE #UprMergeReady;
+
+    PRINT N'Step 5c complete - UPR MERGE finished: ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
 
     /* Map MERGE winners only (#UprMergeSrc) — duplicate losers stay in Review_Q, not XREF MATCH */
     INSERT INTO #UPRMap (UPropertyRecordsID, MasterAddressID, KdatRecordID, MatchSource, IsNew, HasRequiredAddress, SDATAccountNumber, ParcelID, NormalizedFullAddress, Unit)
@@ -2059,11 +2062,6 @@ BEGIN TRY
         WHERE ProcessingTimestamp >= @Now AND ReasonForNoMatch = N'NO_ADDRESS_MATCH'
     );
 
-    SET @UPRInserted = (
-        SELECT COUNT(*) FROM dbo.UPROPERTYRECORDS
-        WHERE CreatedDate >= @Now AND CreatedBy = @RunUser AND PropertyStatusCode = N'ACTIVE'
-    );
-
     /* ========================================================================
        7. EXTERNAL SYSTEMS — eProperty, CASE, MPDU, MULTIFAMILY
           Address/normalized-address match only; always write XREF (MATCH or NO_MATCH).
@@ -2395,27 +2393,22 @@ BEGIN TRY
         SELECT COUNT(*) FROM dbo.AuditLog WHERE ChangedDate >= @BatchStartTime
     );
 
-    /* Client-visible completion marker (Results tab) */
-    SELECT
-        N'UPR LOAD COMPLETE' AS LoadStatus,
-        @MasterAddressRead AS MasterAddressRead,
-        @SDATRead AS SDATRead,
-        @IncomingUnifiedRows AS UnifiedRows,
-        @UprEligibleRows AS UprEligibleRows,
-        @UPRInserted AS UprInserted,
-        @UPRUpdated AS UprUpdated,
-        @ReviewIncomingInserted AS ReviewQInserted,
-        @RowsSentToReview AS ReviewQCandidates,
-        @TotalXrefInserted AS TotalXrefInserted,
-        CONVERT(NVARCHAR(30), @BatchStartTime, 120) AS BatchStart,
-        CONVERT(NVARCHAR(30), SYSDATETIME(), 120) AS BatchEnd;
-
     COMMIT TRANSACTION;
 
     SET @BatchEndTime = SYSDATETIME();
 
+    SET @UPRInserted = (
+        SELECT COUNT(*) FROM dbo.UPROPERTYRECORDS
+        WHERE CreatedDate >= @Now AND CreatedBy = @RunUser AND PropertyStatusCode = N'ACTIVE'
+    );
+    SET @UPRUpdated = CASE
+        WHEN @UprMergeRowsAffected > @UPRInserted THEN @UprMergeRowsAffected - @UPRInserted
+        ELSE 0
+    END;
+
     /* ========================================================================
-       12. PRINT SUMMARY 
+       12. PRINT SUMMARY (vertical report — original specification)
+       View in SSMS Messages tab, not Results tab.
        ======================================================================== */
     PRINT N'============================================================';
     PRINT N' UPR LOAD SUMMARY';
@@ -2461,6 +2454,7 @@ BEGIN TRY
     PRINT N'Contact records inserted: ' + CONVERT(VARCHAR(20), @ContactInserted);
     PRINT N'PropertyContact records inserted: ' + CONVERT(VARCHAR(20), @PropertyContactInserted);
     PRINT N'============================================================';
+    PRINT N'UPR LOAD COMPLETE';
 
 END TRY
 BEGIN CATCH
