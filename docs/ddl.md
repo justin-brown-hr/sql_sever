@@ -208,11 +208,6 @@ CREATE TABLE dbo.UPRMATCHREVIEW_Q
     ParcelID                   NVARCHAR(50) NULL,
     SDATAccountNumber          NVARCHAR(30) NULL,
 
-    MA_Account                 NVARCHAR(50) NULL,
-    MA_Address                 NVARCHAR(300) NULL,
-    SDAT_Account               NVARCHAR(50) NULL,
-    SDAT_Address               NVARCHAR(300) NULL,
-
     ReasonForNoMatch           NVARCHAR(255) NOT NULL,
     ProcessingTimestamp        DATETIME2(0) NOT NULL CONSTRAINT DF_UPRMATCHREVIEW_Q_ProcessingTimestamp
         DEFAULT (SYSDATETIME()),

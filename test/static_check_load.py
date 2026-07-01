@@ -78,8 +78,12 @@ check("MA/SDAT mismatch detection (#MaSdMismatch)", "#MaSdMismatch" in main_batc
 check("Review_Q Missing ParcelID reason", "N'Missing ParcelID'" in main_batch)
 check("Review_Q Address or Account Not Match reason", "N'Address or Account Not Match'" in main_batch)
 check("CreateReview stage uses rp alias through Review_Q insert", "#CreateReview rp" in main_batch and "#ReviewQReady" in main_batch)
-check("Review_Q preflight requires client columns", "UPRMATCHREVIEW_Q missing required columns" in main_batch)
-check("Load script does not ALTER ADD Review_Q columns", "ADD MA_Account" not in text.split("BEGIN TRY")[1] if "BEGIN TRY" in text else True)
+check("Review_Q preflight requires core Review_Q columns", "UPRMATCHREVIEW_Q missing required columns" in main_batch)
+check("Review_Q insert uses only table columns (no MA_Account)", "MA_Account" not in main_batch)
+check("Review_Q pipeline validates CreateReview required columns", "50038" in main_batch)
+check("Review_Q #ReviewQReady matches UPRMATCHREVIEW_Q insert list",
+      main_batch.count("INSERT INTO #ReviewQReady") == 1
+      and main_batch.count("INSERT INTO dbo.UPRMATCHREVIEW_Q") == 1)
 check("No MA-only SDAT enrichment via account-only join in step 4b",
       "not in account/address mismatch review" in main_batch)
 check("#UprMergeSrc rebuilt from guard pass",
