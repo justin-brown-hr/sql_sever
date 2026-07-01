@@ -244,6 +244,8 @@ CREATE TABLE dbo.UPRMATCHREVIEW_Q
     CONSTRAINT CK_UPRMATCHREVIEW_Q_ReasonForNoMatch
         CHECK (ReasonForNoMatch IN
         (
+            'Missing ParcelID',
+            'Address or Account Not Match',
             'NO_PARCEL_MATCH',
             'NO_SDAT_MATCH',
             'NO_ADDRESS_MATCH',

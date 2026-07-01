@@ -12,9 +12,8 @@
     When MA+SDAT do NOT match (account-only or address-only overlap): Review_Q, not UPR
     UPR  — valid Account# + valid address + ParcelID
     Review_Q — Missing ParcelID | Address or Account Not Match | NO_ADDRESS_MATCH | DUPLICATE
-               Missing ParcelID: MA_Account + SDAT_Account (when BOTH matched, no parcel)
-               Address or Account Not Match: MA_Account, MA_Address, SDAT_Account, SDAT_Address
-               All Review_Q candidates are inserted (incoming REJECTED XREF + Review_Q row)
+               Requires client columns on UPRMATCHREVIEW_Q: MA_Account, MA_Address, SDAT_Account, SDAT_Address
+               (apply scripts/02_review_q_client_alter.sql or client ALTER before load)
     External XREF (eProperty, CASE, MPDU, MULTIFAMILY) — address/normalized-address match only;
                always write XREF per UPR per system: MATCH or NO_MATCH (Notes: No Address Match)
     External non-match does NOT send rows to Review_Q
@@ -268,15 +267,6 @@ BEGIN
     IF @ReviewCkDrop <> N''
         EXEC sys.sp_executesql @ReviewCkDrop;
 
-    IF COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'MA_Account') IS NULL
-        ALTER TABLE dbo.UPRMATCHREVIEW_Q ADD MA_Account NVARCHAR(50) NULL;
-    IF COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'MA_Address') IS NULL
-        ALTER TABLE dbo.UPRMATCHREVIEW_Q ADD MA_Address NVARCHAR(300) NULL;
-    IF COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'SDAT_Account') IS NULL
-        ALTER TABLE dbo.UPRMATCHREVIEW_Q ADD SDAT_Account NVARCHAR(50) NULL;
-    IF COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'SDAT_Address') IS NULL
-        ALTER TABLE dbo.UPRMATCHREVIEW_Q ADD SDAT_Address NVARCHAR(300) NULL;
-
     IF EXISTS (
         SELECT 1
         FROM sys.check_constraints cc
@@ -354,6 +344,20 @@ BEGIN TRY
         THROW 50004,
             N'REF_PROPERTYTYPE audit columns (CreationUserID / LastUpdatedUserID) missing. Recreate from client DDL.',
             1;
+
+    SELECT @PreflightErrors = STRING_AGG(v.ColName, N', ')
+    FROM (VALUES
+        (N'MA_Account'),
+        (N'MA_Address'),
+        (N'SDAT_Account'),
+        (N'SDAT_Address')
+    ) AS v(ColName)
+    WHERE COL_LENGTH(N'dbo.UPRMATCHREVIEW_Q', v.ColName) IS NULL;
+
+    SET @ErrorMessage = N'UPRMATCHREVIEW_Q missing required columns: '
+        + ISNULL(@PreflightErrors, N'') + N'. Apply client Review_Q ALTER (docs/ddl.md), then re-run.';
+    IF @PreflightErrors IS NOT NULL
+        THROW 50005, @ErrorMessage, 1;
 
     PRINT N'Preflight OK - database: ' + DB_NAME() + N' | started: ' + CONVERT(NVARCHAR(30), @BatchStartTime, 120);
 
@@ -1103,44 +1107,56 @@ BEGIN TRY
     INTO #UprCandidate
     FROM #Work w;
 
-    IF OBJECT_ID('tempdb..#ReviewPending') IS NOT NULL DROP TABLE #ReviewPending;
-    CREATE TABLE #ReviewPending (
-        MasterAddressID            INT NULL,
-        KdatRecordID               INT NULL,
-        MatchSource                NVARCHAR(30) NOT NULL,
+    /* ========================================================================
+       CreateReview stage — #CreateReview mirrors UPRMATCHREVIEW_Q (docs/ddl.md)
+       Internal keys (MasterAddressID, KdatRecordID) used for anchor/XREF only.
+       ======================================================================== */
+    IF OBJECT_ID('tempdb..#CreateReview') IS NOT NULL DROP TABLE #CreateReview;
+    CREATE TABLE #CreateReview (
+        IncomingSourceSystem       NVARCHAR(100) NOT NULL,
         NormalizedIncomingAddress  NVARCHAR(300) NOT NULL,
-        ParcelID                   NVARCHAR(50) NULL,
-        SDATAccountNumber          NVARCHAR(50) NULL,
-        ReasonForNoMatch           NVARCHAR(255) NOT NULL,
-        ReviewDetail               NVARCHAR(255) NOT NULL,
-        StreetNumber               NVARCHAR(20) NULL,
-        StreetName                 NVARCHAR(100) NULL,
-        StreetType                 NVARCHAR(4) NULL,
-        ZipCode                    NVARCHAR(10) NULL,
-        EffectiveSDATAccountNumber NVARCHAR(50) NOT NULL,
-        MA_Account                 NVARCHAR(50) NULL,
+        ParcelID                   NVARCHAR(50)  NULL,
+        SDATAccountNumber          NVARCHAR(30)  NULL,
+        MA_Account                 NVARCHAR(50)  NULL,
         MA_Address                 NVARCHAR(300) NULL,
-        SDAT_Account               NVARCHAR(50) NULL,
-        SDAT_Address               NVARCHAR(300) NULL
+        SDAT_Account               NVARCHAR(50)  NULL,
+        SDAT_Address               NVARCHAR(300) NULL,
+        ReasonForNoMatch           NVARCHAR(255) NOT NULL,
+        ReviewStatus               NVARCHAR(128) NOT NULL,
+        MasterAddressID            INT           NULL,
+        KdatRecordID               INT           NULL,
+        ReviewDetail               NVARCHAR(255) NOT NULL,
+        StreetNumber               NVARCHAR(20)  NULL,
+        StreetName                 NVARCHAR(100) NULL,
+        StreetType                 NVARCHAR(4)   NULL,
+        ZipCode                    NVARCHAR(10)  NULL,
+        EffectiveSDATAccountNumber NVARCHAR(50)  NOT NULL
     );
-    CREATE NONCLUSTERED INDEX IX_ReviewPending_Src
-        ON #ReviewPending(MasterAddressID, KdatRecordID);
+    CREATE NONCLUSTERED INDEX IX_CreateReview_Src
+        ON #CreateReview(MasterAddressID, KdatRecordID);
 
     /* MA/SDAT partial overlap — account or address differs; write both sides to Review_Q */
-    INSERT INTO #ReviewPending (
-        MasterAddressID, KdatRecordID, MatchSource, NormalizedIncomingAddress,
-        ParcelID, SDATAccountNumber, ReasonForNoMatch, ReviewDetail,
-        StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber,
-        MA_Account, MA_Address, SDAT_Account, SDAT_Address
+    INSERT INTO #CreateReview (
+        IncomingSourceSystem, NormalizedIncomingAddress,
+        ParcelID, SDATAccountNumber,
+        MA_Account, MA_Address, SDAT_Account, SDAT_Address,
+        ReasonForNoMatch, ReviewStatus,
+        MasterAddressID, KdatRecordID, ReviewDetail,
+        StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber
     )
     SELECT
+        N'BOTH_MISMATCH'                                           AS IncomingSourceSystem,
+        COALESCE(ma.NormalizedFullAddress, ma.NormalizedStreetAddress, sd.NormalizedFullAddress, N'UNKNOWN') AS NormalizedIncomingAddress,
+        COALESCE(NULLIF(LTRIM(RTRIM(ma.ParcelID)), N''), NULLIF(LTRIM(RTRIM(sd.ParcelID)), N'')) AS ParcelID,
+        sd.SDATAccountNumber                                       AS SDATAccountNumber,
+        ma.MasterAddressAccount                                    AS MA_Account,
+        COALESCE(ma.NormalizedFullAddress, ma.NormalizedStreetAddress) AS MA_Address,
+        sd.SDATAccountNumber                                       AS SDAT_Account,
+        COALESCE(sd.NormalizedFullAddress, sd.NormalizedStreetAddress) AS SDAT_Address,
+        N'Address or Account Not Match'                            AS ReasonForNoMatch,
+        N'PENDING_REVIEW'                                          AS ReviewStatus,
         mm.MasterAddressID,
         mm.KdatRecordID,
-        N'BOTH_MISMATCH',
-        COALESCE(ma.NormalizedFullAddress, ma.NormalizedStreetAddress, sd.NormalizedFullAddress, N'UNKNOWN'),
-        COALESCE(NULLIF(LTRIM(RTRIM(ma.ParcelID)), N''), NULLIF(LTRIM(RTRIM(sd.ParcelID)), N'')),
-        sd.SDATAccountNumber,
-        N'Address or Account Not Match',
         CASE mm.MismatchType
             WHEN N'ACCOUNT' THEN N'Same account number, different normalized address'
             ELSE N'Same normalized address, different account number'
@@ -1153,30 +1169,38 @@ BEGIN TRY
             dbo.fn_UPR_NormalizeSDATAccount(
                 NULLIF(LTRIM(RTRIM(COALESCE(ma.MasterAddressAccount, sd.SDATAccountNumber))), N'')),
             N'MX-' + CONVERT(NVARCHAR(20), mm.MasterAddressID) + N'-' + CONVERT(NVARCHAR(20), mm.KdatRecordID)
-        ),
-        ma.MasterAddressAccount,
-        COALESCE(ma.NormalizedFullAddress, ma.NormalizedStreetAddress),
-        sd.SDATAccountNumber,
-        COALESCE(sd.NormalizedFullAddress, sd.NormalizedStreetAddress)
+        )
     FROM #MaSdMismatch mm
     INNER JOIN #MA ma ON ma.MasterAddressID = mm.MasterAddressID
     INNER JOIN #SDAT sd ON sd.KdatRecordID = mm.KdatRecordID;
 
-    /* Review_Q staging — invalid identification / missing ParcelID (not UPR-eligible) */
-    INSERT INTO #ReviewPending (
-        MasterAddressID, KdatRecordID, MatchSource, NormalizedIncomingAddress,
-        ParcelID, SDATAccountNumber, ReasonForNoMatch, ReviewDetail,
-        StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber,
-        MA_Account, MA_Address, SDAT_Account, SDAT_Address
+    /* CreateReview — invalid identification / missing ParcelID (not UPR-eligible) */
+    INSERT INTO #CreateReview (
+        IncomingSourceSystem, NormalizedIncomingAddress,
+        ParcelID, SDATAccountNumber,
+        MA_Account, MA_Address, SDAT_Account, SDAT_Address,
+        ReasonForNoMatch, ReviewStatus,
+        MasterAddressID, KdatRecordID, ReviewDetail,
+        StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber
     )
     SELECT
-        w.MasterAddressID, w.KdatRecordID, w.MatchSource,
-        COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress, N'UNKNOWN'),
-        w.ParcelID, w.SDATAccountNumber,
+        w.MatchSource                                              AS IncomingSourceSystem,
+        COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress, N'UNKNOWN') AS NormalizedIncomingAddress,
+        w.ParcelID                                                 AS ParcelID,
+        w.SDATAccountNumber                                        AS SDATAccountNumber,
+        CASE WHEN w.MasterAddressID IS NOT NULL THEN w.MasterAddressAccount END AS MA_Account,
+        CASE WHEN w.MasterAddressID IS NOT NULL
+             THEN COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress) END AS MA_Address,
+        CASE WHEN w.KdatRecordID IS NOT NULL THEN w.SDATAccountNumber END AS SDAT_Account,
+        CASE WHEN w.KdatRecordID IS NOT NULL
+             THEN COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress) END AS SDAT_Address,
         CASE
             WHEN c.NeedsNoParcelReview = 1 THEN N'Missing ParcelID'
             ELSE N'NO_ADDRESS_MATCH'
-        END,
+        END                                                        AS ReasonForNoMatch,
+        N'PENDING_REVIEW'                                          AS ReviewStatus,
+        w.MasterAddressID,
+        w.KdatRecordID,
         CASE
             WHEN c.NeedsNoParcelReview = 1 THEN N'Missing ParcelID'
             WHEN NULLIF(LTRIM(RTRIM(COALESCE(w.SDATAccountNumber, w.MasterAddressAccount))), N'') IS NULL
@@ -1188,7 +1212,10 @@ BEGIN TRY
             WHEN w.HasRequiredAddress = 0 THEN N'Invalid or incomplete address'
             ELSE N'Invalid account or address'
         END,
-        w.StreetNumber, w.StreetName, w.StreetType, w.ZipCode,
+        w.StreetNumber,
+        w.StreetName,
+        w.StreetType,
+        w.ZipCode,
         COALESCE(
             dbo.fn_UPR_NormalizeSDATAccount(
                 NULLIF(LTRIM(RTRIM(COALESCE(w.SDATAccountNumber, w.MasterAddressAccount))), N'')),
@@ -1199,13 +1226,7 @@ BEGIN TRY
             N'ADDR-' + CONVERT(NVARCHAR(20), ABS(CHECKSUM(
                 COALESCE(NULLIF(w.NormalizedFullAddress, N''), w.NormalizedStreetAddress, N'UNKNOWN')
             )))
-        ),
-        CASE WHEN w.MasterAddressID IS NOT NULL THEN w.MasterAddressAccount END,
-        CASE WHEN w.MasterAddressID IS NOT NULL
-             THEN COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress) END,
-        CASE WHEN w.KdatRecordID IS NOT NULL THEN w.SDATAccountNumber END,
-        CASE WHEN w.KdatRecordID IS NOT NULL
-             THEN COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress) END
+        )
     FROM #Work w
     INNER JOIN #UprCandidate c
         ON (w.MasterAddressID IS NOT NULL AND c.MasterAddressID = w.MasterAddressID)
@@ -1213,7 +1234,7 @@ BEGIN TRY
     WHERE c.IsEligibleForUpr = 0
       AND NOT EXISTS (
           SELECT 1
-          FROM #ReviewPending rp
+          FROM #CreateReview rp
           WHERE ISNULL(rp.MasterAddressID, -1) = ISNULL(w.MasterAddressID, -1)
             AND ISNULL(rp.KdatRecordID, -1) = ISNULL(w.KdatRecordID, -1)
       );
@@ -1235,25 +1256,35 @@ BEGIN TRY
     FROM #UprCandidate c
     WHERE c.IsEligibleForUpr = 1;
 
-    INSERT INTO #ReviewPending (
-        MasterAddressID, KdatRecordID, MatchSource, NormalizedIncomingAddress,
-        ParcelID, SDATAccountNumber, ReasonForNoMatch, ReviewDetail,
-        StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber,
-        MA_Account, MA_Address, SDAT_Account, SDAT_Address
+    INSERT INTO #CreateReview (
+        IncomingSourceSystem, NormalizedIncomingAddress,
+        ParcelID, SDATAccountNumber,
+        MA_Account, MA_Address, SDAT_Account, SDAT_Address,
+        ReasonForNoMatch, ReviewStatus,
+        MasterAddressID, KdatRecordID, ReviewDetail,
+        StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber
     )
     SELECT
-        w.MasterAddressID, w.KdatRecordID, w.MatchSource,
-        COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress, N'UNKNOWN'),
-        w.ParcelID, w.SDATAccountNumber,
-        N'DUPLICATE', N'Duplicate account and normalized address in batch',
-        w.StreetNumber, w.StreetName, w.StreetType, w.ZipCode,
-        r.EffectiveSDATAccountNumber,
-        CASE WHEN w.MasterAddressID IS NOT NULL THEN w.MasterAddressAccount END,
+        w.MatchSource                                              AS IncomingSourceSystem,
+        COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress, N'UNKNOWN') AS NormalizedIncomingAddress,
+        w.ParcelID                                                 AS ParcelID,
+        w.SDATAccountNumber                                        AS SDATAccountNumber,
+        CASE WHEN w.MasterAddressID IS NOT NULL THEN w.MasterAddressAccount END AS MA_Account,
         CASE WHEN w.MasterAddressID IS NOT NULL
-             THEN COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress) END,
-        CASE WHEN w.KdatRecordID IS NOT NULL THEN w.SDATAccountNumber END,
+             THEN COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress) END AS MA_Address,
+        CASE WHEN w.KdatRecordID IS NOT NULL THEN w.SDATAccountNumber END AS SDAT_Account,
         CASE WHEN w.KdatRecordID IS NOT NULL
-             THEN COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress) END
+             THEN COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress) END AS SDAT_Address,
+        N'DUPLICATE'                                               AS ReasonForNoMatch,
+        N'PENDING_REVIEW'                                          AS ReviewStatus,
+        w.MasterAddressID,
+        w.KdatRecordID,
+        N'Duplicate account and normalized address in batch',
+        w.StreetNumber,
+        w.StreetName,
+        w.StreetType,
+        w.ZipCode,
+        r.EffectiveSDATAccountNumber
     FROM #UprMergeRanked r
     INNER JOIN #Work w
         ON (w.MasterAddressID IS NOT NULL AND w.MasterAddressID = r.MasterAddressID)
@@ -1275,25 +1306,35 @@ BEGIN TRY
     WHERE r.PropertyRn = 1;
 
     /* Final MERGE safety — drop rows that would violate UPR NOT NULL / CHECK */
-    INSERT INTO #ReviewPending (
-        MasterAddressID, KdatRecordID, MatchSource, NormalizedIncomingAddress,
-        ParcelID, SDATAccountNumber, ReasonForNoMatch, ReviewDetail,
-        StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber,
-        MA_Account, MA_Address, SDAT_Account, SDAT_Address
+    INSERT INTO #CreateReview (
+        IncomingSourceSystem, NormalizedIncomingAddress,
+        ParcelID, SDATAccountNumber,
+        MA_Account, MA_Address, SDAT_Account, SDAT_Address,
+        ReasonForNoMatch, ReviewStatus,
+        MasterAddressID, KdatRecordID, ReviewDetail,
+        StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber
     )
     SELECT
-        w.MasterAddressID, w.KdatRecordID, w.MatchSource,
-        COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress, N'UNKNOWN'),
-        w.ParcelID, w.SDATAccountNumber,
-        N'NO_ADDRESS_MATCH', N'Failed final UPR validation before insert',
-        w.StreetNumber, w.StreetName, w.StreetType, w.ZipCode,
-        s.EffectiveSDATAccountNumber,
-        CASE WHEN w.MasterAddressID IS NOT NULL THEN w.MasterAddressAccount END,
+        w.MatchSource                                              AS IncomingSourceSystem,
+        COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress, N'UNKNOWN') AS NormalizedIncomingAddress,
+        w.ParcelID                                                 AS ParcelID,
+        w.SDATAccountNumber                                        AS SDATAccountNumber,
+        CASE WHEN w.MasterAddressID IS NOT NULL THEN w.MasterAddressAccount END AS MA_Account,
         CASE WHEN w.MasterAddressID IS NOT NULL
-             THEN COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress) END,
-        CASE WHEN w.KdatRecordID IS NOT NULL THEN w.SDATAccountNumber END,
+             THEN COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress) END AS MA_Address,
+        CASE WHEN w.KdatRecordID IS NOT NULL THEN w.SDATAccountNumber END AS SDAT_Account,
         CASE WHEN w.KdatRecordID IS NOT NULL
-             THEN COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress) END
+             THEN COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress) END AS SDAT_Address,
+        N'NO_ADDRESS_MATCH'                                        AS ReasonForNoMatch,
+        N'PENDING_REVIEW'                                          AS ReviewStatus,
+        w.MasterAddressID,
+        w.KdatRecordID,
+        N'Failed final UPR validation before insert',
+        w.StreetNumber,
+        w.StreetName,
+        w.StreetType,
+        w.ZipCode,
+        s.EffectiveSDATAccountNumber
     FROM #UprMergeSrc s
     INNER JOIN #Work w
         ON (w.MasterAddressID IS NOT NULL AND w.MasterAddressID = s.MasterAddressID)
@@ -1308,7 +1349,7 @@ BEGIN TRY
        OR NULLIF(s.EffectiveParcelID, N'') IS NULL)
       AND NOT EXISTS (
           SELECT 1
-          FROM #ReviewPending rp
+          FROM #CreateReview rp
           WHERE ISNULL(rp.MasterAddressID, -1) = ISNULL(w.MasterAddressID, -1)
             AND ISNULL(rp.KdatRecordID, -1) = ISNULL(w.KdatRecordID, -1)
       );
@@ -1326,22 +1367,22 @@ BEGIN TRY
 
     SET @RowsIncompleteData = (
         SELECT COUNT(*)
-        FROM #ReviewPending rp
+        FROM #CreateReview rp
         WHERE rp.ReasonForNoMatch = N'NO_ADDRESS_MATCH'
     );
     SET @ReviewMissingParcel = (
         SELECT COUNT(*)
-        FROM #ReviewPending rp
+        FROM #CreateReview rp
         WHERE rp.ReasonForNoMatch = N'Missing ParcelID'
     );
     SET @ReviewMismatch = (
         SELECT COUNT(*)
-        FROM #ReviewPending rp
+        FROM #CreateReview rp
         WHERE rp.ReasonForNoMatch = N'Address or Account Not Match'
     );
     SET @RowsReviewDuplicate = (
         SELECT COUNT(*)
-        FROM #ReviewPending rp
+        FROM #CreateReview rp
         WHERE rp.ReasonForNoMatch = N'DUPLICATE'
     );
 
@@ -1437,61 +1478,81 @@ BEGIN TRY
     CREATE NONCLUSTERED INDEX IX_UprMergeLosers_Kd ON #UprMergeLosers(KdatRecordID)
         WHERE KdatRecordID IS NOT NULL;
 
-    INSERT INTO #ReviewPending (
-        MasterAddressID, KdatRecordID, MatchSource, NormalizedIncomingAddress,
-        ParcelID, SDATAccountNumber, ReasonForNoMatch, ReviewDetail,
-        StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber,
-        MA_Account, MA_Address, SDAT_Account, SDAT_Address
+    INSERT INTO #CreateReview (
+        IncomingSourceSystem, NormalizedIncomingAddress,
+        ParcelID, SDATAccountNumber,
+        MA_Account, MA_Address, SDAT_Account, SDAT_Address,
+        ReasonForNoMatch, ReviewStatus,
+        MasterAddressID, KdatRecordID, ReviewDetail,
+        StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber
     )
     SELECT
-        w.MasterAddressID, w.KdatRecordID, w.MatchSource,
-        COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress, N'UNKNOWN'),
-        w.ParcelID, w.SDATAccountNumber,
-        N'DUPLICATE', l.ReviewDetail,
-        w.StreetNumber, w.StreetName, w.StreetType, w.ZipCode,
-        l.EffectiveSDATAccountNumber,
-        CASE WHEN w.MasterAddressID IS NOT NULL THEN w.MasterAddressAccount END,
+        w.MatchSource                                              AS IncomingSourceSystem,
+        COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress, N'UNKNOWN') AS NormalizedIncomingAddress,
+        w.ParcelID                                                 AS ParcelID,
+        w.SDATAccountNumber                                        AS SDATAccountNumber,
+        CASE WHEN w.MasterAddressID IS NOT NULL THEN w.MasterAddressAccount END AS MA_Account,
         CASE WHEN w.MasterAddressID IS NOT NULL
-             THEN COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress) END,
-        CASE WHEN w.KdatRecordID IS NOT NULL THEN w.SDATAccountNumber END,
+             THEN COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress) END AS MA_Address,
+        CASE WHEN w.KdatRecordID IS NOT NULL THEN w.SDATAccountNumber END AS SDAT_Account,
         CASE WHEN w.KdatRecordID IS NOT NULL
-             THEN COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress) END
+             THEN COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress) END AS SDAT_Address,
+        N'DUPLICATE'                                               AS ReasonForNoMatch,
+        N'PENDING_REVIEW'                                          AS ReviewStatus,
+        w.MasterAddressID,
+        w.KdatRecordID,
+        l.ReviewDetail,
+        w.StreetNumber,
+        w.StreetName,
+        w.StreetType,
+        w.ZipCode,
+        l.EffectiveSDATAccountNumber
     FROM #UprMergeLosers l
     INNER JOIN #Work w ON w.MasterAddressID = l.MasterAddressID
     WHERE l.MasterAddressID IS NOT NULL
       AND NOT EXISTS (
           SELECT 1
-          FROM #ReviewPending rp
+          FROM #CreateReview rp
           WHERE rp.MasterAddressID = w.MasterAddressID
             AND ISNULL(rp.KdatRecordID, -1) = ISNULL(w.KdatRecordID, -1)
       );
 
-    INSERT INTO #ReviewPending (
-        MasterAddressID, KdatRecordID, MatchSource, NormalizedIncomingAddress,
-        ParcelID, SDATAccountNumber, ReasonForNoMatch, ReviewDetail,
-        StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber,
-        MA_Account, MA_Address, SDAT_Account, SDAT_Address
+    INSERT INTO #CreateReview (
+        IncomingSourceSystem, NormalizedIncomingAddress,
+        ParcelID, SDATAccountNumber,
+        MA_Account, MA_Address, SDAT_Account, SDAT_Address,
+        ReasonForNoMatch, ReviewStatus,
+        MasterAddressID, KdatRecordID, ReviewDetail,
+        StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber
     )
     SELECT
-        w.MasterAddressID, w.KdatRecordID, w.MatchSource,
-        COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress, N'UNKNOWN'),
-        w.ParcelID, w.SDATAccountNumber,
-        N'DUPLICATE', l.ReviewDetail,
-        w.StreetNumber, w.StreetName, w.StreetType, w.ZipCode,
-        l.EffectiveSDATAccountNumber,
-        CASE WHEN w.MasterAddressID IS NOT NULL THEN w.MasterAddressAccount END,
+        w.MatchSource                                              AS IncomingSourceSystem,
+        COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress, N'UNKNOWN') AS NormalizedIncomingAddress,
+        w.ParcelID                                                 AS ParcelID,
+        w.SDATAccountNumber                                        AS SDATAccountNumber,
+        CASE WHEN w.MasterAddressID IS NOT NULL THEN w.MasterAddressAccount END AS MA_Account,
         CASE WHEN w.MasterAddressID IS NOT NULL
-             THEN COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress) END,
-        CASE WHEN w.KdatRecordID IS NOT NULL THEN w.SDATAccountNumber END,
+             THEN COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress) END AS MA_Address,
+        CASE WHEN w.KdatRecordID IS NOT NULL THEN w.SDATAccountNumber END AS SDAT_Account,
         CASE WHEN w.KdatRecordID IS NOT NULL
-             THEN COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress) END
+             THEN COALESCE(w.NormalizedFullAddress, w.NormalizedStreetAddress) END AS SDAT_Address,
+        N'DUPLICATE'                                               AS ReasonForNoMatch,
+        N'PENDING_REVIEW'                                          AS ReviewStatus,
+        w.MasterAddressID,
+        w.KdatRecordID,
+        l.ReviewDetail,
+        w.StreetNumber,
+        w.StreetName,
+        w.StreetType,
+        w.ZipCode,
+        l.EffectiveSDATAccountNumber
     FROM #UprMergeLosers l
     INNER JOIN #Work w ON w.KdatRecordID = l.KdatRecordID
     WHERE l.MasterAddressID IS NULL
       AND l.KdatRecordID IS NOT NULL
       AND NOT EXISTS (
           SELECT 1
-          FROM #ReviewPending rp
+          FROM #CreateReview rp
           WHERE rp.KdatRecordID = w.KdatRecordID
       );
 
@@ -1531,7 +1592,7 @@ BEGIN TRY
 
     SET @RowsReviewDuplicate = (
         SELECT COUNT(*)
-        FROM #ReviewPending rp
+        FROM #CreateReview rp
         WHERE rp.ReasonForNoMatch = N'DUPLICATE'
     );
 
@@ -1815,9 +1876,9 @@ BEGIN TRY
 
     /* ========================================================================
        6b. REVIEW-BOUND ROWS → incoming REJECTED XREF + UPRMATCHREVIEW_Q
-           All #ReviewPending rows are written (PENDING anchor UPR when no winner).
+           All #CreateReview rows are written (PENDING anchor UPR when no winner).
        ======================================================================== */
-    SET @RowsSentToReview = (SELECT COUNT(*) FROM #ReviewPending);
+    SET @RowsSentToReview = (SELECT COUNT(*) FROM #CreateReview);
     PRINT N'Step 6b - Review_Q processing started: ' + CONVERT(NVARCHAR(20), @RowsSentToReview) + N' candidates';
     DECLARE @ReviewXrefOut TABLE (
         UPropertyRecords_XrefID INT NOT NULL,
@@ -1840,7 +1901,7 @@ BEGIN TRY
         rp.KdatRecordID,
         rp.ReasonForNoMatch,
         win.UPropertyRecordsID
-    FROM #ReviewPending rp
+    FROM #CreateReview rp
     CROSS APPLY (
         SELECT TOP 1 m.UPropertyRecordsID
         FROM #UprCandidate lc
@@ -1924,7 +1985,7 @@ BEGIN TRY
         ), 100),
         COALESCE(w.Latitude, ma.Latitude, sd.Latitude),
         COALESCE(w.Longitude, ma.Longitude, sd.Longitude)
-    FROM #ReviewPending rp
+    FROM #CreateReview rp
     LEFT JOIN #MA ma ON rp.MasterAddressID = ma.MasterAddressID
     LEFT JOIN #SDAT sd ON rp.KdatRecordID = sd.KdatRecordID
     OUTER APPLY (
@@ -2110,7 +2171,7 @@ BEGIN TRY
              THEN CONVERT(NVARCHAR(100), rp.KdatRecordID)
              ELSE CONVERT(NVARCHAR(100), rp.MasterAddressID) END,
         CASE WHEN rp.KdatRecordID IS NOT NULL THEN N'SDATProperty' ELSE N'MasterAddress' END
-    FROM #ReviewPending rp
+    FROM #CreateReview rp
     INNER JOIN #ReviewAnchor a
         ON ISNULL(a.MasterAddressID, -1) = ISNULL(rp.MasterAddressID, -1)
        AND ISNULL(a.KdatRecordID, -1) = ISNULL(rp.KdatRecordID, -1)
@@ -2118,7 +2179,7 @@ BEGIN TRY
 
     SET @ReviewSkippedNoAnchor = (
         SELECT COUNT(*)
-        FROM #ReviewPending rp
+        FROM #CreateReview rp
         WHERE NOT EXISTS (
             SELECT 1
             FROM #ReviewAnchor a
@@ -2193,7 +2254,7 @@ BEGIN TRY
 
     IF EXISTS (
         SELECT 1
-        FROM #ReviewPending rp
+        FROM #CreateReview rp
         WHERE rp.ReasonForNoMatch NOT IN (
             N'Missing ParcelID',
             N'Address or Account Not Match',
@@ -2202,7 +2263,7 @@ BEGIN TRY
         )
     )
         THROW 50036,
-            N'Review_Q blocked: #ReviewPending contains ReasonForNoMatch outside allowed load values.',
+            N'Review_Q blocked: #CreateReview contains ReasonForNoMatch outside allowed load values.',
             1;
 
     IF NOT EXISTS (
@@ -2216,40 +2277,49 @@ BEGIN TRY
             N'Review_Q blocked: ReasonForNoMatch CHECK missing DUPLICATE. Re-run full script from top.',
             1;
 
-    IF OBJECT_ID('tempdb..#ReviewQStage') IS NOT NULL DROP TABLE #ReviewQStage;
+    /* Stage rp rows with XREF key — same columns as UPRMATCHREVIEW_Q insert */
+    IF OBJECT_ID('tempdb..#ReviewQReady') IS NOT NULL DROP TABLE #ReviewQReady;
 
-    CREATE TABLE #ReviewQStage (
+    CREATE TABLE #ReviewQReady (
         UPropertyRecords_XrefID     INT            NOT NULL,
         IncomingSourceSystem        NVARCHAR(100)  NOT NULL,
         NormalizedIncomingAddress   NVARCHAR(300)  NOT NULL,
         ParcelID                    NVARCHAR(50)   NULL,
-        SDATAccountNumber           NVARCHAR(50)   NULL,
-        ReasonForNoMatch            NVARCHAR(255)  NOT NULL,
-        ReviewStatus                NVARCHAR(128)  NOT NULL,
+        SDATAccountNumber           NVARCHAR(30)   NULL,
         MA_Account                  NVARCHAR(50)   NULL,
         MA_Address                  NVARCHAR(300)  NULL,
         SDAT_Account                NVARCHAR(50)   NULL,
-        SDAT_Address                NVARCHAR(300)  NULL
+        SDAT_Address                NVARCHAR(300)  NULL,
+        ReasonForNoMatch            NVARCHAR(255)  NOT NULL,
+        ReviewStatus                NVARCHAR(128)  NOT NULL
     );
 
-    INSERT INTO #ReviewQStage (
-        UPropertyRecords_XrefID, IncomingSourceSystem, NormalizedIncomingAddress,
-        ParcelID, SDATAccountNumber, ReasonForNoMatch, ReviewStatus,
-        MA_Account, MA_Address, SDAT_Account, SDAT_Address
+    INSERT INTO #ReviewQReady (
+        UPropertyRecords_XrefID,
+        IncomingSourceSystem,
+        NormalizedIncomingAddress,
+        ParcelID,
+        SDATAccountNumber,
+        MA_Account,
+        MA_Address,
+        SDAT_Account,
+        SDAT_Address,
+        ReasonForNoMatch,
+        ReviewStatus
     )
     SELECT
         rx.UPropertyRecords_XrefID,
-        rp.MatchSource,
-        COALESCE(rp.MA_Address, rp.SDAT_Address, rp.NormalizedIncomingAddress),
+        rp.IncomingSourceSystem,
+        rp.NormalizedIncomingAddress,
         rp.ParcelID,
-        COALESCE(rp.SDAT_Account, rp.SDATAccountNumber, rp.MA_Account),
-        rp.ReasonForNoMatch,
-        N'PENDING_REVIEW',
+        rp.SDATAccountNumber,
         rp.MA_Account,
         rp.MA_Address,
         rp.SDAT_Account,
-        rp.SDAT_Address
-    FROM #ReviewPending rp
+        rp.SDAT_Address,
+        rp.ReasonForNoMatch,
+        rp.ReviewStatus
+    FROM #CreateReview rp
     INNER JOIN @ReviewXrefOut rx
         ON ISNULL(rx.MasterAddressID, -1) = ISNULL(rp.MasterAddressID, -1)
        AND ISNULL(rx.KdatRecordID, -1) = ISNULL(rp.KdatRecordID, -1)
@@ -2259,66 +2329,42 @@ BEGIN TRY
         N'Address or Account Not Match',
         N'NO_ADDRESS_MATCH',
         N'DUPLICATE'
-    )
-      AND NOT EXISTS (
-        SELECT 1
-        FROM dbo.UPRMATCHREVIEW_Q q
-        WHERE q.UPropertyRecords_XrefID = rx.UPropertyRecords_XrefID
-          AND q.ReasonForNoMatch = rp.ReasonForNoMatch
     );
 
-    IF COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'MA_Account') IS NOT NULL
-    BEGIN
-        INSERT INTO dbo.UPRMATCHREVIEW_Q (
-            UPropertyRecords_XrefID,
-            IncomingSourceSystem,
-            NormalizedIncomingAddress,
-            ParcelID,
-            SDATAccountNumber,
-            ReasonForNoMatch,
-            ReviewStatus,
-            MA_Account,
-            MA_Address,
-            SDAT_Account,
-            SDAT_Address
-        )
-        SELECT
-            s.UPropertyRecords_XrefID,
-            s.IncomingSourceSystem,
-            s.NormalizedIncomingAddress,
-            s.ParcelID,
-            s.SDATAccountNumber,
-            s.ReasonForNoMatch,
-            s.ReviewStatus,
-            s.MA_Account,
-            s.MA_Address,
-            s.SDAT_Account,
-            s.SDAT_Address
-        FROM #ReviewQStage s;
-    END
-    ELSE
-    BEGIN
-        INSERT INTO dbo.UPRMATCHREVIEW_Q (
-            UPropertyRecords_XrefID,
-            IncomingSourceSystem,
-            NormalizedIncomingAddress,
-            ParcelID,
-            SDATAccountNumber,
-            ReasonForNoMatch,
-            ReviewStatus
-        )
-        SELECT
-            s.UPropertyRecords_XrefID,
-            s.IncomingSourceSystem,
-            s.NormalizedIncomingAddress,
-            s.ParcelID,
-            s.SDATAccountNumber,
-            s.ReasonForNoMatch,
-            s.ReviewStatus
-        FROM #ReviewQStage s;
-    END
+    INSERT INTO dbo.UPRMATCHREVIEW_Q (
+        UPropertyRecords_XrefID,
+        IncomingSourceSystem,
+        NormalizedIncomingAddress,
+        ParcelID,
+        SDATAccountNumber,
+        MA_Account,
+        MA_Address,
+        SDAT_Account,
+        SDAT_Address,
+        ReasonForNoMatch,
+        ReviewStatus
+    )
+    SELECT
+        rq.UPropertyRecords_XrefID,
+        rq.IncomingSourceSystem,
+        rq.NormalizedIncomingAddress,
+        rq.ParcelID,
+        rq.SDATAccountNumber,
+        rq.MA_Account,
+        rq.MA_Address,
+        rq.SDAT_Account,
+        rq.SDAT_Address,
+        rq.ReasonForNoMatch,
+        rq.ReviewStatus
+    FROM #ReviewQReady rq
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM dbo.UPRMATCHREVIEW_Q q
+        WHERE q.UPropertyRecords_XrefID = rq.UPropertyRecords_XrefID
+          AND q.ReasonForNoMatch = rq.ReasonForNoMatch
+    );
 
-    DROP TABLE #ReviewQStage;
+    DROP TABLE #ReviewQReady;
 
     SET @ReviewIncomingInserted = @@ROWCOUNT;
 

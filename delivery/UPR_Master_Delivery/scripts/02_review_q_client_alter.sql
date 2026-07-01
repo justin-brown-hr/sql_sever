@@ -1,0 +1,26 @@
+/*
+  Client Review_Q column ALTER — run ONCE on target database before load.
+  Matches docs/ddl.md / docs/ALL_UPRDB.txt UPRMATCHREVIEW_Q definition.
+*/
+USE UPRXDB_TEST;
+GO
+
+IF OBJECT_ID(N'dbo.UPRMATCHREVIEW_Q', N'U') IS NULL
+BEGIN
+    RAISERROR(N'dbo.UPRMATCHREVIEW_Q not found.', 16, 1);
+    RETURN;
+END
+
+IF COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'MA_Account') IS NULL
+    ALTER TABLE dbo.UPRMATCHREVIEW_Q ADD MA_Account NVARCHAR(50) NULL;
+
+IF COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'MA_Address') IS NULL
+    ALTER TABLE dbo.UPRMATCHREVIEW_Q ADD MA_Address NVARCHAR(300) NULL;
+
+IF COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'SDAT_Account') IS NULL
+    ALTER TABLE dbo.UPRMATCHREVIEW_Q ADD SDAT_Account NVARCHAR(50) NULL;
+
+IF COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'SDAT_Address') IS NULL
+    ALTER TABLE dbo.UPRMATCHREVIEW_Q ADD SDAT_Address NVARCHAR(300) NULL;
+
+PRINT N'Review_Q client columns verified/added: MA_Account, MA_Address, SDAT_Account, SDAT_Address.';

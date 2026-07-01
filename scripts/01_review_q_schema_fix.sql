@@ -1,6 +1,7 @@
 /*
-  Run ONCE before load (or let load_upr_master.sql apply automatically).
-  Rebuilds UPRMATCHREVIEW_Q ReasonForNoMatch CHECK to include DUPLICATE.
+  Run ONCE before load (or let load_upr_master.sql apply CHECK repair automatically).
+  Client must apply Review_Q column ALTER separately (see docs/ddl.md).
+  Rebuilds UPRMATCHREVIEW_Q ReasonForNoMatch CHECK to include load reasons.
   Must run OUTSIDE a transaction that will roll back.
 */
 USE UPRXDB_TEST;
@@ -9,6 +10,15 @@ GO
 IF OBJECT_ID(N'dbo.UPRMATCHREVIEW_Q', N'U') IS NULL
 BEGIN
     RAISERROR(N'dbo.UPRMATCHREVIEW_Q not found.', 16, 1);
+    RETURN;
+END
+
+IF COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'MA_Account') IS NULL
+   OR COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'MA_Address') IS NULL
+   OR COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'SDAT_Account') IS NULL
+   OR COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'SDAT_Address') IS NULL
+BEGIN
+    RAISERROR(N'Apply client Review_Q ALTER first (MA_Account, MA_Address, SDAT_Account, SDAT_Address). See docs/ddl.md.', 16, 1);
     RETURN;
 END
 
@@ -22,15 +32,6 @@ WHERE cc.parent_object_id = OBJECT_ID(N'dbo.UPRMATCHREVIEW_Q')
 
 IF @DropSql <> N''
     EXEC sys.sp_executesql @DropSql;
-
-IF COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'MA_Account') IS NULL
-    ALTER TABLE dbo.UPRMATCHREVIEW_Q ADD MA_Account NVARCHAR(50) NULL;
-IF COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'MA_Address') IS NULL
-    ALTER TABLE dbo.UPRMATCHREVIEW_Q ADD MA_Address NVARCHAR(300) NULL;
-IF COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'SDAT_Account') IS NULL
-    ALTER TABLE dbo.UPRMATCHREVIEW_Q ADD SDAT_Account NVARCHAR(50) NULL;
-IF COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'SDAT_Address') IS NULL
-    ALTER TABLE dbo.UPRMATCHREVIEW_Q ADD SDAT_Address NVARCHAR(300) NULL;
 
 IF EXISTS (
     SELECT 1
@@ -60,4 +61,4 @@ FROM sys.check_constraints cc
 WHERE cc.parent_object_id = OBJECT_ID(N'dbo.UPRMATCHREVIEW_Q')
   AND cc.name = N'CK_UPRMATCHREVIEW_Q_ReasonForNoMatch';
 
-PRINT N'Review_Q ReasonForNoMatch CHECK rebuilt (includes DUPLICATE).';
+PRINT N'Review_Q ReasonForNoMatch CHECK rebuilt (includes DUPLICATE and load reasons).';

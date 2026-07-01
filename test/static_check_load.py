@@ -77,7 +77,9 @@ check("Uses single SELECT INTO #UprMergeSrc (no duplicate)",
 check("MA/SDAT mismatch detection (#MaSdMismatch)", "#MaSdMismatch" in main_batch)
 check("Review_Q Missing ParcelID reason", "N'Missing ParcelID'" in main_batch)
 check("Review_Q Address or Account Not Match reason", "N'Address or Account Not Match'" in main_batch)
-check("Review_Q staged insert (#ReviewQStage 1:1 column map)", "#ReviewQStage" in main_batch)
+check("CreateReview stage uses rp alias through Review_Q insert", "#CreateReview rp" in main_batch and "#ReviewQReady" in main_batch)
+check("Review_Q preflight requires client columns", "UPRMATCHREVIEW_Q missing required columns" in main_batch)
+check("Load script does not ALTER ADD Review_Q columns", "ADD MA_Account" not in text.split("BEGIN TRY")[1] if "BEGIN TRY" in text else True)
 check("No MA-only SDAT enrichment via account-only join in step 4b",
       "not in account/address mismatch review" in main_batch)
 check("#UprMergeSrc rebuilt from guard pass",
