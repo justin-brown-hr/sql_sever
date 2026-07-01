@@ -74,6 +74,12 @@ check("Status history idempotent", "Initial load - new UPR record" in main_batch
       and main_batch.count("NOT EXISTS") >= 5)
 check("Uses single SELECT INTO #UprMergeSrc (no duplicate)",
       main_batch.count("INTO #UprMergeSrc") - main_batch.count("INSERT INTO #UprMergeSrc") == 1)
+check("MA/SDAT mismatch detection (#MaSdMismatch)", "#MaSdMismatch" in main_batch)
+check("Review_Q Missing ParcelID reason", "N'Missing ParcelID'" in main_batch)
+check("Review_Q Address or Account Not Match reason", "N'Address or Account Not Match'" in main_batch)
+check("Review_Q optional MA/SDAT columns (COL_LENGTH guard)", "@ReviewQHasMaCols" in main_batch)
+check("No MA-only SDAT enrichment via account-only join in step 4b",
+      "not in account/address mismatch review" in main_batch)
 check("#UprMergeSrc rebuilt from guard pass",
       "INSERT INTO #UprMergeSrc" in main_batch and "#UprMergeScored" in main_batch)
 
