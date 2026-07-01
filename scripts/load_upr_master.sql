@@ -2216,82 +2216,109 @@ BEGIN TRY
             N'Review_Q blocked: ReasonForNoMatch CHECK missing DUPLICATE. Re-run full script from top.',
             1;
 
-    DECLARE @ReviewQHasMaCols BIT = CASE
-        WHEN COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'MA_Account') IS NOT NULL
-         AND COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'MA_Address') IS NOT NULL
-         AND COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'SDAT_Account') IS NOT NULL
-         AND COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'SDAT_Address') IS NOT NULL
-        THEN 1 ELSE 0 END;
+    IF OBJECT_ID('tempdb..#ReviewQStage') IS NOT NULL DROP TABLE #ReviewQStage;
 
-    IF @ReviewQHasMaCols = 1
+    CREATE TABLE #ReviewQStage (
+        UPropertyRecords_XrefID     INT            NOT NULL,
+        IncomingSourceSystem        NVARCHAR(100)  NOT NULL,
+        NormalizedIncomingAddress   NVARCHAR(300)  NOT NULL,
+        ParcelID                    NVARCHAR(50)   NULL,
+        SDATAccountNumber           NVARCHAR(50)   NULL,
+        ReasonForNoMatch            NVARCHAR(255)  NOT NULL,
+        ReviewStatus                NVARCHAR(128)  NOT NULL,
+        MA_Account                  NVARCHAR(50)   NULL,
+        MA_Address                  NVARCHAR(300)  NULL,
+        SDAT_Account                NVARCHAR(50)   NULL,
+        SDAT_Address                NVARCHAR(300)  NULL
+    );
+
+    INSERT INTO #ReviewQStage (
+        UPropertyRecords_XrefID, IncomingSourceSystem, NormalizedIncomingAddress,
+        ParcelID, SDATAccountNumber, ReasonForNoMatch, ReviewStatus,
+        MA_Account, MA_Address, SDAT_Account, SDAT_Address
+    )
+    SELECT
+        rx.UPropertyRecords_XrefID,
+        rp.MatchSource,
+        COALESCE(rp.MA_Address, rp.SDAT_Address, rp.NormalizedIncomingAddress),
+        rp.ParcelID,
+        COALESCE(rp.SDAT_Account, rp.SDATAccountNumber, rp.MA_Account),
+        rp.ReasonForNoMatch,
+        N'PENDING_REVIEW',
+        rp.MA_Account,
+        rp.MA_Address,
+        rp.SDAT_Account,
+        rp.SDAT_Address
+    FROM #ReviewPending rp
+    INNER JOIN @ReviewXrefOut rx
+        ON ISNULL(rx.MasterAddressID, -1) = ISNULL(rp.MasterAddressID, -1)
+       AND ISNULL(rx.KdatRecordID, -1) = ISNULL(rp.KdatRecordID, -1)
+       AND rx.ReasonForNoMatch = rp.ReasonForNoMatch
+    WHERE rp.ReasonForNoMatch IN (
+        N'Missing ParcelID',
+        N'Address or Account Not Match',
+        N'NO_ADDRESS_MATCH',
+        N'DUPLICATE'
+    )
+      AND NOT EXISTS (
+        SELECT 1
+        FROM dbo.UPRMATCHREVIEW_Q q
+        WHERE q.UPropertyRecords_XrefID = rx.UPropertyRecords_XrefID
+          AND q.ReasonForNoMatch = rp.ReasonForNoMatch
+    );
+
+    IF COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'MA_Account') IS NOT NULL
     BEGIN
         INSERT INTO dbo.UPRMATCHREVIEW_Q (
-            UPropertyRecords_XrefID, IncomingSourceSystem, NormalizedIncomingAddress,
-            ParcelID, SDATAccountNumber, ReasonForNoMatch, ReviewStatus,
-            MA_Account, MA_Address, SDAT_Account, SDAT_Address
+            UPropertyRecords_XrefID,
+            IncomingSourceSystem,
+            NormalizedIncomingAddress,
+            ParcelID,
+            SDATAccountNumber,
+            ReasonForNoMatch,
+            ReviewStatus,
+            MA_Account,
+            MA_Address,
+            SDAT_Account,
+            SDAT_Address
         )
         SELECT
-            rx.UPropertyRecords_XrefID,
-            rp.MatchSource,
-            rp.NormalizedIncomingAddress,
-            rp.ParcelID,
-            rp.SDATAccountNumber,
-            rp.ReasonForNoMatch,
-            N'PENDING_REVIEW',
-            rp.MA_Account,
-            rp.MA_Address,
-            rp.SDAT_Account,
-            rp.SDAT_Address
-        FROM #ReviewPending rp
-        INNER JOIN @ReviewXrefOut rx
-            ON ISNULL(rx.MasterAddressID, -1) = ISNULL(rp.MasterAddressID, -1)
-           AND ISNULL(rx.KdatRecordID, -1) = ISNULL(rp.KdatRecordID, -1)
-           AND rx.ReasonForNoMatch = rp.ReasonForNoMatch
-        WHERE rp.ReasonForNoMatch IN (
-            N'Missing ParcelID',
-            N'Address or Account Not Match',
-            N'NO_ADDRESS_MATCH',
-            N'DUPLICATE'
-        )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM dbo.UPRMATCHREVIEW_Q q
-            WHERE q.UPropertyRecords_XrefID = rx.UPropertyRecords_XrefID
-              AND q.ReasonForNoMatch = rp.ReasonForNoMatch
-        );
+            s.UPropertyRecords_XrefID,
+            s.IncomingSourceSystem,
+            s.NormalizedIncomingAddress,
+            s.ParcelID,
+            s.SDATAccountNumber,
+            s.ReasonForNoMatch,
+            s.ReviewStatus,
+            s.MA_Account,
+            s.MA_Address,
+            s.SDAT_Account,
+            s.SDAT_Address
+        FROM #ReviewQStage s;
     END
     ELSE
     BEGIN
         INSERT INTO dbo.UPRMATCHREVIEW_Q (
-            UPropertyRecords_XrefID, IncomingSourceSystem, NormalizedIncomingAddress,
-            ParcelID, SDATAccountNumber, ReasonForNoMatch, ReviewStatus
+            UPropertyRecords_XrefID,
+            IncomingSourceSystem,
+            NormalizedIncomingAddress,
+            ParcelID,
+            SDATAccountNumber,
+            ReasonForNoMatch,
+            ReviewStatus
         )
         SELECT
-            rx.UPropertyRecords_XrefID,
-            rp.MatchSource,
-            rp.NormalizedIncomingAddress,
-            rp.ParcelID,
-            rp.SDATAccountNumber,
-            rp.ReasonForNoMatch,
-            N'PENDING_REVIEW'
-        FROM #ReviewPending rp
-        INNER JOIN @ReviewXrefOut rx
-            ON ISNULL(rx.MasterAddressID, -1) = ISNULL(rp.MasterAddressID, -1)
-           AND ISNULL(rx.KdatRecordID, -1) = ISNULL(rp.KdatRecordID, -1)
-           AND rx.ReasonForNoMatch = rp.ReasonForNoMatch
-        WHERE rp.ReasonForNoMatch IN (
-            N'Missing ParcelID',
-            N'Address or Account Not Match',
-            N'NO_ADDRESS_MATCH',
-            N'DUPLICATE'
-        )
-          AND NOT EXISTS (
-            SELECT 1
-            FROM dbo.UPRMATCHREVIEW_Q q
-            WHERE q.UPropertyRecords_XrefID = rx.UPropertyRecords_XrefID
-              AND q.ReasonForNoMatch = rp.ReasonForNoMatch
-        );
+            s.UPropertyRecords_XrefID,
+            s.IncomingSourceSystem,
+            s.NormalizedIncomingAddress,
+            s.ParcelID,
+            s.SDATAccountNumber,
+            s.ReasonForNoMatch,
+            s.ReviewStatus
+        FROM #ReviewQStage s;
     END
+
+    DROP TABLE #ReviewQStage;
 
     SET @ReviewIncomingInserted = @@ROWCOUNT;
 

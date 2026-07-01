@@ -77,7 +77,7 @@ check("Uses single SELECT INTO #UprMergeSrc (no duplicate)",
 check("MA/SDAT mismatch detection (#MaSdMismatch)", "#MaSdMismatch" in main_batch)
 check("Review_Q Missing ParcelID reason", "N'Missing ParcelID'" in main_batch)
 check("Review_Q Address or Account Not Match reason", "N'Address or Account Not Match'" in main_batch)
-check("Review_Q optional MA/SDAT columns (COL_LENGTH guard)", "@ReviewQHasMaCols" in main_batch)
+check("Review_Q staged insert (#ReviewQStage 1:1 column map)", "#ReviewQStage" in main_batch)
 check("No MA-only SDAT enrichment via account-only join in step 4b",
       "not in account/address mismatch review" in main_batch)
 check("#UprMergeSrc rebuilt from guard pass",
