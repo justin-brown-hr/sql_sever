@@ -79,7 +79,9 @@ check("Review_Q Missing ParcelID reason", "N'Missing ParcelID'" in main_batch)
 check("Review_Q Address or Account Not Match reason", "N'Address or Account Not Match'" in main_batch)
 check("CreateReview stage uses rp alias through Review_Q insert", "#CreateReview rp" in main_batch and "#ReviewQReady" in main_batch)
 check("Review_Q preflight requires core Review_Q columns", "UPRMATCHREVIEW_Q missing required columns" in main_batch)
-check("Review_Q insert uses only table columns (no MA_Account)", "MA_Account" not in main_batch)
+check("Review_Q preflight requires client MA/SDAT columns", "MA_NormalizedIncomingAddress" in main_batch and "SDAT_NormalizedIncomingAddress" in main_batch)
+check("CreateReview stages client Review_Q column names", "MA_Account" in main_batch and "MA_ParcelID" in main_batch and "SDAT_ParcelID" in main_batch)
+check("Review_Q insert uses static client column list", "INSERT INTO dbo.UPRMATCHREVIEW_Q" in main_batch and "SDAT_NormalizedIncomingAddress" in main_batch)
 check("Review_Q pipeline validates CreateReview required columns", "50038" in main_batch)
 check("Review_Q #ReviewQReady matches UPRMATCHREVIEW_Q insert list",
       main_batch.count("INSERT INTO #ReviewQReady") == 1

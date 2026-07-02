@@ -1,6 +1,6 @@
 /*
   Run ONCE before load (or let load_upr_master.sql apply CHECK repair automatically).
-  Client Review_Q DDL must include core columns; load uses table as-is (no MA_Account etc.).
+  Client Review_Q DDL must include MA and SDAT column sets (account, normalized address, ParcelID).
   Rebuilds UPRMATCHREVIEW_Q ReasonForNoMatch CHECK to include load reasons.
   Must run OUTSIDE a transaction that will roll back.
 */
@@ -14,8 +14,8 @@ BEGIN
 END
 
 IF COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'IncomingSourceSystem') IS NULL
-   OR COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'NormalizedIncomingAddress') IS NULL
    OR COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'ReasonForNoMatch') IS NULL
+   OR COL_LENGTH('dbo.UPRMATCHREVIEW_Q', 'ReviewStatus') IS NULL
 BEGIN
     RAISERROR(N'UPRMATCHREVIEW_Q missing core columns. Recreate from client DDL.', 16, 1);
     RETURN;

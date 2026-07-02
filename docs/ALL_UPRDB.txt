@@ -161,10 +161,13 @@ CREATE TABLE dbo.UPRMATCHREVIEW_Q
 (
 UPRMatchReviewID INT IDENTITY(1,1) NOT NULL,
 UPropertyRecords_XrefID     INT NOT NULL,
-IncomingSourceSystem       NVARCHAR(100) NOT NULL,
-NormalizedIncomingAddress  NVARCHAR(300) NOT NULL,
-ParcelID                   NVARCHAR(50) NULL,
-SDATAccountNumber          NVARCHAR(30) NULL,
+IncomingSourceSystem            NVARCHAR(100) NOT NULL,
+MA_Account                      NVARCHAR(30) NULL,
+MA_NormalizedIncomingAddress    NVARCHAR(300) NOT NULL,
+MA_ParcelID                     NVARCHAR(50) NULL,
+SDAT_AccountNumber              NVARCHAR(30) NULL,
+SDAT_NormalizedIncomingAddress  NVARCHAR(300) NOT NULL,
+SDAT_ParcelID                   NVARCHAR(50) NULL,
 
 ReasonForNoMatch           NVARCHAR(255) NOT NULL,
 ProcessingTimestamp        DATETIME2(0) NOT NULL CONSTRAINT DF_UPRMATCHREVIEW_Q_ProcessingTimestamp
