@@ -68,7 +68,7 @@ check("MERGE parcel guard uses #UprMergeReady flag", "#UprMergeReady" in main_ba
 check("No COL_LENGTH on temp table", "COL_LENGTH('tempdb.." not in main_batch)
 check("THROW uses variable not inline concatenation", not re.search(r"THROW\s+\d+,\s*\n\s*N'[^']*'\s*\+", main_batch, re.I))
 check("Summary is vertical PRINT only (no horizontal SELECT report)", "UPR LOAD COMPLETE" in main_batch and "AS LoadStatus" not in main_batch)
-check("Summary reports UPR table count before/after", "UPR table count after load" in main_batch and "UPR rows written this run (total new)" in main_batch)
+check("Summary reports UPR table count before/after", "UPR table count before load" in main_batch and "UPR table count after load" in main_batch)
 check("No CONCAT in main batch", "CONCAT(" not in main_batch)
 check("Status history idempotent", "Initial load - new UPR record" in main_batch
       and main_batch.count("NOT EXISTS") >= 5)
@@ -81,9 +81,11 @@ check("CreateReview stage uses rp alias through Review_Q insert", "#CreateReview
 check("Review_Q preflight requires core Review_Q columns", "UPRMATCHREVIEW_Q missing required columns" in main_batch)
 check("Review_Q preflight requires client MA/SDAT columns", "MA_NormalizedIncomingAddress" in main_batch and "SDAT_NormalizedIncomingAddress" in main_batch)
 check("CreateReview stages client Review_Q column names", "MA_Account" in main_batch and "MA_ParcelID" in main_batch and "SDAT_ParcelID" in main_batch)
-check("Review rejected XREF counted in summary", "@ReviewXrefRejectedInserted" in main_batch)
+check("Review_Q mismatch uses BOTH incoming source", "N'BOTH'" in main_batch and "BOTH_MISMATCH" not in main_batch)
+check("CreateReview deduped before Review_Q insert", "#CreateReviewDeduped" in main_batch)
 check("XREF summary uses table before/after delta", "@XrefCountBefore" in main_batch and "@XrefTotalInsertedThisRun" in main_batch)
-check("Review_Q skipped uses plain UPR parent wording", "no UPR parent record" in main_batch)
+check("Review rejected XREF counted in summary", "@ReviewXrefRejectedInserted" in main_batch)
+check("Review_Q skipped uses plain UPR parent wording", "no UPR parent to link" in main_batch)
 check("Review_Q pipeline validates CreateReview required columns", "50038" in main_batch)
 check("Review_Q #ReviewQReady matches UPRMATCHREVIEW_Q insert list",
       main_batch.count("INSERT INTO #ReviewQReady") == 1
