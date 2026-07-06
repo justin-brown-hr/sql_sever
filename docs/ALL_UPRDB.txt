@@ -160,7 +160,7 @@ that could not be confidently matched. */
 CREATE TABLE dbo.UPRMATCHREVIEW_Q
 (
 UPRMatchReviewID INT IDENTITY(1,1) NOT NULL,
-UPropertyRecords_XrefID     INT NOT NULL,
+UPropertyRecords_XrefID     INT NULL,
 IncomingSourceSystem            NVARCHAR(100) NOT NULL,
 MA_Account                      NVARCHAR(30) NULL,
 MA_NormalizedIncomingAddress    NVARCHAR(300) NOT NULL,
