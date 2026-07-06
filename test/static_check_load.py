@@ -81,7 +81,9 @@ check("CreateReview stage uses rp alias through Review_Q insert", "#CreateReview
 check("Review_Q preflight requires core Review_Q columns", "UPRMATCHREVIEW_Q missing required columns" in main_batch)
 check("Review_Q preflight requires client MA/SDAT columns", "MA_NormalizedIncomingAddress" in main_batch and "SDAT_NormalizedIncomingAddress" in main_batch)
 check("CreateReview stages client Review_Q column names", "MA_Account" in main_batch and "MA_ParcelID" in main_batch and "SDAT_ParcelID" in main_batch)
-check("Review_Q insert uses static client column list", "INSERT INTO dbo.UPRMATCHREVIEW_Q" in main_batch and "SDAT_NormalizedIncomingAddress" in main_batch)
+check("Review rejected XREF counted in summary", "@ReviewXrefRejectedInserted" in main_batch)
+check("XREF summary uses table before/after delta", "@XrefCountBefore" in main_batch and "@XrefTotalInsertedThisRun" in main_batch)
+check("Review_Q skipped uses plain UPR parent wording", "no UPR parent record" in main_batch)
 check("Review_Q pipeline validates CreateReview required columns", "50038" in main_batch)
 check("Review_Q #ReviewQReady matches UPRMATCHREVIEW_Q insert list",
       main_batch.count("INSERT INTO #ReviewQReady") == 1

@@ -220,13 +220,16 @@ DECLARE @UPRInserted INT = 0, @UPRUpdated INT = 0, @UprEligibleRows INT = 0;
 DECLARE @UPRActiveInserted INT = 0, @UPRPendingInserted INT = 0;
 DECLARE @UPRTotalInsertedThisRun INT = 0, @UPRTableCountAfter INT = 0;
 DECLARE @MasterAddressXrefInserted INT = 0, @SDATXrefInserted INT = 0;
-DECLARE @CaseXrefInserted INT = 0, @MPDUXrefInserted INT = 0, @EPropertyXrefInserted INT = 0, @MultifamilyXrefInserted INT = 0, @TotalXrefInserted INT = 0;
+DECLARE @CaseXrefInserted INT = 0, @MPDUXrefInserted INT = 0, @EPropertyXrefInserted INT = 0, @MultifamilyXrefInserted INT = 0;
+DECLARE @ReviewXrefRejectedInserted INT = 0, @TotalXrefInserted INT = 0;
+DECLARE @XrefCountBefore INT = 0, @XrefTableCountAfter INT = 0, @XrefTotalInsertedThisRun INT = 0;
 DECLARE @ReviewIncomingInserted INT = 0, @ReviewExternalInserted INT = 0, @ReviewInserted INT = 0;
 DECLARE @ReviewMissingParcel INT = 0, @ReviewMismatch INT = 0;
 DECLARE @ReviewDuplicate INT = 0, @ReviewIncomplete INT = 0;
 DECLARE @MaSdMismatchCount INT = 0;
 DECLARE @ReviewQTableCountAfter INT = 0;
-DECLARE @ReviewSkippedNoAnchor INT = 0;
+DECLARE @ReviewSkippedNoAnchor INT = 0, @ReviewSkippedDuplicate INT = 0;
+DECLARE @ReviewSkippedUniqueSources INT = 0, @RowsSentToReviewUnique INT = 0;
 DECLARE @ReviewAnchorCount INT = 0;
 DECLARE @ReviewAnchorStaged INT = 0;
 DECLARE @EPropertyXrefNoMatch INT = 0, @CaseXrefNoMatch INT = 0;
@@ -1857,6 +1860,8 @@ BEGIN TRY
        NOT EXISTS matches client UX: SourceSystem + SourceRecordID + EntityType
        (active rows only). Dedupe source rows before insert.
        ======================================================================== */
+    SET @XrefCountBefore = (SELECT COUNT(*) FROM dbo.UPROPERTYRECORDS_XREF);
+
     ;WITH MaXrefSrc AS (
         SELECT
             m.UPropertyRecordsID,
@@ -1935,6 +1940,16 @@ BEGIN TRY
            IncomingSourceSystem, ReasonForNoMatch, ReviewStatus (+ UPropertyRecords_XrefID FK).
        ======================================================================== */
     SET @RowsSentToReview = (SELECT COUNT(*) FROM #CreateReview);
+    SET @RowsSentToReviewUnique = (
+        SELECT COUNT(*)
+        FROM (
+            SELECT DISTINCT
+                ISNULL(rp.MasterAddressID, -1),
+                ISNULL(rp.KdatRecordID, -1),
+                rp.ReasonForNoMatch
+            FROM #CreateReview rp
+        ) u
+    );
     PRINT N'Step 6b - Review_Q processing started: ' + CONVERT(NVARCHAR(20), @RowsSentToReview) + N' candidates';
     DECLARE @ReviewXrefOut TABLE (
         UPropertyRecords_XrefID INT NOT NULL,
@@ -1950,32 +1965,6 @@ BEGIN TRY
         ReasonForNoMatch   NVARCHAR(255) NOT NULL,
         UPropertyRecordsID INT NOT NULL
     );
-
-    INSERT INTO #ReviewAnchor (MasterAddressID, KdatRecordID, ReasonForNoMatch, UPropertyRecordsID)
-    SELECT
-        rp.MasterAddressID,
-        rp.KdatRecordID,
-        rp.ReasonForNoMatch,
-        win.UPropertyRecordsID
-    FROM #CreateReview rp
-    CROSS APPLY (
-        SELECT TOP 1 m.UPropertyRecordsID
-        FROM #UprCandidate lc
-        INNER JOIN #UprMergeRanked r
-            ON r.PropertyRn = 1
-           AND r.EffectiveSDATAccountNumber = lc.EffectiveSDATAccountNumber
-           AND COALESCE(r.EffectiveNormalizedFullAddress, r.EffectiveNormalizedStreetAddress)
-               = COALESCE(lc.EffectiveNormalizedFullAddress, lc.EffectiveNormalizedStreetAddress)
-        INNER JOIN #UPRMap m
-            ON (r.MasterAddressID IS NOT NULL AND m.MasterAddressID = r.MasterAddressID)
-            OR (r.KdatRecordID IS NOT NULL AND m.KdatRecordID = r.KdatRecordID)
-        WHERE (rp.MasterAddressID IS NOT NULL AND lc.MasterAddressID = rp.MasterAddressID)
-           OR (rp.KdatRecordID IS NOT NULL AND lc.KdatRecordID = rp.KdatRecordID)
-        ORDER BY
-            CASE WHEN r.MatchSource = N'BOTH' THEN 1 WHEN r.MatchSource = N'KDAT' THEN 2 ELSE 3 END,
-            m.UPropertyRecordsID
-    ) win
-    WHERE rp.ReasonForNoMatch = N'DUPLICATE';
 
     IF OBJECT_ID('tempdb..#ReviewAnchorSrc') IS NOT NULL DROP TABLE #ReviewAnchorSrc;
 
@@ -2200,7 +2189,67 @@ BEGIN TRY
 
     DROP TABLE #ReviewAnchorSrc;
 
-    SET @ReviewAnchorCount = (SELECT COUNT(*) FROM @ReviewUprInserted);
+    /* DUPLICATE Review_Q — link to winning ACTIVE UPR row (same account + normalized address) */
+    INSERT INTO #ReviewAnchor (MasterAddressID, KdatRecordID, ReasonForNoMatch, UPropertyRecordsID)
+    SELECT
+        rp.MasterAddressID,
+        rp.KdatRecordID,
+        rp.ReasonForNoMatch,
+        win.UPropertyRecordsID
+    FROM #CreateReview rp
+    INNER JOIN #UprMergeRanked r_lose
+        ON (rp.MasterAddressID IS NOT NULL AND r_lose.MasterAddressID = rp.MasterAddressID)
+        OR (rp.KdatRecordID IS NOT NULL AND r_lose.KdatRecordID = rp.KdatRecordID)
+    CROSS APPLY (
+        SELECT TOP 1 upr.UPropertyRecordsID
+        FROM #UprMergeRanked r_win
+        INNER JOIN dbo.UPROPERTYRECORDS upr
+            ON upr.SDATAccountNumber = r_win.EffectiveSDATAccountNumber
+        WHERE r_win.PropertyRn = 1
+          AND r_win.EffectiveSDATAccountNumber = r_lose.EffectiveSDATAccountNumber
+          AND COALESCE(r_win.EffectiveNormalizedFullAddress, r_win.EffectiveNormalizedStreetAddress)
+              = COALESCE(r_lose.EffectiveNormalizedFullAddress, r_lose.EffectiveNormalizedStreetAddress)
+        ORDER BY CASE WHEN r_win.MatchSource = N'BOTH' THEN 1 WHEN r_win.MatchSource = N'KDAT' THEN 2 ELSE 3 END,
+                 upr.UPropertyRecordsID
+    ) win
+    WHERE rp.ReasonForNoMatch = N'DUPLICATE'
+      AND NOT EXISTS (
+          SELECT 1
+          FROM #ReviewAnchor a
+          WHERE ISNULL(a.MasterAddressID, -1) = ISNULL(rp.MasterAddressID, -1)
+            AND ISNULL(a.KdatRecordID, -1) = ISNULL(rp.KdatRecordID, -1)
+            AND a.ReasonForNoMatch = rp.ReasonForNoMatch
+      );
+
+    /* DUPLICATE Review_Q — link to winning row already on a PENDING review UPR parent */
+    INSERT INTO #ReviewAnchor (MasterAddressID, KdatRecordID, ReasonForNoMatch, UPropertyRecordsID)
+    SELECT
+        rp.MasterAddressID,
+        rp.KdatRecordID,
+        rp.ReasonForNoMatch,
+        a_win.UPropertyRecordsID
+    FROM #CreateReview rp
+    INNER JOIN #UprMergeRanked r_lose
+        ON (rp.MasterAddressID IS NOT NULL AND r_lose.MasterAddressID = rp.MasterAddressID)
+        OR (rp.KdatRecordID IS NOT NULL AND r_lose.KdatRecordID = rp.KdatRecordID)
+    INNER JOIN #UprMergeRanked r_win
+        ON r_win.PropertyRn = 1
+       AND r_win.EffectiveSDATAccountNumber = r_lose.EffectiveSDATAccountNumber
+       AND COALESCE(r_win.EffectiveNormalizedFullAddress, r_win.EffectiveNormalizedStreetAddress)
+           = COALESCE(r_lose.EffectiveNormalizedFullAddress, r_lose.EffectiveNormalizedStreetAddress)
+    INNER JOIN #ReviewAnchor a_win
+        ON ISNULL(a_win.MasterAddressID, -1) = ISNULL(r_win.MasterAddressID, -1)
+       AND ISNULL(a_win.KdatRecordID, -1) = ISNULL(r_win.KdatRecordID, -1)
+    WHERE rp.ReasonForNoMatch = N'DUPLICATE'
+      AND NOT EXISTS (
+          SELECT 1
+          FROM #ReviewAnchor a
+          WHERE ISNULL(a.MasterAddressID, -1) = ISNULL(rp.MasterAddressID, -1)
+            AND ISNULL(a.KdatRecordID, -1) = ISNULL(rp.KdatRecordID, -1)
+            AND a.ReasonForNoMatch = rp.ReasonForNoMatch
+      );
+
+    SET @ReviewAnchorCount = (SELECT COUNT(*) FROM #ReviewAnchor);
     PRINT N'Step 6b - Review anchor UPR rows created: ' + CONVERT(NVARCHAR(20), @ReviewAnchorCount);
 
     IF OBJECT_ID('tempdb..#ReviewXrefStage') IS NOT NULL DROP TABLE #ReviewXrefStage;
@@ -2243,6 +2292,35 @@ BEGIN TRY
               AND ISNULL(a.KdatRecordID, -1) = ISNULL(rp.KdatRecordID, -1)
               AND a.ReasonForNoMatch = rp.ReasonForNoMatch
         )
+    );
+    SET @ReviewSkippedDuplicate = (
+        SELECT COUNT(*)
+        FROM #CreateReview rp
+        WHERE rp.ReasonForNoMatch = N'DUPLICATE'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM #ReviewAnchor a
+              WHERE ISNULL(a.MasterAddressID, -1) = ISNULL(rp.MasterAddressID, -1)
+                AND ISNULL(a.KdatRecordID, -1) = ISNULL(rp.KdatRecordID, -1)
+                AND a.ReasonForNoMatch = rp.ReasonForNoMatch
+          )
+    );
+    SET @ReviewSkippedUniqueSources = (
+        SELECT COUNT(*)
+        FROM (
+            SELECT DISTINCT
+                ISNULL(rp.MasterAddressID, -1),
+                ISNULL(rp.KdatRecordID, -1),
+                rp.ReasonForNoMatch
+            FROM #CreateReview rp
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM #ReviewAnchor a
+                WHERE ISNULL(a.MasterAddressID, -1) = ISNULL(rp.MasterAddressID, -1)
+                  AND ISNULL(a.KdatRecordID, -1) = ISNULL(rp.KdatRecordID, -1)
+                  AND a.ReasonForNoMatch = rp.ReasonForNoMatch
+            )
+        ) skipped
     );
 
     IF OBJECT_ID('tempdb..#ReviewXrefStageDeduped') IS NOT NULL DROP TABLE #ReviewXrefStageDeduped;
@@ -2293,6 +2371,8 @@ BEGIN TRY
           AND x.SourceEntityType = src.SourceEntityType
           AND x.IsActive = 1
     );
+
+    SET @ReviewXrefRejectedInserted = @@ROWCOUNT;
 
     INSERT INTO @ReviewXrefOut (
         UPropertyRecords_XrefID, MasterAddressID, KdatRecordID, ReasonForNoMatch
@@ -2596,8 +2676,11 @@ BEGIN TRY
           WHERE x.UPropertyRecordsID = e.UPropertyRecordsID
             AND x.SourceSystemCode = N'eProperty' AND x.IsActive = 1
       );
-    SET @EPropertyXrefInserted = (SELECT COUNT(*) FROM #ExtMatch WHERE SourceSystemCode = N'eProperty' AND MatchResult = N'MATCH');
-    SET @EPropertyXrefNoMatch = (SELECT COUNT(*) FROM #ExtMatch WHERE SourceSystemCode = N'eProperty' AND MatchResult = N'NO_MATCH');
+    SET @EPropertyXrefInserted = @@ROWCOUNT;
+    SET @EPropertyXrefNoMatch = (
+        SELECT COUNT(*) FROM #ExtMatch
+        WHERE SourceSystemCode = N'eProperty' AND MatchResult = N'NO_MATCH'
+    );
 
     INSERT INTO dbo.UPROPERTYRECORDS_XREF (
         UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
@@ -2615,8 +2698,11 @@ BEGIN TRY
           WHERE x.UPropertyRecordsID = e.UPropertyRecordsID
             AND x.SourceSystemCode = N'CASE' AND x.IsActive = 1
       );
-    SET @CaseXrefInserted = (SELECT COUNT(*) FROM #ExtMatch WHERE SourceSystemCode = N'CASE' AND MatchResult = N'MATCH');
-    SET @CaseXrefNoMatch = (SELECT COUNT(*) FROM #ExtMatch WHERE SourceSystemCode = N'CASE' AND MatchResult = N'NO_MATCH');
+    SET @CaseXrefInserted = @@ROWCOUNT;
+    SET @CaseXrefNoMatch = (
+        SELECT COUNT(*) FROM #ExtMatch
+        WHERE SourceSystemCode = N'CASE' AND MatchResult = N'NO_MATCH'
+    );
 
     INSERT INTO dbo.UPROPERTYRECORDS_XREF (
         UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
@@ -2634,8 +2720,11 @@ BEGIN TRY
           WHERE x.UPropertyRecordsID = e.UPropertyRecordsID
             AND x.SourceSystemCode = N'MPDU' AND x.IsActive = 1
       );
-    SET @MPDUXrefInserted = (SELECT COUNT(*) FROM #ExtMatch WHERE SourceSystemCode = N'MPDU' AND MatchResult = N'MATCH');
-    SET @MPDUXrefNoMatch = (SELECT COUNT(*) FROM #ExtMatch WHERE SourceSystemCode = N'MPDU' AND MatchResult = N'NO_MATCH');
+    SET @MPDUXrefInserted = @@ROWCOUNT;
+    SET @MPDUXrefNoMatch = (
+        SELECT COUNT(*) FROM #ExtMatch
+        WHERE SourceSystemCode = N'MPDU' AND MatchResult = N'NO_MATCH'
+    );
 
     INSERT INTO dbo.UPROPERTYRECORDS_XREF (
         UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
@@ -2653,15 +2742,14 @@ BEGIN TRY
           WHERE x.UPropertyRecordsID = e.UPropertyRecordsID
             AND x.SourceSystemCode = N'MULTIFAMILY' AND x.IsActive = 1
       );
-    SET @MultifamilyXrefInserted = (SELECT COUNT(*) FROM #ExtMatch WHERE SourceSystemCode = N'MULTIFAMILY' AND MatchResult = N'MATCH');
-    SET @MultifamilyXrefNoMatch = (SELECT COUNT(*) FROM #ExtMatch WHERE SourceSystemCode = N'MULTIFAMILY' AND MatchResult = N'NO_MATCH');
+    SET @MultifamilyXrefInserted = @@ROWCOUNT;
+    SET @MultifamilyXrefNoMatch = (
+        SELECT COUNT(*) FROM #ExtMatch
+        WHERE SourceSystemCode = N'MULTIFAMILY' AND MatchResult = N'NO_MATCH'
+    );
 
-
-    SET @TotalXrefInserted = @MasterAddressXrefInserted + @SDATXrefInserted
-        + @EPropertyXrefInserted + @EPropertyXrefNoMatch
-        + @CaseXrefInserted + @CaseXrefNoMatch
-        + @MPDUXrefInserted + @MPDUXrefNoMatch
-        + @MultifamilyXrefInserted + @MultifamilyXrefNoMatch;
+    SET @TotalXrefInserted = @MasterAddressXrefInserted + @SDATXrefInserted + @ReviewXrefRejectedInserted
+        + @EPropertyXrefInserted + @CaseXrefInserted + @MPDUXrefInserted + @MultifamilyXrefInserted;
 
     SET @ReviewExternalInserted = 0;
     SET @ReviewInserted = @ReviewIncomingInserted;
@@ -2813,6 +2901,9 @@ BEGIN TRY
           AND CreatedDate < @Now
     );
 
+    SET @XrefTableCountAfter = (SELECT COUNT(*) FROM dbo.UPROPERTYRECORDS_XREF);
+    SET @XrefTotalInsertedThisRun = @XrefTableCountAfter - @XrefCountBefore;
+
     /* ========================================================================
        12. PRINT SUMMARY (vertical report — original specification)
        View in SSMS Messages tab, not Results tab.
@@ -2831,13 +2922,15 @@ BEGIN TRY
     PRINT N'UPR table count before load: ' + CONVERT(VARCHAR(20), @UprCountBefore);
     PRINT N'UPR table count after load: ' + CONVERT(VARCHAR(20), @UPRTableCountAfter);
     PRINT N'UPR rows written this run (total new): ' + CONVERT(VARCHAR(20), @UPRTotalInsertedThisRun);
-    PRINT N'UPR rows written this run - ACTIVE: ' + CONVERT(VARCHAR(20), @UPRActiveInserted);
-    PRINT N'UPR rows written this run - PENDING (Review anchors): ' + CONVERT(VARCHAR(20), @UPRPendingInserted);
+    PRINT N'UPR rows written this run - ACTIVE (live properties loaded): ' + CONVERT(VARCHAR(20), @UPRActiveInserted);
+    PRINT N'UPR rows written this run - PENDING (review parent placeholders): ' + CONVERT(VARCHAR(20), @UPRPendingInserted);
+    PRINT N'  (ACTIVE = valid properties in UPR; PENDING = temporary UPR rows created so Review_Q can link)';
     PRINT N'UPR existing rows updated this run: ' + CONVERT(VARCHAR(20), @UPRUpdated);
     IF (@UPRActiveInserted + @UPRPendingInserted) <> @UPRTotalInsertedThisRun
         PRINT N'WARNING: UPR ACTIVE + PENDING does not equal total new UPR rows this run.';
     PRINT N' ';
-    PRINT N'Review_Q staged (total candidates): ' + CONVERT(VARCHAR(20), @RowsSentToReview);
+    PRINT N'Review_Q staged (total staging rows): ' + CONVERT(VARCHAR(20), @RowsSentToReview);
+    PRINT N'Review_Q staged (unique source + reason): ' + CONVERT(VARCHAR(20), @RowsSentToReviewUnique);
     PRINT N'Review_Q - Missing ParcelID: ' + CONVERT(VARCHAR(20), @ReviewMissingParcel);
     PRINT N'Review_Q - Address or Account Not Match: ' + CONVERT(VARCHAR(20), @ReviewMismatch);
     PRINT N'Review_Q - incomplete (NO_ADDRESS_MATCH): ' + CONVERT(VARCHAR(20), @ReviewIncomplete);
@@ -2849,19 +2942,30 @@ BEGIN TRY
     IF (@ReviewMissingParcel + @ReviewMismatch + @ReviewIncomplete + @ReviewDuplicate) <> @ReviewQTableCountAfter
         PRINT N'WARNING: Review_Q reason breakdown does not sum to table count for this run.';
     IF @ReviewSkippedNoAnchor > 0
-        PRINT N'Review_Q skipped (no anchor): ' + CONVERT(VARCHAR(20), @ReviewSkippedNoAnchor);
+    BEGIN
+        PRINT N'Review_Q not written (no UPR parent record): ' + CONVERT(VARCHAR(20), @ReviewSkippedNoAnchor) + N' staging rows';
+        PRINT N'  unique source+reason not written: ' + CONVERT(VARCHAR(20), @ReviewSkippedUniqueSources);
+        PRINT N'  of which DUPLICATE staging rows: ' + CONVERT(VARCHAR(20), @ReviewSkippedDuplicate);
+        PRINT N'  (not lost from source files — extra duplicate copies that could not link to a UPR property row)';
+    END;
     PRINT N' ';
+    PRINT N'XREF table count before load: ' + CONVERT(VARCHAR(20), @XrefCountBefore);
+    PRINT N'XREF table count after load: ' + CONVERT(VARCHAR(20), @XrefTableCountAfter);
+    PRINT N'XREF rows inserted this run (table delta): ' + CONVERT(VARCHAR(20), @XrefTotalInsertedThisRun);
     PRINT N'MasterAddress XREF inserted: ' + CONVERT(VARCHAR(20), @MasterAddressXrefInserted);
     PRINT N'SDAT XREF inserted: ' + CONVERT(VARCHAR(20), @SDATXrefInserted);
-    PRINT N'eProperty XREF match: ' + CONVERT(VARCHAR(20), @EPropertyXrefInserted);
-    PRINT N'eProperty XREF no match: ' + CONVERT(VARCHAR(20), @EPropertyXrefNoMatch);
-    PRINT N'CASE XREF match: ' + CONVERT(VARCHAR(20), @CaseXrefInserted);
-    PRINT N'CASE XREF no match: ' + CONVERT(VARCHAR(20), @CaseXrefNoMatch);
-    PRINT N'MPDU XREF match: ' + CONVERT(VARCHAR(20), @MPDUXrefInserted);
-    PRINT N'MPDU XREF no match: ' + CONVERT(VARCHAR(20), @MPDUXrefNoMatch);
-    PRINT N'MULTIFAMILY XREF match: ' + CONVERT(VARCHAR(20), @MultifamilyXrefInserted);
-    PRINT N'MULTIFAMILY XREF no match: ' + CONVERT(VARCHAR(20), @MultifamilyXrefNoMatch);
-    PRINT N'Total XREF inserted: ' + CONVERT(VARCHAR(20), @TotalXrefInserted);
+    PRINT N'Review rejected XREF inserted: ' + CONVERT(VARCHAR(20), @ReviewXrefRejectedInserted);
+    PRINT N'eProperty XREF inserted: ' + CONVERT(VARCHAR(20), @EPropertyXrefInserted);
+    PRINT N'eProperty XREF staged no-match (not inserted if row exists): ' + CONVERT(VARCHAR(20), @EPropertyXrefNoMatch);
+    PRINT N'CASE XREF inserted: ' + CONVERT(VARCHAR(20), @CaseXrefInserted);
+    PRINT N'CASE XREF staged no-match (not inserted if row exists): ' + CONVERT(VARCHAR(20), @CaseXrefNoMatch);
+    PRINT N'MPDU XREF inserted: ' + CONVERT(VARCHAR(20), @MPDUXrefInserted);
+    PRINT N'MPDU XREF staged no-match (not inserted if row exists): ' + CONVERT(VARCHAR(20), @MPDUXrefNoMatch);
+    PRINT N'MULTIFAMILY XREF inserted: ' + CONVERT(VARCHAR(20), @MultifamilyXrefInserted);
+    PRINT N'MULTIFAMILY XREF staged no-match (not inserted if row exists): ' + CONVERT(VARCHAR(20), @MultifamilyXrefNoMatch);
+    PRINT N'Total XREF inserted (sum of inserts above): ' + CONVERT(VARCHAR(20), @TotalXrefInserted);
+    IF @TotalXrefInserted <> @XrefTotalInsertedThisRun
+        PRINT N'WARNING: XREF insert sum does not match XREF table delta (re-run may skip existing rows).';
     PRINT N' ';
     PRINT N'Review_Q total (same as inserted): ' + CONVERT(VARCHAR(20), @ReviewInserted);
     PRINT N'Status history inserted: ' + CONVERT(VARCHAR(20), @StatusHistoryInserted);
