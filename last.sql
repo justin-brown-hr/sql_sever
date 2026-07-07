@@ -1635,14 +1635,26 @@ BEGIN TRY
     ) ranked
     WHERE ranked.DedupeRn = 1;
 
-    DROP TABLE #CreateReview;
-    SELECT *
-    INTO #CreateReview
-    FROM #CreateReviewDeduped;
-    DROP TABLE #CreateReviewDeduped;
+    DELETE FROM #CreateReview;
 
-    CREATE NONCLUSTERED INDEX IX_CreateReview_Src
-        ON #CreateReview(MasterAddressID, KdatRecordID);
+    INSERT INTO #CreateReview (
+        IncomingSourceSystem,
+        MA_Account, MA_NormalizedIncomingAddress, MA_ParcelID,
+        SDAT_AccountNumber, SDAT_NormalizedIncomingAddress, SDAT_ParcelID,
+        ReasonForNoMatch, ReviewStatus,
+        MasterAddressID, KdatRecordID, ReviewDetail,
+        StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber
+    )
+    SELECT
+        IncomingSourceSystem,
+        MA_Account, MA_NormalizedIncomingAddress, MA_ParcelID,
+        SDAT_AccountNumber, SDAT_NormalizedIncomingAddress, SDAT_ParcelID,
+        ReasonForNoMatch, ReviewStatus,
+        MasterAddressID, KdatRecordID, ReviewDetail,
+        StreetNumber, StreetName, StreetType, ZipCode, EffectiveSDATAccountNumber
+    FROM #CreateReviewDeduped;
+
+    DROP TABLE #CreateReviewDeduped;
 
     DELETE FROM #UprMergeSrc;
 
