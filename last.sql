@@ -1996,8 +1996,8 @@ BEGIN TRY
         SELECT COUNT(*)
         FROM (
             SELECT DISTINCT
-                ISNULL(rp.MasterAddressID, -1),
-                ISNULL(rp.KdatRecordID, -1),
+                ISNULL(rp.MasterAddressID, -1) AS MasterAddressID,
+                ISNULL(rp.KdatRecordID, -1) AS KdatRecordID,
                 rp.ReasonForNoMatch
             FROM #CreateReview rp
         ) u

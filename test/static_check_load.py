@@ -84,6 +84,7 @@ check("Review_Q mismatch uses BOTH incoming source", "N'BOTH'" in main_batch and
 check("CreateReview deduped without SELECT INTO recreate",
       "TRUNCATE TABLE #CreateReview" in main_batch
       and not re.search(r"SELECT\s+\*?\s*INTO\s+#CreateReview\b", main_batch, re.I))
+check("Review_Q unique count subquery has column aliases", "AS MasterAddressID" in main_batch and "AS KdatRecordID" in main_batch)
 check("XREF summary uses table before/after delta", "@XrefCountBefore" in main_batch and "@XrefTotalInsertedThisRun" in main_batch)
 check("Review rejected XREF counted in summary", "@ReviewXrefRejectedInserted" in main_batch)
 check("Summary UPR rows written matches client expectation", "UPR rows written this run" in main_batch and "PENDING status" not in main_batch)
