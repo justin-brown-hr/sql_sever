@@ -1635,7 +1635,7 @@ BEGIN TRY
     ) ranked
     WHERE ranked.DedupeRn = 1;
 
-    DELETE FROM #CreateReview;
+    TRUNCATE TABLE #CreateReview;
 
     INSERT INTO #CreateReview (
         IncomingSourceSystem,
