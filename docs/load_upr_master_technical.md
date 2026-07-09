@@ -251,7 +251,7 @@ Before MERGE, enforces UPR unique constraints:
 
 `#UprMergeWinners` then picks the **best surviving candidate** per account+address partition — preferring rows **not** in `#UprMergeLosers`, then BOTH > KDAT > MA, parcel, owner, `PropertyRn`. This promotes a valid duplicate when the first-ranked row lost the UQ guard.
 
-`#UprMergeSrc` is **rebuilt** from `FinalWinnerRn = 1` only.
+`#UprMergeFinal` collapses addr-winners to one row per account, address, and parcel (when present). `#UprMergeSrc` is **rebuilt** from rows passing all three winner ranks.
 
 Remaining eligible rows in `#UprMergeRanked` that are not in `#UprMergeSrc` → `#CreateReview` as `DUPLICATE` (exact source key match only).
 
