@@ -217,9 +217,8 @@ Rows are added from multiple paths (priority matters):
 
 1. **`#MaSdMismatch`** → `ReasonForNoMatch = 'Address or Account Not Match'`, `IncomingSourceSystem = 'BOTH'`
 2. **Ineligible `#UprCandidate`** (`IsEligibleForUpr = 0`) → `Missing ParcelID` or `NO_ADDRESS_MATCH`
-3. **`#UprMergeRanked` losers** (`PropertyRn > 1`) → `DUPLICATE` — same account+address as another eligible row; winner stays in UPR path
-4. **MERGE safety failures** → `NO_ADDRESS_MATCH`
-5. **`#UprMergeLosers`** (unique key collisions) → `DUPLICATE`
+3. **MERGE safety failures** → `NO_ADDRESS_MATCH`
+4. **Eligible duplicates that did not win UPR** (after UQ guard + winner promotion) → `DUPLICATE`
 
 `@UprCountBefore` captured here (UPR table count before MERGE).
 
@@ -230,14 +229,13 @@ From eligible candidates (`IsEligibleForUpr = 1`):
 ```sql
 ROW_NUMBER() OVER (
   PARTITION BY EffectiveSDATAccountNumber, NormalizedFullAddress
-  ORDER BY BOTH > KDAT > ADDRESS_MASTER, then IDs
+  ORDER BY BOTH > KDAT > ADDRESS_MASTER, parcel present, owner present, then IDs
 ) AS PropertyRn
 ```
 
-- `PropertyRn = 1` → `#UprMergeSrc` (UPR winners)
-- `PropertyRn > 1` → `#CreateReview` as DUPLICATE
+**All** eligible rows enter `#UprMergeSrc` (with `PropertyRn` for ranking). The final UPR winner per account+address is chosen **after** the UQ guard, not by `PropertyRn = 1` alone.
 
-### 5.3 — Duplicate-key guard (`#UprMergeScored` / `#UprMergeLosers`)
+### 5.3 — Duplicate-key guard (`#UprMergeScored` / `#UprMergeLosers` / `#UprMergeWinners`)
 
 Before MERGE, enforces UPR unique constraints:
 
@@ -249,9 +247,13 @@ Before MERGE, enforces UPR unique constraints:
 | Existing UPR address conflict | Join `#ExistingUprKeys` on address, different account |
 | Existing UPR parcel conflict | Join `#ExistingUprKeys` on parcel, different account |
 
-Losers → `#CreateReview` DUPLICATE. Winners remain in `#UprMergeSrc`.
+`#UprMergeLosers` flags rows that would violate a UQ constraint.
 
-`#UprMergeSrc` is then **rebuilt** from scored winners minus losers.
+`#UprMergeWinners` then picks the **best surviving candidate** per account+address partition — preferring rows **not** in `#UprMergeLosers`, then BOTH > KDAT > MA, parcel, owner, `PropertyRn`. This promotes a valid duplicate when the first-ranked row lost the UQ guard.
+
+`#UprMergeSrc` is **rebuilt** from `FinalWinnerRn = 1` only.
+
+Remaining eligible rows in `#UprMergeRanked` that are not in `#UprMergeSrc` → `#CreateReview` as `DUPLICATE` (exact source key match only).
 
 ### 5.4 — `#CreateReview` deduplication
 
@@ -314,10 +316,10 @@ For each row in `#UPRMap` with a source ID:
 
 ### Optional rejected XREF (duplicate losers only)
 
-For `DUPLICATE` rows where an ACTIVE UPR winner exists:
+For `DUPLICATE` rows where an ACTIVE UPR winner exists (from `#UprMergeSrc` for the same account+address):
 
 - Insert `UPROPERTYRECORDS_XREF` with `MatchResult = 'REJECTED'`
-- Link to winning UPR property
+- Link to the promoted winning UPR property
 
 ### Review_Q insert
 
