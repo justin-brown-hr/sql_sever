@@ -18,6 +18,7 @@ SQL/
 ├── scripts/
 │   ├── load_upr_master.sql        # Main deliverable - single load script
 │   ├── search_upr_master.sql      # UPR search script
+│   └── diagnose_duplicate_reviewq.sql  # Find DUPLICATE Review_Q rows missing UPR
 │   └── run_all.sh                 # Full pipeline runner
 ├── test/
 │   ├── seed_reference_data.sql    # Reference/lookup seed data
