@@ -23,7 +23,9 @@ SQL/
 │   ├── seed_reference_data.sql    # Reference/lookup seed data
 │   ├── seed_test_incoming.sql     # ~100 test rows per incoming table
 │   └── run_test_and_results.sql   # Test results with PASS/FAIL checks
-└── docs/                          # Client specification files (reference)
+└── docs/                          # Client specification + technical docs
+    ├── load_upr_master_technical.md
+    └── UPR_Master_Load_Technical_Description.docx
 ```
 
 ## Run Steps
@@ -73,6 +75,15 @@ Edit search parameters at the top of `scripts/search_upr_master.sql`, then:
 ```bash
 sqlcmd -S localhost -E -i scripts/search_upr_master.sql
 ```
+
+Edit `USE` database name and search parameters at the top of the script before running.
+
+## Technical Documentation
+
+Full section-by-section load script walkthrough for production programmers:
+
+- **Word:** [docs/UPR_Master_Load_Technical_Description.docx](docs/UPR_Master_Load_Technical_Description.docx)
+- **Markdown:** [docs/load_upr_master_technical.md](docs/load_upr_master_technical.md)
 
 ## Assumptions
 
@@ -142,3 +153,7 @@ The generated test data (100 `AddressMaster`, 102 `SDAT`) covers:
 - Statistics printed at end of load
 - Audit log written for all processing
 - Review queue for unmatched/insufficient records
+
+
+
+

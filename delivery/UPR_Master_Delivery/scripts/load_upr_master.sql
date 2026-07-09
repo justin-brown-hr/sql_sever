@@ -2248,9 +2248,9 @@ BEGIN TRY
           AND q.ReasonForNoMatch = rq.ReasonForNoMatch
     );
 
-    DROP TABLE #ReviewQReady;
-
     SET @ReviewIncomingInserted = @@ROWCOUNT;
+
+    DROP TABLE #ReviewQReady;
 
     PRINT N'Step 6c - Review_Q rows inserted: ' + CONVERT(NVARCHAR(20), @ReviewIncomingInserted);
     SET @ReviewMissingParcel = (
