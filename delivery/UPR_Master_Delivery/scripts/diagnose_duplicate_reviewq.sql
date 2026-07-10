@@ -101,34 +101,42 @@ SELECT
     upr.UPropertyRecordsID,
     upr.ParcelID AS UprParcelID,
     IssueFlag = CASE
-        WHEN upr.UPropertyRecordsID IS NULL AND g.FullyValidRows >= 1
-            THEN N'LIKELY MIS-ROUTED — valid duplicate with no UPR'
+        WHEN upr.UPropertyRecordsID IS NOT NULL
+            THEN N'OK — UPR exists for this account (one row per property key)'
+        WHEN g.DupRowCount > 1 AND g.FullyValidRows >= 1
+            THEN N'CHECK — duplicate group has no UPR; only ONE row should win UPR, rest Review_Q'
         WHEN upr.UPropertyRecordsID IS NULL
             THEN N'NO UPR — review duplicates'
-        ELSE N'OK — UPR exists for this account+address'
+        ELSE N'OK'
     END
 FROM DupGroups g
 LEFT JOIN dbo.UPROPERTYRECORDS upr
     ON upr.SDATAccountNumber = g.EffectiveAccount
    AND upr.PropertyStatusCode = N'ACTIVE'
-   AND (
-        upr.NormalizedFullAddress = g.EffectiveAddress
-        OR upr.NormalizedStreetAddress = g.EffectiveAddress
-       )
 ORDER BY
     CASE WHEN upr.UPropertyRecordsID IS NULL AND g.FullyValidRows >= 1 THEN 0 ELSE 1 END,
     g.EffectiveAccount,
     g.EffectiveAddress;
 
 /* --------------------------------------------------------------------------
-   2. Row-level detail for mis-routed groups only
+   2. Row-level detail for duplicate groups with no UPR on account
    -------------------------------------------------------------------------- */
 PRINT N'';
 PRINT N'--- 2. Row detail — DUPLICATE groups with valid row(s) but no UPR ---';
 
 ;WITH ReviewNorm AS (
     SELECT
-        q.*,
+        q.UPRMatchReviewID,
+        q.IncomingSourceSystem,
+        q.MA_Account,
+        q.MA_NormalizedIncomingAddress,
+        q.MA_ParcelID,
+        q.SDAT_AccountNumber,
+        q.SDAT_NormalizedIncomingAddress,
+        q.SDAT_ParcelID,
+        q.ReasonForNoMatch,
+        q.ReviewStatus,
+        q.ProcessingTimestamp,
         EffectiveAccount = CASE
             WHEN OBJECT_ID(N'dbo.fn_UPR_NormalizeSDATAccount', N'FN') IS NOT NULL
                 THEN dbo.fn_UPR_NormalizeSDATAccount(
@@ -148,7 +156,23 @@ PRINT N'--- 2. Row detail — DUPLICATE groups with valid row(s) but no UPR ---'
                     q.MA_NormalizedIncomingAddress
                 ))), N'') IS NOT NULL
             THEN 1 ELSE 0
-        END
+        END,
+        GroupWinRn = ROW_NUMBER() OVER (
+            PARTITION BY
+                CASE
+                    WHEN OBJECT_ID(N'dbo.fn_UPR_NormalizeSDATAccount', N'FN') IS NOT NULL
+                        THEN dbo.fn_UPR_NormalizeSDATAccount(
+                            NULLIF(LTRIM(RTRIM(COALESCE(q.SDAT_AccountNumber, q.MA_Account))), N''))
+                    ELSE NULLIF(LTRIM(RTRIM(COALESCE(q.SDAT_AccountNumber, q.MA_Account))), N'')
+                END,
+                LEFT(NULLIF(LTRIM(RTRIM(COALESCE(
+                    NULLIF(q.SDAT_NormalizedIncomingAddress, N''),
+                    q.MA_NormalizedIncomingAddress
+                ))), N''), 300)
+            ORDER BY
+                CASE q.IncomingSourceSystem WHEN N'BOTH' THEN 1 WHEN N'KDAT' THEN 2 ELSE 3 END,
+                q.UPRMatchReviewID
+        )
     FROM dbo.UPRMATCHREVIEW_Q q
     WHERE q.ReasonForNoMatch = N'DUPLICATE'
 ),
@@ -165,10 +189,6 @@ MisGroups AS (
             FROM dbo.UPROPERTYRECORDS upr
             WHERE upr.SDATAccountNumber = r.EffectiveAccount
               AND upr.PropertyStatusCode = N'ACTIVE'
-              AND (
-                    upr.NormalizedFullAddress = r.EffectiveAddress
-                    OR upr.NormalizedStreetAddress = r.EffectiveAddress
-                  )
        )
 )
 SELECT
@@ -184,8 +204,11 @@ SELECT
     r.EffectiveParcel,
     r.IsFullyValid,
     RecommendedAction = CASE
-        WHEN r.IsFullyValid = 1 THEN N'SHOULD BE UPR WINNER after script fix + re-run'
-        ELSE N'Stays Review_Q DUPLICATE (loser)'
+        WHEN r.IsFullyValid = 1 AND r.GroupWinRn = 1
+            THEN N'Expected UPR WINNER for this account+address (verify in UPROPERTYRECORDS)'
+        WHEN r.IsFullyValid = 1
+            THEN N'Expected Review_Q DUPLICATE loser (same account+address as winner)'
+        ELSE N'Stays Review_Q DUPLICATE (loser or invalid)'
     END,
     r.ReviewStatus,
     r.ProcessingTimestamp
@@ -252,16 +275,6 @@ DECLARE @MisRoutedGroups INT = (
                 END
                 AND upr.PropertyStatusCode = N'ACTIVE'
            )
-    ) x
-);
-
-PRINT N'Total Review_Q DUPLICATE rows: ' + CONVERT(NVARCHAR(20), @DupTotal);
-PRINT N'Mis-routed duplicate groups (valid row, no UPR): ' + CONVERT(NVARCHAR(20), @MisRoutedGroups);
-
-IF @MisRoutedGroups > 0
-    PRINT N'';
-    PRINT N'>>> Action: re-run load with updated load_upr_master.sql on a test copy.';
-    PRINT N'>>> Section 2 lists account+address — fully valid row should move to UPR.';
 ELSE
     PRINT N'';
     PRINT N'No mis-routed duplicate groups detected (or UPR already exists for those keys).';
