@@ -1529,6 +1529,7 @@ BEGIN TRY
         s.EffectiveLongitude,
         s.EffectiveOwnerName,
         s.EffectivePropertyType,
+        s.PropertyRn,
         ROW_NUMBER() OVER (
             PARTITION BY
                 s.EffectiveSDATAccountNumber,
@@ -1550,69 +1551,102 @@ BEGIN TRY
 
     DELETE FROM #UprMergeSrc;
 
-    /* UPR allows one row per account, address, and parcel — collapse addr-winners across keys */
-    IF OBJECT_ID('tempdb..#UprMergeFinal') IS NOT NULL DROP TABLE #UprMergeFinal;
+    /* UPR unique keys — cascade pick (account, then address, then parcel) so a promoted
+       duplicate is not excluded because a sibling row lost on parcel in the same group */
+    IF OBJECT_ID('tempdb..#UprMergeAddrWin') IS NOT NULL DROP TABLE #UprMergeAddrWin;
 
     SELECT
-        a.MasterAddressID,
-        a.KdatRecordID,
-        a.MatchSource,
-        a.HasRequiredAddress,
-        a.SDATAccountNumber,
-        a.ParcelID,
-        a.OwnerName,
-        a.EffectiveSDATAccountNumber,
-        a.EffectiveParcelID,
-        a.EffectiveStreetNumber,
-        a.EffectiveStreetName,
-        a.EffectiveStreetType,
-        a.EffectiveCity,
-        a.EffectiveState,
-        a.EffectiveZipCode,
-        a.EffectiveNormalizedStreetAddress,
-        a.EffectiveNormalizedFullAddress,
-        a.EffectiveLatitude,
-        a.EffectiveLongitude,
-        a.EffectiveOwnerName,
-        a.EffectivePropertyType,
+        w.MasterAddressID,
+        w.KdatRecordID,
+        w.MatchSource,
+        w.HasRequiredAddress,
+        w.SDATAccountNumber,
+        w.ParcelID,
+        w.OwnerName,
+        w.EffectiveSDATAccountNumber,
+        w.EffectiveParcelID,
+        w.EffectiveStreetNumber,
+        w.EffectiveStreetName,
+        w.EffectiveStreetType,
+        w.EffectiveCity,
+        w.EffectiveState,
+        w.EffectiveZipCode,
+        w.EffectiveNormalizedStreetAddress,
+        w.EffectiveNormalizedFullAddress,
+        w.EffectiveLatitude,
+        w.EffectiveLongitude,
+        w.EffectiveOwnerName,
+        w.EffectivePropertyType,
+        w.PropertyRn,
+        IsUqLoser = CASE WHEN al.MasterAddressID IS NOT NULL OR al.KdatRecordID IS NOT NULL THEN 1 ELSE 0 END
+    INTO #UprMergeAddrWin
+    FROM #UprMergeWinners w
+    LEFT JOIN #UprMergeLosers al
+        ON ISNULL(al.MasterAddressID, -1) = ISNULL(w.MasterAddressID, -1)
+       AND ISNULL(al.KdatRecordID, -1) = ISNULL(w.KdatRecordID, -1)
+    WHERE w.FinalWinnerRn = 1;
+
+    DROP TABLE #UprMergeWinners;
+
+    IF OBJECT_ID('tempdb..#UprMergeAcctWin') IS NOT NULL DROP TABLE #UprMergeAcctWin;
+
+    SELECT
+        a.*,
         ROW_NUMBER() OVER (
             PARTITION BY a.EffectiveSDATAccountNumber
             ORDER BY
-                CASE WHEN al.MasterAddressID IS NOT NULL OR al.KdatRecordID IS NOT NULL THEN 1 ELSE 0 END,
+                a.IsUqLoser,
                 CASE a.MatchSource WHEN N'BOTH' THEN 1 WHEN N'KDAT' THEN 2 ELSE 3 END,
                 CASE WHEN NULLIF(LTRIM(RTRIM(a.EffectiveParcelID)), N'') IS NOT NULL THEN 0 ELSE 1 END,
                 CASE WHEN NULLIF(LTRIM(RTRIM(a.EffectiveOwnerName)), N'') IS NOT NULL THEN 0 ELSE 1 END,
+                a.PropertyRn,
                 a.MasterAddressID,
                 a.KdatRecordID
-        ) AS AccountWinRn,
+        ) AS AccountPickRn
+    INTO #UprMergeAcctWin
+    FROM #UprMergeAddrWin a;
+
+    IF OBJECT_ID('tempdb..#UprMergeAddrKeyWin') IS NOT NULL DROP TABLE #UprMergeAddrKeyWin;
+
+    SELECT
+        a.*,
         ROW_NUMBER() OVER (
             PARTITION BY a.EffectiveStreetNumber, a.EffectiveStreetName, a.EffectiveStreetType, a.EffectiveZipCode
             ORDER BY
-                CASE WHEN al.MasterAddressID IS NOT NULL OR al.KdatRecordID IS NOT NULL THEN 1 ELSE 0 END,
+                a.IsUqLoser,
                 CASE a.MatchSource WHEN N'BOTH' THEN 1 WHEN N'KDAT' THEN 2 ELSE 3 END,
                 CASE WHEN NULLIF(LTRIM(RTRIM(a.EffectiveParcelID)), N'') IS NOT NULL THEN 0 ELSE 1 END,
-                CASE WHEN NULLIF(LTRIM(RTRIM(a.EffectiveOwnerName)), N'') IS NOT NULL THEN 0 ELSE 1 END,
                 a.EffectiveSDATAccountNumber,
+                a.PropertyRn,
                 a.MasterAddressID,
                 a.KdatRecordID
-        ) AS AddressWinRn,
+        ) AS AddressPickRn
+    INTO #UprMergeAddrKeyWin
+    FROM #UprMergeAcctWin a
+    WHERE a.AccountPickRn = 1;
+
+    DROP TABLE #UprMergeAcctWin;
+
+    IF OBJECT_ID('tempdb..#UprMergeParcelWin') IS NOT NULL DROP TABLE #UprMergeParcelWin;
+
+    SELECT
+        a.*,
         ROW_NUMBER() OVER (
             PARTITION BY a.EffectiveParcelID
             ORDER BY
-                CASE WHEN al.MasterAddressID IS NOT NULL OR al.KdatRecordID IS NOT NULL THEN 1 ELSE 0 END,
+                a.IsUqLoser,
                 CASE a.MatchSource WHEN N'BOTH' THEN 1 WHEN N'KDAT' THEN 2 ELSE 3 END,
                 a.EffectiveSDATAccountNumber,
+                a.PropertyRn,
                 a.MasterAddressID,
                 a.KdatRecordID
-        ) AS ParcelWinRn
-    INTO #UprMergeFinal
-    FROM #UprMergeWinners a
-    LEFT JOIN #UprMergeLosers al
-        ON ISNULL(al.MasterAddressID, -1) = ISNULL(a.MasterAddressID, -1)
-       AND ISNULL(al.KdatRecordID, -1) = ISNULL(a.KdatRecordID, -1)
-    WHERE a.FinalWinnerRn = 1;
+        ) AS ParcelPickRn
+    INTO #UprMergeParcelWin
+    FROM #UprMergeAddrKeyWin a
+    WHERE a.AddressPickRn = 1;
 
-    DROP TABLE #UprMergeWinners;
+    DROP TABLE #UprMergeAddrKeyWin;
+    DROP TABLE #UprMergeAddrWin;
 
     INSERT INTO #UprMergeSrc (
         MasterAddressID, KdatRecordID, MatchSource, HasRequiredAddress,
@@ -1631,12 +1665,11 @@ BEGIN TRY
         f.EffectiveCity, f.EffectiveState, f.EffectiveZipCode,
         f.EffectiveNormalizedStreetAddress, f.EffectiveNormalizedFullAddress,
         f.EffectiveLatitude, f.EffectiveLongitude, f.EffectiveOwnerName, f.EffectivePropertyType
-    FROM #UprMergeFinal f
-    WHERE f.AccountWinRn = 1
-      AND f.AddressWinRn = 1
-      AND (NULLIF(f.EffectiveParcelID, N'') IS NULL OR f.ParcelWinRn = 1);
+    FROM #UprMergeParcelWin f
+    WHERE NULLIF(f.EffectiveParcelID, N'') IS NULL
+       OR f.ParcelPickRn = 1;
 
-    DROP TABLE #UprMergeFinal;
+    DROP TABLE #UprMergeParcelWin;
 
     /* Eligible duplicates that did not win UPR → Review_Q DUPLICATE (exact source key only) */
     INSERT INTO #CreateReview (
@@ -2708,6 +2741,7 @@ BEGIN TRY
        ======================================================================== */
     PRINT N'============================================================';
     PRINT N' UPR LOAD SUMMARY';
+    PRINT N' Script build: 2026-07-09 duplicate-cascade-fix';
     PRINT N'============================================================';
     PRINT N'Batch Start Time: ' + CONVERT(VARCHAR(30), @BatchStartTime, 120);
     PRINT N'Batch End Time: ' + CONVERT(VARCHAR(30), @BatchEndTime, 120);

@@ -249,9 +249,16 @@ Before MERGE, enforces UPR unique constraints:
 
 `#UprMergeLosers` flags rows that would violate a UQ constraint.
 
-`#UprMergeWinners` then picks the **best surviving candidate** per account+address partition — preferring rows **not** in `#UprMergeLosers`, then BOTH > KDAT > MA, parcel, owner, `PropertyRn`. This promotes a valid duplicate when the first-ranked row lost the UQ guard.
+`#UprMergeWinners` picks the **best surviving candidate** per account+address partition — preferring rows **not** in `#UprMergeLosers`, then BOTH > KDAT > MA, parcel, owner, `PropertyRn`. This promotes a valid duplicate when the first-ranked row lost the UQ guard.
 
-`#UprMergeFinal` collapses addr-winners to one row per account, address, and parcel (when present). `#UprMergeSrc` is **rebuilt** from rows passing all three winner ranks.
+**Cascade pick** (replaces parallel row-number AND filter):
+
+1. `#UprMergeAddrWin` — account+address winners (`FinalWinnerRn = 1`)
+2. `#UprMergeAcctWin` — one row per `EffectiveSDATAccountNumber`
+3. `#UprMergeAddrKeyWin` — one row per physical address key
+4. `#UprMergeParcelWin` — one row per `EffectiveParcelID` (when present)
+
+`#UprMergeSrc` is rebuilt from the cascade survivors. This avoids excluding a promoted duplicate because a sibling row in the same duplicate group lost on parcel rank.
 
 Remaining eligible rows in `#UprMergeRanked` that are not in `#UprMergeSrc` → `#CreateReview` as `DUPLICATE` (exact source key match only).
 
