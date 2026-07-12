@@ -30,7 +30,16 @@ flowchart TD
     XREF --> Audit
 ```
 
-**Core rule:** Every incoming source row gets **one disposition** — either **UPR** (fully valid) or **Review_Q** (anything else). No placeholder/PENDING rows in UPR.
+**Core rule:** Every incoming source row gets **one disposition** — either **UPR** (fully valid unique property) or **Review_Q**. No placeholder/PENDING rows in UPR.
+
+**Migration order (client-required):**
+
+1. Combine MA + SDAT → `#IncomingUnified`
+2. Dedupe to `#IncomingUnique` (one row per account + normalized address); extras → Review_Q `DUPLICATE`
+3. From `#IncomingUnique`: valid → UPR; invalid → Review_Q
+4. External systems match UPR by address only → XREF
+
+Placeholder ParcelIDs (`0`, `0000`, all-zeros) are treated as missing (not real parcels).
 
 ---
 

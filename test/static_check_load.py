@@ -96,6 +96,10 @@ check("No MA-only SDAT enrichment via account-only join in step 4b",
       "not in account/address mismatch review" in main_batch)
 check("#UprMergeSrc rebuilt from guard pass",
       "INSERT INTO #UprMergeSrc" in main_batch and "#UprMergeScored" in main_batch)
+check("Migration #IncomingUnique (dedupe before UPR)",
+      "#IncomingUnique" in main_batch and "IncomingDupRn" in main_batch)
+check("Placeholder ParcelID normalized",
+      "fn_UPR_NormalizeParcelID" in text and "fn_UPR_IsValidParcelID" in text)
 
 # MERGE blocks have WHEN NOT MATCHED
 merge_count = len(re.findall(r"\bMERGE\s+dbo\.", main_batch, re.I))
