@@ -1327,7 +1327,11 @@ BEGIN TRY
     INNER JOIN #MA ma ON ma.MasterAddressID = mm.MasterAddressID
     INNER JOIN #SDAT sd ON sd.KdatRecordID = mm.KdatRecordID;
 
-    /* MIGRATION STEP 1b — duplicate source rows removed from #IncomingUnique → Review_Q first */
+    /* MIGRATION STEP 1b — extra source rows (IncomingDupRn > 1) → Review_Q
+       DUPLICATE = extra copies of the same account+address (e.g. 204 MA rows).
+       Do NOT label a MA+SDAT matched BOTH row as DUPLICATE when it has no parcel —
+       that is Missing ParcelID (the matched property is valid except parcel).
+       BOTH extras with no parcel are skipped if Missing ParcelID will cover the key. */
     INSERT INTO #CreateReview (
         IncomingSourceSystem,
         MA_Account, MA_NormalizedIncomingAddress, MA_ParcelID,
@@ -1360,7 +1364,7 @@ BEGIN TRY
         N'PENDING_REVIEW',
         u.MasterAddressID,
         u.KdatRecordID,
-        N'Extra incoming source row — removed before UPR (duplicate account+normalized address)',
+        N'Extra incoming source row — duplicate account+normalized address (primary kept in #IncomingUnique)',
         u.StreetNumber,
         u.StreetName,
         u.StreetType,
@@ -1370,6 +1374,11 @@ BEGIN TRY
     LEFT JOIN #MA ma ON ma.MasterAddressID = u.MasterAddressID
     LEFT JOIN #SDAT sd ON sd.KdatRecordID = u.KdatRecordID
     WHERE u.IncomingDupRn > 1
+      /* BOTH + no parcel: not a "duplicate property" — keeper is Missing ParcelID */
+      AND NOT (
+            u.MatchSource = N'BOTH'
+        AND dbo.fn_UPR_IsValidParcelID(u.ParcelID) = 0
+      )
       AND NOT EXISTS (
           SELECT 1 FROM #CreateReview rp
           WHERE ISNULL(rp.MasterAddressID, -1) = ISNULL(u.MasterAddressID, -1)
@@ -1377,7 +1386,8 @@ BEGIN TRY
       );
 
     PRINT N'Step 5a - duplicate source rows staged to Review_Q: '
-        + CONVERT(NVARCHAR(20), @IncomingDupExtraRows);
+        + CONVERT(NVARCHAR(20), @@ROWCOUNT)
+        + N' (of ' + CONVERT(NVARCHAR(20), @IncomingDupExtraRows) + N' extras; BOTH+no-parcel extras omitted)';
 
     /* CreateReview — invalid identification / missing ParcelID (from #IncomingUnique only) */
     INSERT INTO #CreateReview (
@@ -1458,6 +1468,21 @@ BEGIN TRY
           WHERE ISNULL(rp.MasterAddressID, -1) = ISNULL(w.MasterAddressID, -1)
             AND ISNULL(rp.KdatRecordID, -1) = ISNULL(w.KdatRecordID, -1)
       );
+
+    /* Safety: primary unique row (esp. MA+SDAT BOTH) with no parcel must be Missing ParcelID —
+       never DUPLICATE (DUPLICATE is only for extra source copies like C000369 x204) */
+    UPDATE rp
+    SET ReasonForNoMatch = N'Missing ParcelID',
+        ReviewDetail = N'Missing or placeholder ParcelID (MA+SDAT / unique property — not a duplicate)'
+    FROM #CreateReview rp
+    INNER JOIN #IncomingUnique u
+        ON ISNULL(u.MasterAddressID, -1) = ISNULL(rp.MasterAddressID, -1)
+       AND ISNULL(u.KdatRecordID, -1) = ISNULL(rp.KdatRecordID, -1)
+    INNER JOIN #UprCandidate c
+        ON ISNULL(c.MasterAddressID, -1) = ISNULL(u.MasterAddressID, -1)
+       AND ISNULL(c.KdatRecordID, -1) = ISNULL(u.KdatRecordID, -1)
+    WHERE rp.ReasonForNoMatch = N'DUPLICATE'
+      AND c.NeedsNoParcelReview = 1;
 
     SET @UprCountBefore = (SELECT COUNT(*) FROM dbo.UPROPERTYRECORDS);
 
@@ -2754,7 +2779,7 @@ BEGIN TRY
        ======================================================================== */
     PRINT N'============================================================';
     PRINT N' UPR LOAD SUMMARY';
-    PRINT N' Script build: 2026-07-12 migration-dedupe-first';
+    PRINT N' Script build: 2026-07-13 both-missing-parcel-not-duplicate';
     PRINT N'============================================================';
     PRINT N'Batch Start Time: ' + CONVERT(VARCHAR(30), @BatchStartTime, 120);
     PRINT N'Batch End Time: ' + CONVERT(VARCHAR(30), @BatchEndTime, 120);
