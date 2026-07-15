@@ -100,6 +100,16 @@ check("Migration #IncomingUnique (dedupe before UPR)",
       "#IncomingUnique" in main_batch and "IncomingDupRn" in main_batch)
 check("Placeholder ParcelID normalized",
       "fn_UPR_NormalizeParcelID" in text and "fn_UPR_IsValidParcelID" in text)
+check("Multi-unit property flag / Unit load",
+      "IsMultiUnitProperty" in main_batch
+      and "multi-unit extras→Unit" in main_batch
+      and "PropertyTypeCode IN (N'CONDO', N'MULTI', N'APT')" in main_batch)
+check("Mismatch reconcile helpers",
+      "fn_UPR_IsPreferredAccount" in text
+      and "fn_UPR_AddressQualityScore" in text
+      and "MismatchReconciled" in main_batch)
+check("Multi-unit extras excluded from DUPLICATE",
+      "u.IsMultiUnitProperty = 0" in main_batch)
 
 # MERGE blocks have WHEN NOT MATCHED
 merge_count = len(re.findall(r"\bMERGE\s+dbo\.", main_batch, re.I))
