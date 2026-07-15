@@ -110,6 +110,11 @@ check("Mismatch reconcile helpers",
       and "MismatchReconciled" in main_batch)
 check("Multi-unit extras excluded from DUPLICATE",
       "u.IsMultiUnitProperty = 0" in main_batch)
+check("Multi-unit UQ losers attach as Unit",
+      "#UprMergeLosersToUnit" in main_batch
+      and "multi-unit UQ collisions attached as Unit" in main_batch)
+check("Multi-unit LUCategory substring mapping",
+      "%MULTI%FAMILY%" in text and "%CONDO%" in text)
 
 # MERGE blocks have WHEN NOT MATCHED
 merge_count = len(re.findall(r"\bMERGE\s+dbo\.", main_batch, re.I))
