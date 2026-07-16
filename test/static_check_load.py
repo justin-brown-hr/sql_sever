@@ -115,6 +115,10 @@ check("Multi-unit UQ losers attach as Unit",
       and "multi-unit UQ collisions attached as Unit" in main_batch)
 check("Multi-unit LUCategory substring mapping",
       "%MULTI%FAMILY%" in text and "%CONDO%" in text)
+check("SDAT CondoUnit carried to #Work and Unit",
+      "CondoUnit" in main_batch
+      and "s.CondoUnit" in main_batch
+      and "CLIENT RULES IMPACT" in main_batch)
 
 # MERGE blocks have WHEN NOT MATCHED
 merge_count = len(re.findall(r"\bMERGE\s+dbo\.", main_batch, re.I))

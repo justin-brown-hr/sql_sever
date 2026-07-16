@@ -164,11 +164,13 @@ Sets `@MasterAddressRead`.
 
 Reads from `dbo.SDATIncomingTableX1` (production: `DHCA_Internal.dbo.RealPropertyTaxInformation`).
 
-Similar normalization. SDAT has no `Unit` or `LUCategory` — defaults `PropertyType = CONDO`. Owner name comes from SDAT.
+Similar normalization. SDAT has no `LUCategory` — defaults `PropertyType = CONDO`. Owner name comes from SDAT.
+
+**`CondoUnit` (required new SDAT column):** loaded into `#SDAT` / `#Work` / `#IncomingUnified` / `#UPRMap`. Any valid UPR with CondoUnit → `dbo.Unit`. Throws `50012` if column missing.
 
 `TRY/CATCH` — failure throws `50011`.
 
-Sets `@SDATRead`.
+Sets `@SDATRead` and `@CondoUnitSourceRows`.
 
 ---
 
