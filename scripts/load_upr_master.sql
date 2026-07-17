@@ -22,6 +22,7 @@
     7) External XREF — address match against UPR only; MATCH or NO_MATCH; non-match not Review_Q
 
     Placeholder parcels (0, 0000, all-zeros) stored as NULL ParcelID on UPR (still eligible).
+    ParcelID uniqueness is filtered (NULL allowed many times); real parcels stay unique.
     Invalid records → Review_Q only — never PENDING or placeholder rows in UPR
 
   MA Unit + SDAT CondoUnit held in #Work/#UPRMap — loaded to dbo.Unit (UPR has no unit column).
@@ -417,6 +418,101 @@ BEGIN
     END
     ELSE
         PRINT N'Schema: dbo.SDATIncomingTableX1.CondoUnit already present.';
+END
+
+/* ========================================================================
+   SCHEMA FIX — ParcelID uniqueness must allow many NULL values
+   Client Error 2627: UQ_UPropertyRecords_ParcelID duplicate key (<NULL>)
+   Cause: table UNIQUE(ParcelID) rejects a 2nd NULL; Multi-Family / no-parcel
+          UPR inserts many rows with ParcelID = NULL.
+   Fix: drop UNIQUE(ParcelID); create filtered unique index WHERE ParcelID IS NOT NULL.
+   ======================================================================== */
+IF OBJECT_ID(N'dbo.UPROPERTYRECORDS', N'U') IS NOT NULL
+BEGIN
+    DECLARE @ParcelUqDrop NVARCHAR(MAX) = N'';
+
+    /* Drop single-column UNIQUE constraints on ParcelID */
+    SELECT @ParcelUqDrop = @ParcelUqDrop
+        + N'ALTER TABLE dbo.UPROPERTYRECORDS DROP CONSTRAINT '
+        + QUOTENAME(kc.name) + N';'
+    FROM sys.key_constraints kc
+    WHERE kc.parent_object_id = OBJECT_ID(N'dbo.UPROPERTYRECORDS')
+      AND kc.[type] = N'UQ'
+      AND EXISTS (
+          SELECT 1
+          FROM sys.index_columns ic
+          INNER JOIN sys.columns c
+              ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+          WHERE ic.object_id = kc.parent_object_id
+            AND ic.index_id = kc.unique_index_id
+            AND ic.is_included_column = 0
+            AND c.name = N'ParcelID'
+      )
+      AND (
+          SELECT COUNT(*)
+          FROM sys.index_columns ic2
+          WHERE ic2.object_id = kc.parent_object_id
+            AND ic2.index_id = kc.unique_index_id
+            AND ic2.is_included_column = 0
+      ) = 1;
+
+    IF @ParcelUqDrop <> N''
+        EXEC sys.sp_executesql @ParcelUqDrop;
+
+    /* Drop leftover non-filtered unique indexes on ParcelID alone */
+    SET @ParcelUqDrop = N'';
+    SELECT @ParcelUqDrop = @ParcelUqDrop
+        + N'DROP INDEX ' + QUOTENAME(i.name) + N' ON dbo.UPROPERTYRECORDS;'
+    FROM sys.indexes i
+    WHERE i.object_id = OBJECT_ID(N'dbo.UPROPERTYRECORDS')
+      AND i.is_unique = 1
+      AND i.is_primary_key = 0
+      AND i.has_filter = 0
+      AND EXISTS (
+          SELECT 1
+          FROM sys.index_columns ic
+          INNER JOIN sys.columns c
+              ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+          WHERE ic.object_id = i.object_id
+            AND ic.index_id = i.index_id
+            AND ic.is_included_column = 0
+            AND c.name = N'ParcelID'
+      )
+      AND (
+          SELECT COUNT(*)
+          FROM sys.index_columns ic2
+          WHERE ic2.object_id = i.object_id
+            AND ic2.index_id = i.index_id
+            AND ic2.is_included_column = 0
+      ) = 1;
+
+    IF @ParcelUqDrop <> N''
+        EXEC sys.sp_executesql @ParcelUqDrop;
+
+    /* Real parcels stay unique; NULL ParcelID allowed on many UPR rows */
+    IF NOT EXISTS (
+        SELECT 1
+        FROM sys.indexes i
+        WHERE i.object_id = OBJECT_ID(N'dbo.UPROPERTYRECORDS')
+          AND i.is_unique = 1
+          AND i.has_filter = 1
+          AND i.filter_definition LIKE N'%ParcelID%'
+          AND i.filter_definition LIKE N'%IS NOT NULL%'
+          AND EXISTS (
+              SELECT 1
+              FROM sys.index_columns ic
+              INNER JOIN sys.columns c
+                  ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+              WHERE ic.object_id = i.object_id
+                AND ic.index_id = i.index_id
+                AND c.name = N'ParcelID'
+          )
+    )
+        CREATE UNIQUE NONCLUSTERED INDEX UQ_UPropertyRecords_ParcelID_NotNull
+            ON dbo.UPROPERTYRECORDS (ParcelID)
+            WHERE ParcelID IS NOT NULL;
+
+    PRINT N'Schema: ParcelID unique only when present (many NULL ParcelID UPR rows allowed).';
 END
 
 BEGIN TRY
@@ -3277,7 +3373,7 @@ BEGIN TRY
        ======================================================================== */
     PRINT N'============================================================';
     PRINT N' UPR LOAD SUMMARY';
-    PRINT N' Script build: 2026-07-17 pre-delivery-full-check';
+    PRINT N' Script build: 2026-07-17 parcel-null-unique-fix';
     PRINT N'============================================================';
     PRINT N'Batch Start Time: ' + CONVERT(VARCHAR(30), @BatchStartTime, 120);
     PRINT N'Batch End Time: ' + CONVERT(VARCHAR(30), @BatchEndTime, 120);
