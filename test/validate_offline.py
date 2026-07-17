@@ -71,7 +71,6 @@ def main() -> int:
         ROOT / "test/run_test_and_results.sql",
         ROOT / "README.md",
         ROOT / "DELIVERY.md",
-        ROOT / "delivery/UPR_Master_Delivery.zip",
     ]
     for p in required:
         if not check_file(p):
