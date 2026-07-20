@@ -19,7 +19,8 @@
        Account mismatch (same address) → prefer 8-digit account for UPR, still flag Review_Q.
     6) SDAT CondoUnit carried in #SDAT/#Work/#IncomingUnified → dbo.Unit (not DwellingUnits).
        MA Multi-Family Unit column → dbo.Unit.
-    7) External XREF — address match against UPR only; MATCH or NO_MATCH; non-match not Review_Q
+    7) External XREF — address match against UPR only; write XREF on MATCH only.
+       No address match is counted in the summary only (not an XREF row, not Review_Q).
 
     Placeholder parcels (0, 0000, all-zeros) stored as NULL ParcelID on UPR (still eligible).
     ParcelID uniqueness is filtered (NULL allowed many times); real parcels stay unique.
@@ -764,8 +765,10 @@ BEGIN TRY
         SET @Sql = N'
         MERGE dbo.REF_UNITTYPECODE AS t
         USING (VALUES
-            (N''APT'',   N''Apartment unit'',   N''Apartment''),
-            (N''CONDO'', N''Condo unit'',       N''Condominium unit'')
+            (N''APT'',           N''Apartment unit'',      N''Apartment''),
+            (N''CONDO'',         N''Condo unit'',          N''Condominium unit''),
+            (N''MULTI'',         N''Multi-Family unit'',   N''Multi-Family (MA LUCategory)''),
+            (N''Multi-Family'',  N''Multi-Family unit'',   N''Multi-Family (MA LUCategory)'')
         ) AS s(Code, Name, Descr)
         ON t.UnitTypeCode = s.Code
         WHEN MATCHED THEN UPDATE SET
@@ -2894,7 +2897,9 @@ BEGIN TRY
 
     /* ========================================================================
        7. EXTERNAL SYSTEMS — eProperty, CASE, MPDU, MULTIFAMILY
-          Address/normalized-address match only; always write XREF (MATCH or NO_MATCH).
+          Address match only. Write XREF for MATCH only (real source record).
+          NO_MATCH is summary-only — do NOT invent NM-* XREF rows per UPR
+          (that made every external system count = UPR count and looked repetitive).
        ======================================================================== */
     IF OBJECT_ID('tempdb..#ExtMatch') IS NOT NULL DROP TABLE #ExtMatch;
 
@@ -2980,44 +2985,87 @@ BEGIN TRY
         PRINT @SourceWarning;
     END CATCH;
 
-    /* One XREF per ACTIVE UPR per external system — address match only */
+    /* MATCH only — one real external source record per UPR per system */
+    ;WITH UprDistinct AS (
+        SELECT DISTINCT m.UPropertyRecordsID
+        FROM #UPRMap m
+        INNER JOIN dbo.UPROPERTYRECORDS upr
+            ON upr.UPropertyRecordsID = m.UPropertyRecordsID
+           AND upr.PropertyStatusCode = N'ACTIVE'
+    ),
+    ExtSystems AS (
+        SELECT *
+        FROM (VALUES
+            (N'eProperty',   N'Property'),
+            (N'CASE',        N'Case'),
+            (N'MPDU',        N'Development'),
+            (N'MULTIFAMILY', N'MultifamilyLoan')
+        ) v(SystemCode, EntityType)
+    ),
+    Matched AS (
+        SELECT
+            u.UPropertyRecordsID,
+            sys.SystemCode,
+            ea.SourceRecordID,
+            ea.SourceEntityType,
+            ROW_NUMBER() OVER (
+                PARTITION BY u.UPropertyRecordsID, sys.SystemCode
+                ORDER BY ea.SourceRecordID
+            ) AS MatchRn
+        FROM UprDistinct u
+        INNER JOIN dbo.UPROPERTYRECORDS upr
+            ON upr.UPropertyRecordsID = u.UPropertyRecordsID
+        CROSS JOIN ExtSystems sys
+        CROSS APPLY (
+            SELECT TOP 1 ea.SourceRecordID, ea.SourceEntityType
+            FROM #ExtAddr ea
+            WHERE ea.SourceSystemCode = sys.SystemCode
+              AND (
+                    ea.NormAddress = upr.NormalizedStreetAddress
+                 OR ea.NormFullAddress = upr.NormalizedFullAddress
+              )
+            ORDER BY ea.SourceRecordID
+        ) ea
+    )
     INSERT INTO #ExtMatch (
         UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
         MatchMethodCode, MatchResult, MatchConfidence, ProcessingStatus, Notes
     )
     SELECT
         m.UPropertyRecordsID,
-        sys.SystemCode,
-        COALESCE(ea.SourceRecordID, N'NM-' + CONVERT(NVARCHAR(20), m.UPropertyRecordsID) + N'-' + sys.SystemCode),
-        COALESCE(ea.SourceEntityType, sys.EntityType),
+        m.SystemCode,
+        m.SourceRecordID,
+        m.SourceEntityType,
         N'AddressNormalized',
-        CASE WHEN ea.SourceRecordID IS NOT NULL THEN N'MATCH' ELSE N'NO_MATCH' END,
-        CASE WHEN ea.SourceRecordID IS NOT NULL THEN N'MEDIUM' ELSE N'NONE' END,
-        CASE WHEN ea.SourceRecordID IS NOT NULL THEN N'PROCESSED' ELSE N'PENDING_REVIEW' END,
-        CASE WHEN ea.SourceRecordID IS NOT NULL
-             THEN N'Matched to ' + sys.SystemCode
-             ELSE N'No Address Match' END
-    FROM #UPRMap m
-    INNER JOIN dbo.UPROPERTYRECORDS upr
-        ON upr.UPropertyRecordsID = m.UPropertyRecordsID
-       AND upr.PropertyStatusCode = N'ACTIVE'
-    CROSS JOIN (
-        VALUES
-            (N'eProperty',   N'Property'),
-            (N'CASE',        N'Case'),
-            (N'MPDU',        N'Development'),
-            (N'MULTIFAMILY', N'MultifamilyLoan')
-    ) sys(SystemCode, EntityType)
-    OUTER APPLY (
-        SELECT TOP 1 ea.SourceRecordID, ea.SourceEntityType
-        FROM #ExtAddr ea
-        WHERE ea.SourceSystemCode = sys.SystemCode
-          AND (
-                ea.NormAddress = upr.NormalizedStreetAddress
-             OR ea.NormFullAddress = upr.NormalizedFullAddress
-          )
-        ORDER BY ea.SourceRecordID
-    ) ea;
+        N'MATCH',
+        N'MEDIUM',
+        N'PROCESSED',
+        N'Matched to ' + m.SystemCode
+    FROM Matched m
+    WHERE m.MatchRn = 1;
+
+    /* UPR rows in this load with no address match to each external system (not written to XREF) */
+    ;WITH UprDistinct AS (
+        SELECT DISTINCT m.UPropertyRecordsID
+        FROM #UPRMap m
+        INNER JOIN dbo.UPROPERTYRECORDS upr
+            ON upr.UPropertyRecordsID = m.UPropertyRecordsID
+           AND upr.PropertyStatusCode = N'ACTIVE'
+    )
+    SELECT
+        @EPropertyXrefNoMatch = ISNULL(SUM(CASE WHEN NOT EXISTS (
+            SELECT 1 FROM #ExtMatch e WHERE e.UPropertyRecordsID = u.UPropertyRecordsID AND e.SourceSystemCode = N'eProperty'
+        ) THEN 1 ELSE 0 END), 0),
+        @CaseXrefNoMatch = ISNULL(SUM(CASE WHEN NOT EXISTS (
+            SELECT 1 FROM #ExtMatch e WHERE e.UPropertyRecordsID = u.UPropertyRecordsID AND e.SourceSystemCode = N'CASE'
+        ) THEN 1 ELSE 0 END), 0),
+        @MPDUXrefNoMatch = ISNULL(SUM(CASE WHEN NOT EXISTS (
+            SELECT 1 FROM #ExtMatch e WHERE e.UPropertyRecordsID = u.UPropertyRecordsID AND e.SourceSystemCode = N'MPDU'
+        ) THEN 1 ELSE 0 END), 0),
+        @MultifamilyXrefNoMatch = ISNULL(SUM(CASE WHEN NOT EXISTS (
+            SELECT 1 FROM #ExtMatch e WHERE e.UPropertyRecordsID = u.UPropertyRecordsID AND e.SourceSystemCode = N'MULTIFAMILY'
+        ) THEN 1 ELSE 0 END), 0)
+    FROM UprDistinct u;
 
     INSERT INTO dbo.UPROPERTYRECORDS_XREF (
         UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
@@ -3030,16 +3078,13 @@ BEGIN TRY
         1, @Now, e.Notes, @Now, @Now, @RunUser
     FROM #ExtMatch e
     WHERE e.SourceSystemCode = N'eProperty'
+      AND e.MatchResult = N'MATCH'
       AND NOT EXISTS (
           SELECT 1 FROM dbo.UPROPERTYRECORDS_XREF x
           WHERE x.UPropertyRecordsID = e.UPropertyRecordsID
             AND x.SourceSystemCode = N'eProperty' AND x.IsActive = 1
       );
     SET @EPropertyXrefInserted = @@ROWCOUNT;
-    SET @EPropertyXrefNoMatch = (
-        SELECT COUNT(*) FROM #ExtMatch
-        WHERE SourceSystemCode = N'eProperty' AND MatchResult = N'NO_MATCH'
-    );
 
     INSERT INTO dbo.UPROPERTYRECORDS_XREF (
         UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
@@ -3052,16 +3097,13 @@ BEGIN TRY
         1, @Now, e.Notes, @Now, @Now, @RunUser
     FROM #ExtMatch e
     WHERE e.SourceSystemCode = N'CASE'
+      AND e.MatchResult = N'MATCH'
       AND NOT EXISTS (
           SELECT 1 FROM dbo.UPROPERTYRECORDS_XREF x
           WHERE x.UPropertyRecordsID = e.UPropertyRecordsID
             AND x.SourceSystemCode = N'CASE' AND x.IsActive = 1
       );
     SET @CaseXrefInserted = @@ROWCOUNT;
-    SET @CaseXrefNoMatch = (
-        SELECT COUNT(*) FROM #ExtMatch
-        WHERE SourceSystemCode = N'CASE' AND MatchResult = N'NO_MATCH'
-    );
 
     INSERT INTO dbo.UPROPERTYRECORDS_XREF (
         UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
@@ -3074,16 +3116,13 @@ BEGIN TRY
         1, @Now, e.Notes, @Now, @Now, @RunUser
     FROM #ExtMatch e
     WHERE e.SourceSystemCode = N'MPDU'
+      AND e.MatchResult = N'MATCH'
       AND NOT EXISTS (
           SELECT 1 FROM dbo.UPROPERTYRECORDS_XREF x
           WHERE x.UPropertyRecordsID = e.UPropertyRecordsID
             AND x.SourceSystemCode = N'MPDU' AND x.IsActive = 1
       );
     SET @MPDUXrefInserted = @@ROWCOUNT;
-    SET @MPDUXrefNoMatch = (
-        SELECT COUNT(*) FROM #ExtMatch
-        WHERE SourceSystemCode = N'MPDU' AND MatchResult = N'NO_MATCH'
-    );
 
     INSERT INTO dbo.UPROPERTYRECORDS_XREF (
         UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
@@ -3096,16 +3135,13 @@ BEGIN TRY
         1, @Now, e.Notes, @Now, @Now, @RunUser
     FROM #ExtMatch e
     WHERE e.SourceSystemCode = N'MULTIFAMILY'
+      AND e.MatchResult = N'MATCH'
       AND NOT EXISTS (
           SELECT 1 FROM dbo.UPROPERTYRECORDS_XREF x
           WHERE x.UPropertyRecordsID = e.UPropertyRecordsID
             AND x.SourceSystemCode = N'MULTIFAMILY' AND x.IsActive = 1
       );
     SET @MultifamilyXrefInserted = @@ROWCOUNT;
-    SET @MultifamilyXrefNoMatch = (
-        SELECT COUNT(*) FROM #ExtMatch
-        WHERE SourceSystemCode = N'MULTIFAMILY' AND MatchResult = N'NO_MATCH'
-    );
 
     SET @TotalXrefInserted = @MasterAddressXrefInserted + @SDATXrefInserted + @ReviewXrefRejectedInserted
         + @EPropertyXrefInserted + @CaseXrefInserted + @MPDUXrefInserted + @MultifamilyXrefInserted;
@@ -3260,10 +3296,12 @@ BEGIN TRY
                       + N'-' + CONVERT(NVARCHAR(20), ISNULL(c.KdatRecordID, 0))
             ),
             UnitAccount = COALESCE(c.IncomingNormAccount, tm.WinnerAccount),
+            /* Unit record type follows MA/UPR property type — Multi-Family stays Multi-Family (not APT) */
             UnitTypeCode = CASE
                 WHEN tm.PropertyTypeCode = N'CONDO' THEN N'CONDO'
-                WHEN tm.PropertyTypeCode = N'MULTI' THEN N'APT'
-                ELSE N'APT'
+                WHEN tm.PropertyTypeCode = N'MULTI' THEN N'Multi-Family'
+                WHEN tm.PropertyTypeCode = N'APT'   THEN N'APT'
+                ELSE COALESCE(NULLIF(LTRIM(RTRIM(tm.PropertyTypeCode)), N''), N'APT')
             END,
             ROW_NUMBER() OVER (
                 PARTITION BY
@@ -3308,6 +3346,18 @@ BEGIN TRY
       );
 
     SET @UnitInserted = @@ROWCOUNT;
+
+    /* Correct UnitTypeCode for Multi-Family UPRs (prior runs mapped MULTI → APT) */
+    UPDATE u
+    SET
+        u.UnitTypeCode = N'Multi-Family',
+        u.UpdatedDate = @Now
+    FROM dbo.Unit u
+    INNER JOIN dbo.UPROPERTYRECORDS upr
+        ON upr.UPropertyRecordsID = u.UPropertyRecordsID
+    WHERE upr.PropertyTypeCode = N'MULTI'
+      AND ISNULL(u.UnitTypeCode, N'') <> N'Multi-Family';
+
     SET @CondoUnitToUnitRows = (
         SELECT COUNT(*)
         FROM dbo.Unit u
@@ -3373,7 +3423,7 @@ BEGIN TRY
        ======================================================================== */
     PRINT N'============================================================';
     PRINT N' UPR LOAD SUMMARY';
-    PRINT N' Script build: 2026-07-17 parcel-null-unique-fix';
+    PRINT N' Script build: 2026-07-20 unit-type-multi-family';
     PRINT N'============================================================';
     PRINT N'Batch Start Time: ' + CONVERT(VARCHAR(30), @BatchStartTime, 120);
     PRINT N'Batch End Time: ' + CONVERT(VARCHAR(30), @BatchEndTime, 120);
@@ -3407,8 +3457,7 @@ BEGIN TRY
     PRINT N'--- UPR (valid unique properties only) ---';
     PRINT N'Eligible from #IncomingUnique (account+address; parcel optional): ' + CONVERT(VARCHAR(20), @UprEligibleSourceRows);
     PRINT N'UPR MERGE candidates after UQ: ' + CONVERT(VARCHAR(20), @UprEligibleRows);
-    PRINT N'UPR table count before load: ' + CONVERT(VARCHAR(20), @UprCountBefore);
-    PRINT N'UPR table count after load: ' + CONVERT(VARCHAR(20), @UPRTableCountAfter);
+    PRINT N'UPR table count: ' + CONVERT(VARCHAR(20), @UPRTableCountAfter);
     PRINT N'UPR rows written this run: ' + CONVERT(VARCHAR(20), @UPRActiveInserted);
     PRINT N'  (Valid properties only — invalid records go to Review_Q, not UPR)';
     PRINT N'UPR existing rows updated this run: ' + CONVERT(VARCHAR(20), @UPRUpdated);
@@ -3437,21 +3486,20 @@ BEGIN TRY
     ELSE
         PRINT N'Check OK: UPR properties + Review_Q inserted = incoming disposition total.';
     PRINT N' ';
-    PRINT N'XREF table count before load: ' + CONVERT(VARCHAR(20), @XrefCountBefore);
-    PRINT N'XREF table count after load: ' + CONVERT(VARCHAR(20), @XrefTableCountAfter);
-    PRINT N'XREF rows inserted this run (table delta): ' + CONVERT(VARCHAR(20), @XrefTotalInsertedThisRun);
+    PRINT N'--- XREF (real links only) ---';
+    PRINT N'XREF table count: ' + CONVERT(VARCHAR(20), @XrefTableCountAfter);
     PRINT N'MasterAddress XREF inserted: ' + CONVERT(VARCHAR(20), @MasterAddressXrefInserted);
     PRINT N'SDAT XREF inserted: ' + CONVERT(VARCHAR(20), @SDATXrefInserted);
-    PRINT N'Review rejected XREF inserted (duplicate losers linked to ACTIVE UPR only): ' + CONVERT(VARCHAR(20), @ReviewXrefRejectedInserted);
-    PRINT N'eProperty XREF inserted: ' + CONVERT(VARCHAR(20), @EPropertyXrefInserted);
-    PRINT N'eProperty XREF staged no-match (not inserted if row exists): ' + CONVERT(VARCHAR(20), @EPropertyXrefNoMatch);
-    PRINT N'CASE XREF inserted: ' + CONVERT(VARCHAR(20), @CaseXrefInserted);
-    PRINT N'CASE XREF staged no-match (not inserted if row exists): ' + CONVERT(VARCHAR(20), @CaseXrefNoMatch);
-    PRINT N'MPDU XREF inserted: ' + CONVERT(VARCHAR(20), @MPDUXrefInserted);
-    PRINT N'MPDU XREF staged no-match (not inserted if row exists): ' + CONVERT(VARCHAR(20), @MPDUXrefNoMatch);
-    PRINT N'MULTIFAMILY XREF inserted: ' + CONVERT(VARCHAR(20), @MultifamilyXrefInserted);
-    PRINT N'MULTIFAMILY XREF staged no-match (not inserted if row exists): ' + CONVERT(VARCHAR(20), @MultifamilyXrefNoMatch);
-    PRINT N'Total XREF inserted (sum of inserts above): ' + CONVERT(VARCHAR(20), @TotalXrefInserted);
+    PRINT N'Review rejected XREF inserted: ' + CONVERT(VARCHAR(20), @ReviewXrefRejectedInserted);
+    PRINT N'eProperty XREF MATCH inserted: ' + CONVERT(VARCHAR(20), @EPropertyXrefInserted);
+    PRINT N'eProperty no address match (not written): ' + CONVERT(VARCHAR(20), @EPropertyXrefNoMatch);
+    PRINT N'CASE XREF MATCH inserted: ' + CONVERT(VARCHAR(20), @CaseXrefInserted);
+    PRINT N'CASE no address match (not written): ' + CONVERT(VARCHAR(20), @CaseXrefNoMatch);
+    PRINT N'MPDU XREF MATCH inserted: ' + CONVERT(VARCHAR(20), @MPDUXrefInserted);
+    PRINT N'MPDU no address match (not written): ' + CONVERT(VARCHAR(20), @MPDUXrefNoMatch);
+    PRINT N'MULTIFAMILY XREF MATCH inserted: ' + CONVERT(VARCHAR(20), @MultifamilyXrefInserted);
+    PRINT N'MULTIFAMILY no address match (not written): ' + CONVERT(VARCHAR(20), @MultifamilyXrefNoMatch);
+    PRINT N'Total XREF inserted this run: ' + CONVERT(VARCHAR(20), @TotalXrefInserted);
     IF @TotalXrefInserted <> @XrefTotalInsertedThisRun
         PRINT N'WARNING: XREF insert sum does not match XREF table delta (re-run may skip existing rows).';
     PRINT N' ';

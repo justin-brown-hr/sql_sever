@@ -59,7 +59,7 @@ Placeholder ParcelIDs (`0`, `0000`, all-zeros) are treated as missing (not real 
 | UPR eligibility | Valid account + valid address + real ParcelID |
 | Review_Q reasons | `Missing ParcelID`, `Address or Account Not Match`, `NO_ADDRESS_MATCH`, `DUPLICATE` |
 | IncomingSourceSystem | `ADDRESS_MASTER`, `KDAT`, or `BOTH` only |
-| External systems | Address match only; always write XREF (`MATCH` or `NO_MATCH`); non-match does **not** go to Review_Q |
+| External systems | Address match only; write XREF on **MATCH** only; no-match counted in summary only (not XREF, not Review_Q) |
 | Invalid records | Review_Q only — never PENDING or placeholder rows in UPR |
 
 ---
@@ -380,8 +380,8 @@ Normalized addresses staged in `#ExtAddr`.
 **For each ACTIVE UPR row × each external system:**
 
 - Address match on `NormalizedStreetAddress` OR `NormalizedFullAddress`
-- Always writes one XREF per UPR per system: `MATCH` or `NO_MATCH`
-- External non-match does **not** go to Review_Q
+- Writes XREF **only on MATCH** (real external `SourceRecordID`)
+- No address match is summary-only (not an XREF row, not Review_Q)
 
 ---
 
