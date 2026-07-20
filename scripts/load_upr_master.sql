@@ -765,10 +765,9 @@ BEGIN TRY
         SET @Sql = N'
         MERGE dbo.REF_UNITTYPECODE AS t
         USING (VALUES
-            (N''APT'',           N''Apartment unit'',      N''Apartment''),
-            (N''CONDO'',         N''Condo unit'',          N''Condominium unit''),
-            (N''MULTI'',         N''Multi-Family unit'',   N''Multi-Family (MA LUCategory)''),
-            (N''Multi-Family'',  N''Multi-Family unit'',   N''Multi-Family (MA LUCategory)'')
+            (N''APT'',           N''Apartment unit'',  N''Apartment''),
+            (N''CONDO'',         N''Condo unit'',      N''Condominium unit''),
+            (N''Multi-Family'',  N''Multi-Family'',    N''Multi-Family (MA LUCategory)'')
         ) AS s(Code, Name, Descr)
         ON t.UnitTypeCode = s.Code
         WHEN MATCHED THEN UPDATE SET
@@ -3423,7 +3422,7 @@ BEGIN TRY
        ======================================================================== */
     PRINT N'============================================================';
     PRINT N' UPR LOAD SUMMARY';
-    PRINT N' Script build: 2026-07-20 unit-type-multi-family';
+    PRINT N' Script build: 2026-07-20 unit-type-name-unique';
     PRINT N'============================================================';
     PRINT N'Batch Start Time: ' + CONVERT(VARCHAR(30), @BatchStartTime, 120);
     PRINT N'Batch End Time: ' + CONVERT(VARCHAR(30), @BatchEndTime, 120);
