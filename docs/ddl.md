@@ -464,10 +464,7 @@ CREATE TABLE dbo.Building
     BuildingID INT IDENTITY(1,1) NOT NULL,
     UPropertyRecordsID INT NOT NULL,
 
-    BuildingCode            NVARCHAR(50) NOT NULL,
-    BuildingName            NVARCHAR(100) NULL,
-    BuildingTypeCode        NVARCHAR(50) NULL,
-
+    /* Building identity = same address as parent UPR (Account# / CNumber + Address) */
     BuildingAddress         NVARCHAR(255) NULL,
 
     StatusCode              NVARCHAR(30) NOT NULL CONSTRAINT DF_Building_StatusCode
@@ -487,16 +484,10 @@ CREATE TABLE dbo.Building
     CONSTRAINT FK_Building_UPropertyRecords
         FOREIGN KEY (UPropertyRecordsID)
         REFERENCES dbo.UPropertyRecords (UPropertyRecordsID),
-        
-    /* One building code should be unique within a property */
-    CONSTRAINT UQ_Building_UPropertyRecords_BuildingCode
-        UNIQUE (UPropertyRecordsID, BuildingCode),
 
-    /* Optional building name uniqueness within a property
-       Uncomment only if business rules support it
-    CONSTRAINT UQ_Building_UnifiedPropertyRecords_BuildingName
-        UNIQUE (UPropertyRecordID, BuildingName),
-    */
+    /* One building per UPR property */
+    CONSTRAINT UQ_Building_UPropertyRecordsID
+        UNIQUE (UPropertyRecordsID),
 
     CONSTRAINT CK_Building_StatusCode
         CHECK (StatusCode IN ('ACTIVE','INACTIVE','PENDING','RETIRED')),

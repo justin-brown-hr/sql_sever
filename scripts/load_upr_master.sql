@@ -12,6 +12,8 @@
        ONE UPR property (PropertyType MULTI for Multi-Family, CONDO for Condo);
        ALL occurrences → dbo.Unit with unit # (MA Unit / SDAT CondoUnit).
        NOT Review_Q DUPLICATE. Only other invalid data → Review_Q.
+       Building: one per UPR; BuildingAddress = UPR address (no BuildingCode/Name/TypeCode).
+       Property identity: Account# (SDATAccountNumber); CNumber set for C-style accounts.
     3) Extra source rows for non-multi types (same account+address) → Review_Q DUPLICATE
     4) From #IncomingUnique: valid Account# + Address → UPR (ParcelID optional — NULL allowed).
        Invalid address/account → Review_Q (NO_ADDRESS_MATCH | Address or Account Not Match)
@@ -514,6 +516,129 @@ BEGIN
             WHERE ParcelID IS NOT NULL;
 
     PRINT N'Schema: ParcelID unique only when present (many NULL ParcelID UPR rows allowed).';
+END
+
+/* ========================================================================
+   SCHEMA FIX — Building: drop BuildingCode / BuildingName / BuildingTypeCode
+   Building identity = UPR address (BuildingAddress). One building per UPR property.
+   ======================================================================== */
+IF OBJECT_ID(N'dbo.Building', N'U') IS NOT NULL
+BEGIN
+    DECLARE @BldgDrop NVARCHAR(MAX) = N'';
+
+    /* Drop unique constraints / indexes that reference the removed columns */
+    SELECT @BldgDrop = @BldgDrop
+        + N'ALTER TABLE dbo.Building DROP CONSTRAINT ' + QUOTENAME(kc.name) + N';'
+    FROM sys.key_constraints kc
+    WHERE kc.parent_object_id = OBJECT_ID(N'dbo.Building')
+      AND kc.[type] = N'UQ'
+      AND EXISTS (
+          SELECT 1
+          FROM sys.index_columns ic
+          INNER JOIN sys.columns c
+              ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+          WHERE ic.object_id = kc.parent_object_id
+            AND ic.index_id = kc.unique_index_id
+            AND c.name IN (N'BuildingCode', N'BuildingName', N'BuildingTypeCode')
+      );
+
+    IF @BldgDrop <> N''
+        EXEC sys.sp_executesql @BldgDrop;
+
+    SET @BldgDrop = N'';
+    SELECT @BldgDrop = @BldgDrop
+        + N'DROP INDEX ' + QUOTENAME(i.name) + N' ON dbo.Building;'
+    FROM sys.indexes i
+    WHERE i.object_id = OBJECT_ID(N'dbo.Building')
+      AND i.is_unique = 1
+      AND i.is_primary_key = 0
+      AND EXISTS (
+          SELECT 1
+          FROM sys.index_columns ic
+          INNER JOIN sys.columns c
+              ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+          WHERE ic.object_id = i.object_id
+            AND ic.index_id = i.index_id
+            AND c.name IN (N'BuildingCode', N'BuildingName', N'BuildingTypeCode')
+      );
+
+    IF @BldgDrop <> N''
+        EXEC sys.sp_executesql @BldgDrop;
+
+    IF COL_LENGTH(N'dbo.Building', N'BuildingCode') IS NOT NULL
+        ALTER TABLE dbo.Building DROP COLUMN BuildingCode;
+    IF COL_LENGTH(N'dbo.Building', N'BuildingName') IS NOT NULL
+        ALTER TABLE dbo.Building DROP COLUMN BuildingName;
+    IF COL_LENGTH(N'dbo.Building', N'BuildingTypeCode') IS NOT NULL
+        ALTER TABLE dbo.Building DROP COLUMN BuildingTypeCode;
+
+    /* If prior load created multiple buildings per UPR, keep one and retarget Units */
+    IF EXISTS (
+        SELECT 1
+        FROM dbo.Building
+        GROUP BY UPropertyRecordsID
+        HAVING COUNT(*) > 1
+    )
+    BEGIN
+        ;WITH KeepBldg AS (
+            SELECT
+                BuildingID,
+                UPropertyRecordsID,
+                ROW_NUMBER() OVER (PARTITION BY UPropertyRecordsID ORDER BY BuildingID) AS Rn
+            FROM dbo.Building
+        )
+        UPDATE u
+        SET u.BuildingID = k.KeepID
+        FROM dbo.Unit u
+        INNER JOIN KeepBldg d
+            ON d.BuildingID = u.BuildingID AND d.Rn > 1
+        INNER JOIN (
+            SELECT UPropertyRecordsID, BuildingID AS KeepID
+            FROM KeepBldg
+            WHERE Rn = 1
+        ) k ON k.UPropertyRecordsID = d.UPropertyRecordsID;
+
+        ;WITH KeepBldg AS (
+            SELECT
+                BuildingID,
+                ROW_NUMBER() OVER (PARTITION BY UPropertyRecordsID ORDER BY BuildingID) AS Rn
+            FROM dbo.Building
+        )
+        DELETE b
+        FROM dbo.Building b
+        INNER JOIN KeepBldg k ON k.BuildingID = b.BuildingID
+        WHERE k.Rn > 1;
+    END;
+
+    /* One building per UPR property (address comes from UPR) */
+    IF NOT EXISTS (
+        SELECT 1
+        FROM sys.indexes i
+        WHERE i.object_id = OBJECT_ID(N'dbo.Building')
+          AND (
+                i.name = N'UQ_Building_UPropertyRecordsID'
+             OR (i.is_unique = 1 AND EXISTS (
+                    SELECT 1
+                    FROM sys.index_columns ic
+                    INNER JOIN sys.columns c
+                        ON c.object_id = ic.object_id AND c.column_id = ic.column_id
+                    WHERE ic.object_id = i.object_id
+                      AND ic.index_id = i.index_id
+                      AND c.name = N'UPropertyRecordsID'
+                      AND (
+                          SELECT COUNT(*)
+                          FROM sys.index_columns ic2
+                          WHERE ic2.object_id = i.object_id
+                            AND ic2.index_id = i.index_id
+                            AND ic2.is_included_column = 0
+                      ) = 1
+                ))
+              )
+    )
+        CREATE UNIQUE NONCLUSTERED INDEX UQ_Building_UPropertyRecordsID
+            ON dbo.Building (UPropertyRecordsID);
+
+    PRINT N'Schema: Building uses UPR address only (BuildingCode/Name/TypeCode removed).';
 END
 
 BEGIN TRY
@@ -2399,8 +2524,17 @@ BEGIN TRY
 
     MERGE dbo.UPROPERTYRECORDS AS upr
     USING #UprMergeReady AS s
+    /* Property identity: Account# (SDATAccountNumber). CNumber stored for C-style accounts (e.g. C000062). */
     ON upr.SDATAccountNumber = s.EffectiveSDATAccountNumber
     WHEN MATCHED THEN UPDATE SET
+        upr.CNumber           = COALESCE(
+            upr.CNumber,
+            CASE
+                WHEN s.EffectiveSDATAccountNumber LIKE N'%[^0-9]%'
+                    THEN s.EffectiveSDATAccountNumber
+                ELSE NULL
+            END
+        ),
         upr.ParcelID          = CASE
             WHEN NULLIF(s.EffectiveParcelID, N'') IS NOT NULL AND s.ParcelConflict = 1 THEN upr.ParcelID
             ELSE COALESCE(
@@ -2425,14 +2559,20 @@ BEGIN TRY
         upr.UpdatedDate       = @Now,
         upr.UpdatedBy         = @RunUser
     WHEN NOT MATCHED THEN INSERT (
-        SDATAccountNumber, ParcelID, PropertyName, Owner,
+        SDATAccountNumber, CNumber, ParcelID, PropertyName, Owner,
         StreetNumber, StreetName, StreetType,
         City, [State], ZipCode, NormalizedStreetAddress, NormalizedFullAddress,
         Latitude, Longitude,
         PropertyTypeCode, PropertyStatusCode, IsActive,
         CreatedDate, CreatedBy, UpdatedDate, UpdatedBy
     ) VALUES (
-        s.EffectiveSDATAccountNumber, s.EffectiveParcelID, NULL, s.EffectiveOwnerName,
+        s.EffectiveSDATAccountNumber,
+        CASE
+            WHEN s.EffectiveSDATAccountNumber LIKE N'%[^0-9]%'
+                THEN s.EffectiveSDATAccountNumber
+            ELSE NULL
+        END,
+        s.EffectiveParcelID, NULL, s.EffectiveOwnerName,
         s.EffectiveStreetNumber, s.EffectiveStreetName, s.EffectiveStreetType,
         s.EffectiveCity, s.EffectiveState, s.EffectiveZipCode,
         s.EffectiveNormalizedStreetAddress, s.EffectiveNormalizedFullAddress,
@@ -3044,27 +3184,53 @@ BEGIN TRY
     WHERE m.MatchRn = 1;
 
     /* UPR rows in this load with no address match to each external system (not written to XREF) */
-    ;WITH UprDistinct AS (
-        SELECT DISTINCT m.UPropertyRecordsID
-        FROM #UPRMap m
-        INNER JOIN dbo.UPROPERTYRECORDS upr
-            ON upr.UPropertyRecordsID = m.UPropertyRecordsID
-           AND upr.PropertyStatusCode = N'ACTIVE'
-    )
-    SELECT
-        @EPropertyXrefNoMatch = ISNULL(SUM(CASE WHEN NOT EXISTS (
-            SELECT 1 FROM #ExtMatch e WHERE e.UPropertyRecordsID = u.UPropertyRecordsID AND e.SourceSystemCode = N'eProperty'
-        ) THEN 1 ELSE 0 END), 0),
-        @CaseXrefNoMatch = ISNULL(SUM(CASE WHEN NOT EXISTS (
-            SELECT 1 FROM #ExtMatch e WHERE e.UPropertyRecordsID = u.UPropertyRecordsID AND e.SourceSystemCode = N'CASE'
-        ) THEN 1 ELSE 0 END), 0),
-        @MPDUXrefNoMatch = ISNULL(SUM(CASE WHEN NOT EXISTS (
-            SELECT 1 FROM #ExtMatch e WHERE e.UPropertyRecordsID = u.UPropertyRecordsID AND e.SourceSystemCode = N'MPDU'
-        ) THEN 1 ELSE 0 END), 0),
-        @MultifamilyXrefNoMatch = ISNULL(SUM(CASE WHEN NOT EXISTS (
-            SELECT 1 FROM #ExtMatch e WHERE e.UPropertyRecordsID = u.UPropertyRecordsID AND e.SourceSystemCode = N'MULTIFAMILY'
-        ) THEN 1 ELSE 0 END), 0)
-    FROM UprDistinct u;
+    IF OBJECT_ID('tempdb..#UprForExt') IS NOT NULL DROP TABLE #UprForExt;
+
+    SELECT DISTINCT m.UPropertyRecordsID
+    INTO #UprForExt
+    FROM #UPRMap m
+    INNER JOIN dbo.UPROPERTYRECORDS upr
+        ON upr.UPropertyRecordsID = m.UPropertyRecordsID
+       AND upr.PropertyStatusCode = N'ACTIVE';
+
+    SET @EPropertyXrefNoMatch = (
+        SELECT COUNT(*)
+        FROM #UprForExt u
+        WHERE NOT EXISTS (
+            SELECT 1 FROM #ExtMatch e
+            WHERE e.UPropertyRecordsID = u.UPropertyRecordsID
+              AND e.SourceSystemCode = N'eProperty'
+        )
+    );
+    SET @CaseXrefNoMatch = (
+        SELECT COUNT(*)
+        FROM #UprForExt u
+        WHERE NOT EXISTS (
+            SELECT 1 FROM #ExtMatch e
+            WHERE e.UPropertyRecordsID = u.UPropertyRecordsID
+              AND e.SourceSystemCode = N'CASE'
+        )
+    );
+    SET @MPDUXrefNoMatch = (
+        SELECT COUNT(*)
+        FROM #UprForExt u
+        WHERE NOT EXISTS (
+            SELECT 1 FROM #ExtMatch e
+            WHERE e.UPropertyRecordsID = u.UPropertyRecordsID
+              AND e.SourceSystemCode = N'MPDU'
+        )
+    );
+    SET @MultifamilyXrefNoMatch = (
+        SELECT COUNT(*)
+        FROM #UprForExt u
+        WHERE NOT EXISTS (
+            SELECT 1 FROM #ExtMatch e
+            WHERE e.UPropertyRecordsID = u.UPropertyRecordsID
+              AND e.SourceSystemCode = N'MULTIFAMILY'
+        )
+    );
+
+    DROP TABLE #UprForExt;
 
     INSERT INTO dbo.UPROPERTYRECORDS_XREF (
         UPropertyRecordsID, SourceSystemCode, SourceRecordID, SourceEntityType,
@@ -3231,17 +3397,14 @@ BEGIN TRY
             AND m.UPropertyRecordsID = upr.UPropertyRecordsID
       );
 
-    /* Building: create MAIN for any UPR that needs units — bypass SF AllowsUnits=0 */
+    /* Building: one row per UPR that needs units — identity = UPR address (Account#/CNumber via UPR) */
     INSERT INTO dbo.Building (
-        UPropertyRecordsID, BuildingCode, BuildingName, BuildingTypeCode,
-        BuildingAddress, StatusCode, IsActive, CreatedDate, UpdatedDate, CreatedBy, UpdatedBy
+        UPropertyRecordsID, BuildingAddress,
+        StatusCode, IsActive, CreatedDate, UpdatedDate, CreatedBy, UpdatedBy
     )
     SELECT DISTINCT
         upr.UPropertyRecordsID,
-        N'MAIN',
-        N'Building ' + CONVERT(NVARCHAR(20), upr.UPropertyRecordsID),
-        N'MAIN',
-        upr.NormalizedFullAddress,
+        COALESCE(upr.NormalizedFullAddress, upr.NormalizedStreetAddress),
         N'ACTIVE', 1, @Now, @Now, @RunUser, @RunUser
     FROM dbo.UPROPERTYRECORDS upr
     WHERE (
@@ -3260,10 +3423,22 @@ BEGIN TRY
           )
       AND NOT EXISTS (
           SELECT 1 FROM dbo.Building b
-          WHERE b.UPropertyRecordsID = upr.UPropertyRecordsID AND b.BuildingCode = N'MAIN'
+          WHERE b.UPropertyRecordsID = upr.UPropertyRecordsID
       );
 
     SET @BuildingInserted = @@ROWCOUNT;
+
+    /* Keep BuildingAddress aligned with UPR address (Account# / CNumber property) */
+    UPDATE b
+    SET
+        b.BuildingAddress = COALESCE(upr.NormalizedFullAddress, upr.NormalizedStreetAddress),
+        b.UpdatedDate = @Now,
+        b.UpdatedBy = @RunUser
+    FROM dbo.Building b
+    INNER JOIN dbo.UPROPERTYRECORDS upr
+        ON upr.UPropertyRecordsID = b.UPropertyRecordsID
+    WHERE ISNULL(b.BuildingAddress, N'')
+          <> ISNULL(COALESCE(upr.NormalizedFullAddress, upr.NormalizedStreetAddress), N'');
 
     /* ALL multi-unit / CondoUnit occurrences → Unit rows via PropertyGroupKey → UPR */
     ;WITH UnitCandidates AS (
@@ -3322,7 +3497,7 @@ BEGIN TRY
         INNER JOIN #UnitTargetMap tm
             ON tm.PropertyGroupKey = c.PropertyGroupKey
         INNER JOIN dbo.Building b
-            ON b.UPropertyRecordsID = tm.UPropertyRecordsID AND b.BuildingCode = N'MAIN'
+            ON b.UPropertyRecordsID = tm.UPropertyRecordsID
     )
     INSERT INTO dbo.Unit (
         UPropertyRecordsID, BuildingID, UnitNumber, SDATAccountNumber,
@@ -3422,7 +3597,7 @@ BEGIN TRY
        ======================================================================== */
     PRINT N'============================================================';
     PRINT N' UPR LOAD SUMMARY';
-    PRINT N' Script build: 2026-07-20 unit-type-name-unique';
+    PRINT N' Script build: 2026-07-21 building-address-identity';
     PRINT N'============================================================';
     PRINT N'Batch Start Time: ' + CONVERT(VARCHAR(30), @BatchStartTime, 120);
     PRINT N'Batch End Time: ' + CONVERT(VARCHAR(30), @BatchEndTime, 120);

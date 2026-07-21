@@ -383,9 +383,6 @@ CREATE TABLE dbo.Building
 (
     BuildingID          INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
     UPropertyRecordID   INT NOT NULL,
-    BuildingCode        NVARCHAR(50) NOT NULL,
-    BuildingName        NVARCHAR(100) NULL,
-    BuildingTypeCode    NVARCHAR(50) NULL,
     BuildingAddress     NVARCHAR(255) NULL,
     StatusCode          NVARCHAR(30) NOT NULL DEFAULT N'ACTIVE',
     IsActive            BIT NOT NULL DEFAULT 1,
@@ -395,7 +392,7 @@ CREATE TABLE dbo.Building
     UpdatedBy           NVARCHAR(128) NULL DEFAULT SUSER_SNAME(),
     CONSTRAINT FK_BUILDING_UPR FOREIGN KEY (UPropertyRecordID)
         REFERENCES dbo.UPROPERTYRECORD (UPropertyRecordID),
-    CONSTRAINT UQ_BUILDING_Code UNIQUE (UPropertyRecordID, BuildingCode)
+    CONSTRAINT UQ_Building_UPropertyRecordID UNIQUE (UPropertyRecordID)
 );
 
 CREATE TABLE dbo.Unit
