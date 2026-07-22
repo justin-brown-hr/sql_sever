@@ -714,13 +714,15 @@ BEGIN TRY
     SET @Sql = N'
     MERGE dbo.REF_PROPERTYTYPE AS t
     USING (VALUES
-        (N''APT'',   N''Apartment Complex'',     1, 1),
-        (N''CONDO'', N''Condominium Property'',  1, 1),
-        (N''TH'',    N''Townhouse Community'',   1, 1),
-        (N''MULTI'', N''Multi-Family Property'', 1, 1),
-        (N''SF'',    N''Single Family Property'',1, 0),
-        (N''LAND'',  N''Vacant Land'',           0, 0),
-        (N''MIXED'', N''Mixed Use Property'',    1, 1)
+        (N''APT'',    N''Apartment Complex'',                    1, 1),
+        (N''CONDO'',  N''Condominium Property'',                 1, 1),
+        (N''TH'',     N''Townhouse Community'',                  1, 1),
+        (N''MULTI'',  N''Multi-Family Property'',                1, 1),
+        (N''SF'',     N''Single Family Property'',               1, 0),
+        (N''LAND'',   N''Vacant Land'',                          0, 0),
+        (N''MIXED'',  N''Mixed Use Property'',                   1, 1),
+        (N''OFFICE'', N''Office'',                               1, 1),
+        (N''INSTCF'', N''Institutional/Community Facilities'',   1, 1)
     ) AS s(Code, Name, AllowBldg, AllowUnit)
     ON t.PropertyTypeCode = s.Code
     WHEN MATCHED THEN UPDATE SET
@@ -891,9 +893,11 @@ BEGIN TRY
         SET @Sql = N'
         MERGE dbo.REF_UNITTYPECODE AS t
         USING (VALUES
-            (N''APT'',           N''Apartment unit'',  N''Apartment''),
-            (N''CONDO'',         N''Condo unit'',      N''Condominium unit''),
-            (N''Multi-Family'',  N''Multi-Family'',    N''Multi-Family (MA LUCategory)'')
+            (N''APT'',    N''Apartment unit'',                       N''Apartment''),
+            (N''CONDO'',  N''Condo unit'',                           N''Condominium unit''),
+            (N''MULTI'',  N''Multi-Family'',                         N''Multi-Family (MA LUCategory)''),
+            (N''OFFICE'', N''Office'',                               N''Office''),
+            (N''INSTCF'', N''Institutional/Community Facilities'',   N''Institutional/Community Facilities'')
         ) AS s(Code, Name, Descr)
         ON t.UnitTypeCode = s.Code
         WHEN MATCHED THEN UPDATE SET
@@ -980,8 +984,8 @@ BEGIN TRY
         [State]              = dbo.fn_UPR_NormalizeState(NULL, @DefaultState),
         ZipCode              = dbo.fn_UPR_NormalizeZipCode(ma.ZipCode),
         PropertyTypeRaw      = NULLIF(UPPER(LTRIM(RTRIM(ma.LUCategory))), N''),
-        /* LUCategory → property record type. Known aliases mapped; otherwise keep LUCategory as-is (e.g. Office). */
-        PropertyType         = CONVERT(NVARCHAR(50), CASE
+        /* LUCategory → short PropertyTypeCode (≤6 for REF_PROPERTYTYPE). Full label stays in PropertyTypeRaw / Name. */
+        PropertyType         = CONVERT(NVARCHAR(6), CASE
             WHEN NULLIF(LTRIM(RTRIM(ma.LUCategory)), N'') IS NULL THEN N'SF'
             WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) LIKE N'%CONDO%' THEN N'CONDO'
             WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) IN (N'C') THEN N'CONDO'
@@ -994,7 +998,15 @@ BEGIN TRY
             WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) = N'VACANT' THEN N'LAND'
             WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) = N'TOWNHOUSE' THEN N'TH'
             WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) = N'MIXED USE' THEN N'MIXED'
-            ELSE LEFT(LTRIM(RTRIM(ma.LUCategory)), 50)  /* Office and other MA LUCategory values */
+            WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) = N'OFFICE' THEN N'OFFICE'
+            WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) LIKE N'%INSTITUTIONAL%COMMUNITY%' THEN N'INSTCF'
+            WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) LIKE N'INSTITUTIONAL/%' THEN N'INSTCF'
+            /* Fallback: alphanumeric short code (max 6) — never store full LUCategory labels as codes */
+            ELSE LEFT(
+                REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(
+                    UPPER(LTRIM(RTRIM(ma.LUCategory))),
+                    N'/', N''), N' ', N''), N'-', N''), N'&', N''), N'''', N''),
+                6)
         END),
         OwnerName            = CAST(NULL AS NVARCHAR(200)),
         YearBuilt            = CAST(NULL AS INT),
@@ -1042,27 +1054,38 @@ BEGIN TRY
     SET @MasterAddressRead = (SELECT COUNT(*) FROM #MA);
     PRINT N'Step 2 complete - MasterAddress rows: ' + CONVERT(NVARCHAR(20), @MasterAddressRead);
 
-    /* Seed REF codes for every MA LUCategory-derived type (e.g. Office) — do not force unknown → SF */
+    /* Seed REF codes for every MA LUCategory-derived short code — full label in TypeName */
     IF OBJECT_ID('tempdb..#MaPropTypes') IS NOT NULL DROP TABLE #MaPropTypes;
-    SELECT DISTINCT
+    SELECT
         PropertyType AS Code,
-        CASE
-            WHEN PropertyType = N'MULTI' THEN N'Multi-Family Property'
-            WHEN PropertyType = N'SF' THEN N'Single Family Property'
-            WHEN PropertyType = N'LAND' THEN N'Vacant Land'
-            ELSE PropertyType
-        END AS TypeName,
-        CASE WHEN PropertyType IN (N'LAND') THEN 0 ELSE 1 END AS AllowBldg,
-        CASE WHEN PropertyType IN (N'SF', N'LAND') THEN 0 ELSE 1 END AS AllowUnit
+        COALESCE(
+            MAX(CASE PropertyType
+                WHEN N'MULTI'  THEN N'Multi-Family Property'
+                WHEN N'SF'     THEN N'Single Family Property'
+                WHEN N'LAND'   THEN N'Vacant Land'
+                WHEN N'CONDO'  THEN N'Condominium Property'
+                WHEN N'APT'    THEN N'Apartment Complex'
+                WHEN N'TH'     THEN N'Townhouse Community'
+                WHEN N'MIXED'  THEN N'Mixed Use Property'
+                WHEN N'OFFICE' THEN N'Office'
+                WHEN N'INSTCF' THEN N'Institutional/Community Facilities'
+            END),
+            MAX(PropertyTypeRaw),
+            PropertyType
+        ) AS TypeName,
+        MAX(CASE WHEN PropertyType IN (N'LAND') THEN 0 ELSE 1 END) AS AllowBldg,
+        MAX(CASE WHEN PropertyType IN (N'SF', N'LAND') THEN 0 ELSE 1 END) AS AllowUnit
     INTO #MaPropTypes
     FROM #MA
-    WHERE NULLIF(LTRIM(RTRIM(PropertyType)), N'') IS NOT NULL;
+    WHERE NULLIF(LTRIM(RTRIM(PropertyType)), N'') IS NOT NULL
+    GROUP BY PropertyType;
 
     SET @Sql = N'
     MERGE dbo.REF_PROPERTYTYPE AS t
     USING #MaPropTypes AS s
     ON t.PropertyTypeCode = s.Code
     WHEN MATCHED THEN UPDATE SET
+        t.PropertyTypeName = s.TypeName,
         t.DeletedInd = 0,
         t.AllowsBuildings = CASE WHEN t.AllowsBuildings = 1 OR s.AllowBldg = 1 THEN 1 ELSE 0 END,
         t.AllowsUnits = CASE WHEN t.AllowsUnits = 1 OR s.AllowUnit = 1 THEN 1 ELSE 0 END,
@@ -1083,13 +1106,15 @@ BEGIN TRY
         SET @Sql = N'
         MERGE dbo.REF_UNITTYPECODE AS t
         USING (
-            SELECT DISTINCT
-                CASE WHEN Code = N''MULTI'' THEN N''Multi-Family'' ELSE Code END AS UnitCode,
-                CASE WHEN Code = N''MULTI'' THEN N''Multi-Family'' ELSE Code END AS UnitName
+            SELECT
+                Code AS UnitCode,
+                TypeName AS UnitName
             FROM #MaPropTypes
         ) AS s
         ON t.UnitTypeCode = s.UnitCode
         WHEN MATCHED THEN UPDATE SET
+            t.UnitTypeName = s.UnitName,
+            t.[Description] = s.UnitName,
             t.IsActive = 1,
             t.DeletedInd = 0,
             t.' + QUOTENAME(@RefUserUpdateCol) + N' = COALESCE(NULLIF(t.' + QUOTENAME(@RefUserUpdateCol) + N', N''''), @AuditUser),
@@ -1821,7 +1846,7 @@ BEGIN TRY
              AND UPPER(LTRIM(RTRIM(ISNULL(w.PropertyType, N'')))) IN (N'SF', N'LAND', N'')
                 THEN N'CONDO'
             WHEN NULLIF(LTRIM(RTRIM(w.PropertyType)), N'') IS NOT NULL
-                THEN LEFT(LTRIM(RTRIM(w.PropertyType)), 50)  /* keep MA LUCategory (Office, Multi-Family→MULTI, etc.) */
+                THEN LEFT(LTRIM(RTRIM(w.PropertyType)), 6)  /* short PropertyTypeCode only */
             ELSE @DefaultSdatPropertyType
         END,
         IsEligibleForUpr = CASE
@@ -3706,11 +3731,8 @@ BEGIN TRY
                       + N'-' + CONVERT(NVARCHAR(20), ISNULL(c.KdatRecordID, 0))
             ),
             UnitAccount = COALESCE(c.IncomingNormAccount, tm.WinnerAccount),
-            /* Unit record type follows MA LUCategory / UPR PropertyTypeCode */
-            UnitTypeCode = CASE
-                WHEN tm.PropertyTypeCode = N'MULTI' THEN N'Multi-Family'
-                ELSE COALESCE(NULLIF(LTRIM(RTRIM(tm.PropertyTypeCode)), N''), N'APT')
-            END,
+            /* Unit type uses same short code as UPR PropertyTypeCode */
+            UnitTypeCode = COALESCE(NULLIF(LTRIM(RTRIM(tm.PropertyTypeCode)), N''), N'APT'),
             ROW_NUMBER() OVER (
                 PARTITION BY
                     tm.UPropertyRecordsID,
@@ -3755,22 +3777,16 @@ BEGIN TRY
 
     SET @UnitInserted = @@ROWCOUNT;
 
-    /* Align UnitTypeCode with UPR PropertyTypeCode (fix prior SF from unmapped LUCategory e.g. Office) */
+    /* Align UnitTypeCode with UPR PropertyTypeCode (short codes only) */
     UPDATE u
     SET
-        u.UnitTypeCode = CASE
-            WHEN upr.PropertyTypeCode = N'MULTI' THEN N'Multi-Family'
-            ELSE upr.PropertyTypeCode
-        END,
+        u.UnitTypeCode = upr.PropertyTypeCode,
         u.UpdatedDate = @Now
     FROM dbo.Unit u
     INNER JOIN dbo.UPROPERTYRECORDS upr
         ON upr.UPropertyRecordsID = u.UPropertyRecordsID
     WHERE NULLIF(LTRIM(RTRIM(upr.PropertyTypeCode)), N'') IS NOT NULL
-      AND ISNULL(u.UnitTypeCode, N'') <> CASE
-            WHEN upr.PropertyTypeCode = N'MULTI' THEN N'Multi-Family'
-            ELSE upr.PropertyTypeCode
-          END;
+      AND ISNULL(u.UnitTypeCode, N'') <> upr.PropertyTypeCode;
 
     SET @CondoUnitToUnitRows = (
         SELECT COUNT(*)

@@ -1,0 +1,33 @@
+---
+description: Client paste messages must use copyable code fences (Coolify-style)
+alwaysApply: true
+---
+
+# Client-ready messages — copy icon style
+
+When giving the user text to paste to the client (email, Teams, chat), put the **entire message** in a markdown fenced code block so Cursor shows the copy button.
+
+## Rules
+
+- Use a plain fence (` ``` `) — not a quote (`>`) block
+- One copyable block per client message
+- Keep the block plain text (no markdown bold/headers inside the fence)
+- Short intro outside the fence is OK (e.g. "Message for client:")
+- Same style as Coolify project: easy one-click copy
+
+## Example
+
+Message for client:
+
+```
+Hi — summary of today’s fixes in the updated load_upr_master.sql:
+
+1. Record types — use MA LUCategory (e.g. Office stays Office, not SF).
+2. Same Account# in MA+SDAT → UPR, not false Review_Q DUPLICATE.
+3. Multiple addresses under one Account# → 1 UPR + Units; extras not DUPLICATE.
+4. XREF — MPDU / MULTIFAMILY real MATCH rows can write.
+
+Please wipe test data and re-run the full script from the top.
+
+Thanks.
+```
