@@ -2307,7 +2307,9 @@ BEGIN TRY
             WHEN u.IsMultiUnitProperty = 1 THEN CAST(1 AS BIT)
             ELSE CAST(0 AS BIT)
         END,
-        ReviewDetail = CASE
+        /* CONVERT forces ReviewDetail width — SELECT INTO otherwise sizes from short CASE
+           literals and later longer messages truncate (Error 2628). */
+        ReviewDetail = CONVERT(NVARCHAR(255), CASE
             WHEN s.BatchAccountRn > 1
                 THEN N'Duplicate SDAT account key in batch (UQ_UPropertyRecords_SDATAccountNumber)'
             WHEN s.BatchAddrRn > 1
@@ -2319,7 +2321,7 @@ BEGIN TRY
             WHEN ep.SDATAccountNumber IS NOT NULL
                 THEN N'Duplicate parcel on existing UPR (different account)'
             ELSE N'UPR unique key collision'
-        END
+        END)
     INTO #UprMergeLosers
     FROM #UprMergeScored s
     LEFT JOIN #IncomingUnique u
@@ -2397,7 +2399,7 @@ BEGIN TRY
         r.BatchAccountRn, r.BatchAddrRn, r.BatchParcelRn,
         NULL, NULL,
         CASE WHEN r.EffectivePropertyType IN (N'CONDO', N'MULTI', N'APT') THEN CAST(1 AS BIT) ELSE CAST(0 AS BIT) END,
-        N'Duplicate address key in batch — demoted; preferred MA+SDAT BOTH account kept for UPR'
+        CONVERT(NVARCHAR(255), N'Duplicate address key in batch - demoted; preferred MA+SDAT BOTH kept for UPR')
     FROM #RescueBoth r
     WHERE NOT EXISTS (
         SELECT 1 FROM #UprMergeLosers l
@@ -3853,7 +3855,7 @@ BEGIN TRY
        ======================================================================== */
     PRINT N'============================================================';
     PRINT N' UPR LOAD SUMMARY';
-    PRINT N' Script build: 2026-07-22 c000030-units-xref-match';
+    PRINT N' Script build: 2026-07-22 reviewdetail-truncate';
     PRINT N'============================================================';
     PRINT N'Batch Start Time: ' + CONVERT(VARCHAR(30), @BatchStartTime, 120);
     PRINT N'Batch End Time: ' + CONVERT(VARCHAR(30), @BatchEndTime, 120);
