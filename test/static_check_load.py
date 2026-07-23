@@ -119,32 +119,42 @@ check("SDAT CondoUnit carried to #Work and Unit",
       "CondoUnit" in main_batch
       and "s.CondoUnit" in main_batch
       and "CLIENT RULES IMPACT" in main_batch)
-check("UnitNumber from CondoUnit only (no street address)",
-      "UnitNumber = c.EffectiveUnit" in main_batch
-      and "EffectiveUnit = NULLIF(LTRIM(RTRIM(u.CondoUnit))" in main_batch
+check("UnitNumber from CondoUnit or MA Unit (no street address)",
+      "COALESCE(" in main_batch
+      and "NULLIF(LTRIM(RTRIM(u.CondoUnit))" in main_batch
+      and "NULLIF(LTRIM(RTRIM(u.Unit))" in main_batch
+      and "UnitNumber = c.EffectiveUnit" in main_batch
       and "unit id from street address" not in main_batch
       and "UID-" not in main_batch)
 check("No blanket UnitTypeCode overwrite from UPR PropertyType",
       "u.UnitTypeCode = upr.PropertyTypeCode" not in main_batch)
 check("CondoUnit UnitTypeCode forced to CONDO",
-      "UnitTypeCode = N'CONDO'" in main_batch)
+      "WHEN c.UnitFromCondo = 1 THEN N'CONDO'" in main_batch)
 check("MERGE preserves existing MULTI/CONDO/APT PropertyType",
       "upr.PropertyTypeCode IN (N'CONDO', N'MULTI', N'APT')" in main_batch
       and "NOT IN (N'CONDO', N'MULTI', N'APT')" in main_batch)
 check("UnitTargetMap one UPR per PropertyGroupKey (no OR fan-out)",
       "PARTITION BY u.PropertyGroupKey" in main_batch
       and "OR upr.SDATAccountNumber = u.PropertyGroupKey" not in main_batch)
-check("IsMultiUnitProperty does not key off MA Unit column",
-      "WHEN NULLIF(LTRIM(RTRIM(w.Unit)), N'') IS NOT NULL THEN CAST(1 AS BIT)" not in main_batch)
+check("IsMultiUnitProperty keys off CondoUnit and MA Unit",
+      "WHEN NULLIF(LTRIM(RTRIM(w.CondoUnit)), N'') IS NOT NULL THEN CAST(1 AS BIT)" in main_batch
+      and "WHEN NULLIF(LTRIM(RTRIM(w.Unit)), N'') IS NOT NULL THEN CAST(1 AS BIT)" in main_batch)
 check("External full-address match truncates to UPR length 100",
       "LEFT(ea.NormFullAddress, 100) = upr.NormalizedFullAddress" in main_batch)
 check("ReviewDetail SELECT INTO uses CONVERT NVARCHAR(255)",
       "CONVERT(NVARCHAR(255), CASE" in main_batch
       and "CONVERT forces ReviewDetail width" in main_batch)
 check("MULTI mapped before CONDO in LUCategory CASE",
-      text.find("%MULTI%FAMILY%") < text.find("LIKE N'%CONDO%'")
-      or text.find("%MULTI%FAMILY%") < text.find("LIKE N'%CONDO%'"))
-
+      text.find("%MULTI%FAMILY%") < text.find("LIKE N'%CONDO%'"))
+check("SDAT CONDO + MA LUCategory discovery documented",
+      "SDAT — always CONDO" in text
+      and "MA   — PropertyType from LUCategory" in text
+      and "use ONLY what incoming SDAT and MA have" in text)
+check("No invented APT UnitTypeCode fallback",
+      "N'APT'\n                )" not in main_batch
+      and "COALESCE(\n                    NULLIF(LTRIM(RTRIM(tm.PropertyTypeCode))" in main_batch)
+check("MA blank LUCategory does not invent SF",
+      "WHEN NULLIF(LTRIM(RTRIM(ma.LUCategory)), N'') IS NULL THEN NULL" in main_batch)
 # MERGE blocks have WHEN NOT MATCHED
 merge_count = len(re.findall(r"\bMERGE\s+dbo\.", main_batch, re.I))
 not_matched = len(re.findall(r"WHEN\s+NOT\s+MATCHED", main_batch, re.I))
