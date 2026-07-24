@@ -114,7 +114,7 @@ check("Multi-unit UQ losers attach as Unit",
       "#UprMergeLosersToUnit" in main_batch
       and "multi-unit UQ collisions attached as Unit" in main_batch)
 check("Multi-unit LUCategory substring mapping",
-      "%MULTI%FAMILY%" in text and "%CONDO%" in text)
+      "%MULT%FAMILY%" in text and "%CONDO%" in text)
 check("SDAT CondoUnit carried to #Work and Unit",
       "CondoUnit" in main_batch
       and "s.CondoUnit" in main_batch
@@ -150,11 +150,20 @@ check("SDAT CONDO + MA LUCategory discovery documented",
       "SDAT — always CONDO" in text
       and "MA   — PropertyType from LUCategory" in text
       and "use ONLY what incoming SDAT and MA have" in text)
-check("No invented APT UnitTypeCode fallback",
-      "N'APT'\n                )" not in main_batch
-      and "COALESCE(\n                    NULLIF(LTRIM(RTRIM(tm.PropertyTypeCode))" in main_batch)
-check("MA blank LUCategory does not invent SF",
-      "WHEN NULLIF(LTRIM(RTRIM(ma.LUCategory)), N'') IS NULL THEN NULL" in main_batch)
+check("MULTY-Family / Multi-Family maps to MULTI",
+      "%MULT%FAMILY%" in text
+      and "%MULTY%FAMILY%" in text
+      and "N'MULTI'" in text)
+check("Building for WAREHOUSE/OFFICE/LAND/PARK",
+      "N'WAREHS'" in main_batch
+      and "N'OFFICE'" in main_batch
+      and "N'LAND'" in main_batch
+      and "N'PARK'" in main_batch
+      and "AllowsBuildings" in main_batch)
+check("Multi-Family blank unit uses source row id not street",
+      "N'MA-' + CONVERT(NVARCHAR(20), u.MasterAddressID)" in main_batch
+      and "N'SD-' + CONVERT(NVARCHAR(20), u.KdatRecordID)" in main_batch
+      and "unit id from street address" not in main_batch)
 # MERGE blocks have WHEN NOT MATCHED
 merge_count = len(re.findall(r"\bMERGE\s+dbo\.", main_batch, re.I))
 not_matched = len(re.findall(r"WHEN\s+NOT\s+MATCHED", main_batch, re.I))

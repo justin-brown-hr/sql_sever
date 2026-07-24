@@ -12,7 +12,8 @@
        ONE UPR property (PropertyType MULTI for Multi-Family, CONDO for Condo);
        Unit.UnitNumber from source unit fields only (never street address, never DwellingUnits).
        NOT Review_Q DUPLICATE. Only other invalid data → Review_Q.
-       Building: one per UPR; BuildingAddress = UPR address (no BuildingCode/Name/TypeCode).
+       Building: one per UPR with address for types that need a building
+       (CONDO/MULTI/APT/OFFICE/WAREHOUSE/VACANT/PARK/…). Building-only when no units.
        Property identity: Account# (SDATAccountNumber); CNumber set for C-style accounts.
     3) Extra source rows for non-multi types (same account+address) → Review_Q DUPLICATE.
        Same Account# (MA and/or SDAT) → ONE UPR always (best address kept); not DUPLICATE.
@@ -25,8 +26,9 @@
        MA   — PropertyType from LUCategory only (no invented type if LUCategory blank).
               UnitNumber = MA Unit when present.
        Prefer CondoUnit over MA Unit when both present.
-       Never invent UnitNumber (no street address, DwellingUnits, U1, UID-*).
-       Never invent property/unit types from fields the source does not have.
+       MULTI/APT/CONDO multi-rows with blank unit fields → UnitNumber = MA-{MasterAddressID} / SD-{KdatRecordID}
+       (incoming source row id — never street address / DwellingUnits).
+       Never invent property types from fields the source does not have.
     7) External XREF — address match against UPR only; write XREF on MATCH only.
        No address match is counted in the summary only (not an XREF row, not Review_Q).
 
@@ -724,9 +726,11 @@ BEGIN TRY
         (N''TH'',     N''Townhouse Community'',                  1, 1),
         (N''MULTI'',  N''Multi-Family Property'',                1, 1),
         (N''SF'',     N''Single Family Property'',               1, 0),
-        (N''LAND'',   N''Vacant Land'',                          0, 0),
+        (N''LAND'',   N''Vacant Land'',                          1, 0),
         (N''MIXED'',  N''Mixed Use Property'',                   1, 1),
-        (N''OFFICE'', N''Office'',                               1, 1),
+        (N''OFFICE'', N''Office'',                               1, 0),
+        (N''WAREHS'', N''Warehouse'',                            1, 0),
+        (N''PARK'',   N''Park'',                                 1, 0),
         (N''INSTCF'', N''Institutional/Community Facilities'',   1, 1)
     ) AS s(Code, Name, AllowBldg, AllowUnit)
     ON t.PropertyTypeCode = s.Code
@@ -993,9 +997,11 @@ BEGIN TRY
         PropertyType         = CONVERT(NVARCHAR(6), CASE
             /* Only map when LUCategory is present — do not invent SF for blank */
             WHEN NULLIF(LTRIM(RTRIM(ma.LUCategory)), N'') IS NULL THEN NULL
-            /* Multi-Family before CONDO so hybrid labels stay MULTI */
-            WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) LIKE N'%MULTI%FAMILY%' THEN N'MULTI'
+            /* Multi-Family / MULTY-Family / Multifamily → MULTI (before CONDO) */
+            WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) LIKE N'%MULT%FAMILY%' THEN N'MULTI'
             WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) LIKE N'%MULTIFAMILY%' THEN N'MULTI'
+            WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) LIKE N'%MULTY%FAMILY%' THEN N'MULTI'
+            WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) IN (N'MULTI', N'MULTY', N'MULTI-FAMILY', N'MULTY-FAMILY') THEN N'MULTI'
             WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) LIKE N'%APART%' THEN N'APT'
             WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) IN (N'APT', N'APARTMENT', N'APARTMENTS') THEN N'APT'
             WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) LIKE N'%CONDO%' THEN N'CONDO'
@@ -1003,9 +1009,15 @@ BEGIN TRY
             WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) = N'SINGLE FAMILY DETACHED' THEN N'SF'
             WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) = N'SINGLE FAMILY ATTACHED' THEN N'SF'
             WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) = N'VACANT' THEN N'LAND'
+            WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) LIKE N'%VACANT%' THEN N'LAND'
             WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) = N'TOWNHOUSE' THEN N'TH'
             WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) = N'MIXED USE' THEN N'MIXED'
             WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) = N'OFFICE' THEN N'OFFICE'
+            WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) LIKE N'%OFFICE%' THEN N'OFFICE'
+            WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) LIKE N'%WAREHOUSE%' THEN N'WAREHS'
+            WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) = N'PARK' THEN N'PARK'
+            WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) LIKE N'%PARK%'
+             AND UPPER(LTRIM(RTRIM(ma.LUCategory))) NOT LIKE N'%PARKWAY%' THEN N'PARK'
             WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) LIKE N'%INSTITUTIONAL%COMMUNITY%' THEN N'INSTCF'
             WHEN UPPER(LTRIM(RTRIM(ma.LUCategory))) LIKE N'INSTITUTIONAL/%' THEN N'INSTCF'
             /* Short code derived from the incoming LUCategory text itself (not an invented label) */
@@ -1075,13 +1087,16 @@ BEGIN TRY
                 WHEN N'TH'     THEN N'Townhouse Community'
                 WHEN N'MIXED'  THEN N'Mixed Use Property'
                 WHEN N'OFFICE' THEN N'Office'
+                WHEN N'WAREHS' THEN N'Warehouse'
+                WHEN N'PARK'   THEN N'Park'
                 WHEN N'INSTCF' THEN N'Institutional/Community Facilities'
             END),
             MAX(PropertyTypeRaw),
             PropertyType
         ) AS TypeName,
-        MAX(CASE WHEN PropertyType IN (N'LAND') THEN 0 ELSE 1 END) AS AllowBldg,
-        MAX(CASE WHEN PropertyType IN (N'SF', N'LAND') THEN 0 ELSE 1 END) AS AllowUnit
+        /* Client: Vacant/Park/Warehouse/Office with address → Building allowed */
+        MAX(CASE WHEN PropertyType IN (N'SF') THEN 1 ELSE 1 END) AS AllowBldg,
+        MAX(CASE WHEN PropertyType IN (N'SF', N'LAND', N'OFFICE', N'WAREHS', N'PARK') THEN 0 ELSE 1 END) AS AllowUnit
     INTO #MaPropTypes
     FROM #MA
     WHERE NULLIF(LTRIM(RTRIM(PropertyType)), N'') IS NOT NULL
@@ -3694,7 +3709,8 @@ BEGIN TRY
           WHERE m.PropertyGroupKey = u.PropertyGroupKey
       );
 
-    /* Building: one row per UPR that needs units — identity = UPR address (Account#/CNumber via UPR) */
+    /* Building: one per UPR with address when type allows buildings
+       (CONDO/MULTI/APT/OFFICE/WAREHOUSE/VACANT/PARK/…) — Unit optional */
     INSERT INTO dbo.Building (
         UPropertyRecordsID, BuildingAddress,
         StatusCode, IsActive, CreatedDate, UpdatedDate, CreatedBy, UpdatedBy
@@ -3704,8 +3720,17 @@ BEGIN TRY
         COALESCE(upr.NormalizedFullAddress, upr.NormalizedStreetAddress),
         N'ACTIVE', 1, @Now, @Now, @RunUser, @RunUser
     FROM dbo.UPROPERTYRECORDS upr
-    WHERE (
-            upr.PropertyTypeCode IN (N'CONDO', N'MULTI', N'APT')
+    LEFT JOIN dbo.REF_PROPERTYTYPE pt
+        ON pt.PropertyTypeCode = upr.PropertyTypeCode
+       AND ISNULL(pt.DeletedInd, 0) = 0
+    WHERE NULLIF(LTRIM(RTRIM(COALESCE(upr.NormalizedFullAddress, upr.NormalizedStreetAddress))), N'') IS NOT NULL
+      AND (
+            ISNULL(pt.AllowsBuildings, 0) = 1
+         OR upr.PropertyTypeCode IN (
+                N'CONDO', N'MULTI', N'APT', N'TH', N'MIXED', N'INSTCF',
+                N'OFFICE', N'WAREHS', N'LAND', N'PARK', N'SF'
+            )
+         OR upr.PropertyTypeCode LIKE N'WARE%'
          OR EXISTS (SELECT 1 FROM #UnitTargetMap m WHERE m.UPropertyRecordsID = upr.UPropertyRecordsID)
          OR EXISTS (
                 SELECT 1 FROM #UPRMap m
@@ -3717,6 +3742,7 @@ BEGIN TRY
                 WHERE (
                         NULLIF(LTRIM(RTRIM(u.CondoUnit)), N'') IS NOT NULL
                      OR NULLIF(LTRIM(RTRIM(u.Unit)), N'') IS NOT NULL
+                     OR u.PropertyType IN (N'CONDO', N'MULTI', N'APT')
                   )
                   AND u.IncomingNormAccount = upr.SDATAccountNumber
             )
@@ -3740,14 +3766,29 @@ BEGIN TRY
     WHERE ISNULL(b.BuildingAddress, N'')
           <> ISNULL(COALESCE(upr.NormalizedFullAddress, upr.NormalizedStreetAddress), N'');
 
-    /* UnitNumber = CondoUnit (SDAT) or MA Unit — never street address / DwellingUnits / synthetic id */
+    /* UnitNumber from incoming only (never street address / DwellingUnits):
+         1) CondoUnit (SDAT)  2) MA Unit
+         3) MULTI/APT/CONDO multi-occurrence with blank unit → source row id (MA-/SD-) */
     ;WITH UnitCandidates AS (
         SELECT
             u.MasterAddressID,
             u.KdatRecordID,
             EffectiveUnit = COALESCE(
                 NULLIF(LTRIM(RTRIM(u.CondoUnit)), N''),
-                NULLIF(LTRIM(RTRIM(u.Unit)), N'')
+                NULLIF(LTRIM(RTRIM(u.Unit)), N''),
+                CASE
+                    WHEN u.PropertyType IN (N'CONDO', N'MULTI', N'APT')
+                     AND (
+                            u.IsMultiUnitProperty = 1
+                         OR ISNULL(u.AccountOccurrenceCount, 0) > 1
+                     )
+                        THEN CASE
+                            WHEN u.MasterAddressID IS NOT NULL
+                                THEN N'MA-' + CONVERT(NVARCHAR(20), u.MasterAddressID)
+                            WHEN u.KdatRecordID IS NOT NULL
+                                THEN N'SD-' + CONVERT(NVARCHAR(20), u.KdatRecordID)
+                        END
+                END
             ),
             UnitFromCondo = CASE
                 WHEN NULLIF(LTRIM(RTRIM(u.CondoUnit)), N'') IS NOT NULL THEN CAST(1 AS BIT)
@@ -3763,6 +3804,13 @@ BEGIN TRY
         FROM #IncomingUnified u
         WHERE NULLIF(LTRIM(RTRIM(u.CondoUnit)), N'') IS NOT NULL
            OR NULLIF(LTRIM(RTRIM(u.Unit)), N'') IS NOT NULL
+           OR (
+                u.PropertyType IN (N'CONDO', N'MULTI', N'APT')
+            AND (
+                    u.IsMultiUnitProperty = 1
+                 OR ISNULL(u.AccountOccurrenceCount, 0) > 1
+                )
+           )
     ),
     UnitSrc AS (
         SELECT
@@ -3770,12 +3818,12 @@ BEGIN TRY
             b.BuildingID,
             UnitNumber = c.EffectiveUnit,
             UnitAccount = COALESCE(c.IncomingNormAccount, tm.WinnerAccount),
-            /* SDAT CondoUnit → CONDO; MA Unit → only incoming/UPR type (never invent APT) */
             UnitTypeCode = CASE
                 WHEN c.UnitFromCondo = 1 THEN N'CONDO'
                 ELSE COALESCE(
                     NULLIF(LTRIM(RTRIM(tm.PropertyTypeCode)), N''),
-                    NULLIF(LTRIM(RTRIM(c.PropertyType)), N'')
+                    NULLIF(LTRIM(RTRIM(c.PropertyType)), N''),
+                    N'MULTI'
                 )
             END,
             ROW_NUMBER() OVER (
@@ -3784,7 +3832,8 @@ BEGIN TRY
                     c.EffectiveUnit
                 ORDER BY
                     CASE WHEN c.UnitFromCondo = 1 THEN 0 ELSE 1 END,
-                    CASE c.MatchSource WHEN N'BOTH' THEN 1 WHEN N'KDAT' THEN 2 ELSE 3 END,
+                    CASE WHEN NULLIF(LTRIM(RTRIM(c.Unit)), N'') IS NOT NULL THEN 0 ELSE 1 END,
+                    CASE c.MatchSource WHEN N'BOTH' THEN 1 WHEN N'ADDRESS_MASTER' THEN 2 ELSE 3 END,
                     c.IncomingDupRn,
                     c.MasterAddressID,
                     c.KdatRecordID
@@ -3831,6 +3880,8 @@ BEGIN TRY
               WHERE (
                     (NULLIF(LTRIM(RTRIM(iu.CondoUnit)), N'') IS NOT NULL AND u.UnitNumber = iu.CondoUnit)
                  OR (NULLIF(LTRIM(RTRIM(iu.Unit)), N'') IS NOT NULL AND u.UnitNumber = iu.Unit)
+                 OR u.UnitNumber LIKE N'MA-%'
+                 OR u.UnitNumber LIKE N'SD-%'
               )
           )
     );
@@ -3888,15 +3939,15 @@ BEGIN TRY
        ======================================================================== */
     PRINT N'============================================================';
     PRINT N' UPR LOAD SUMMARY';
-    PRINT N' Script build: 2026-07-23 incoming-only-sdat-ma';
+    PRINT N' Script build: 2026-07-24 building-multi-units';
     PRINT N'Batch Start Time: ' + CONVERT(VARCHAR(30), @BatchStartTime, 120);
     PRINT N'Batch End Time: ' + CONVERT(VARCHAR(30), @BatchEndTime, 120);
     PRINT N' ';
     PRINT N'--- CLIENT RULES IMPACT ---';
-    PRINT N' Only use incoming SDAT + MA values (no invented UnitNumber / types)';
-    PRINT N' SDAT = CONDO always; UnitNumber from CondoUnit when present';
-    PRINT N' MA   = LUCategory types; UnitNumber from MA Unit when present';
-    PRINT N' Never street address / DwellingUnits as UnitNumber';
+    PRINT N' Only use incoming SDAT + MA values (no street address as UnitNumber)';
+    PRINT N' SDAT = CONDO; MA = LUCategory (MULTY-Family→MULTI; WAREHOUSE/OFFICE/VACANT/PARK)';
+    PRINT N' Building for address types including WAREHOUSE/OFFICE/LAND/PARK';
+    PRINT N' UnitNumber = CondoUnit | MA Unit | MA-/SD- row id for MULTI/APT/CONDO multi-rows';
     PRINT N'1) Multi-Family/CONDO property keys (1 UPR each): ' + CONVERT(VARCHAR(20), @MultiFamilyPropertyKeys);
     PRINT N'2) Multi-unit extras → Unit (NOT Review_Q DUPLICATE): ' + CONVERT(VARCHAR(20), @MultiUnitExtraRows);
     PRINT N'3) Multi-unit UQ collisions → Unit (NOT DUPLICATE): ' + CONVERT(VARCHAR(20), @UqUnitAttachRows);
