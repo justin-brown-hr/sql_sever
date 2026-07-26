@@ -649,6 +649,47 @@ BEGIN
     PRINT N'Schema: Building uses UPR address only (BuildingCode/Name/TypeCode removed).';
 END
 
+/* ------------------------------------------------------------------
+   CONTACT / PROPERTYCONTACT support
+   Client rule: every valid UPR must have ONE PropertyContact (1:1),
+   and may have many Contact rows (1:many). These indexes keep the
+   per-UPR lookups fast on 75k+ properties.
+   ------------------------------------------------------------------ */
+IF OBJECT_ID(N'dbo.CONTACT', N'U') IS NOT NULL
+   AND NOT EXISTS (
+        SELECT 1 FROM sys.indexes
+        WHERE object_id = OBJECT_ID(N'dbo.CONTACT')
+          AND name = N'IX_CONTACT_OrganizationName'
+   )
+    CREATE NONCLUSTERED INDEX IX_CONTACT_OrganizationName
+        ON dbo.CONTACT (OrganizationName);
+
+IF OBJECT_ID(N'dbo.PROPERTYCONTACT', N'U') IS NOT NULL
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM sys.indexes
+        WHERE object_id = OBJECT_ID(N'dbo.PROPERTYCONTACT')
+          AND name = N'IX_PROPERTYCONTACT_UPropertyRecordsID'
+    )
+        CREATE NONCLUSTERED INDEX IX_PROPERTYCONTACT_UPropertyRecordsID
+            ON dbo.PROPERTYCONTACT (UPropertyRecordsID);
+
+    /* Drop exact duplicate links left by earlier runs so the 1:1 count holds */
+    ;WITH KeepPC AS (
+        SELECT
+            PropertyContactID,
+            ROW_NUMBER() OVER (
+                PARTITION BY UPropertyRecordsID, ContactID, ContactRoleCode
+                ORDER BY PropertyContactID
+            ) AS Rn
+        FROM dbo.PROPERTYCONTACT
+    )
+    DELETE pc
+    FROM dbo.PROPERTYCONTACT pc
+    INNER JOIN KeepPC k ON k.PropertyContactID = pc.PropertyContactID
+    WHERE k.Rn > 1;
+END
+
 BEGIN TRY
     BEGIN TRANSACTION;
 
@@ -3606,25 +3647,88 @@ BEGIN TRY
     SET @ReviewInserted = @ReviewIncomingInserted;
 
     /* ========================================================================
-       8. CONTACT + PROPERTYCONTACT (owner from SDAT)
+       8. CONTACT + PROPERTYCONTACT
+       Client rule:
+         - UPR : PROPERTYCONTACT is 1:1 — every valid UPR gets exactly one link
+         - UPR : CONTACT is 1:many
+       Owner name only exists on SDAT (MA has none), so MA-only properties
+       (C-number rows such as C000461) used to end up with no contact at all.
+       Fallback keeps to incoming data only: the property's own Account#/CNumber
+       is used as the contact organization when the source has no owner name.
        ======================================================================== */
+    IF OBJECT_ID('tempdb..#UprOwnerName') IS NOT NULL DROP TABLE #UprOwnerName;
+
+    /* UNION ALL instead of an OR join: a matched pair keeps its MA row and its
+       SDAT row in #Work, and the GROUP BY collapses any fan-out back to one
+       owner name per UPR. */
+    ;WITH OwnerBySource AS (
+        SELECT m.UPropertyRecordsID, w.OwnerName
+        FROM #UPRMap m
+        INNER JOIN #Work w ON w.KdatRecordID = m.KdatRecordID
+        WHERE m.KdatRecordID IS NOT NULL
+        UNION ALL
+        SELECT m.UPropertyRecordsID, w.OwnerName
+        FROM #UPRMap m
+        INNER JOIN #Work w ON w.MasterAddressID = m.MasterAddressID
+        WHERE m.MasterAddressID IS NOT NULL
+    )
+    SELECT
+        UPropertyRecordsID,
+        OwnerName = LEFT(MAX(NULLIF(LTRIM(RTRIM(OwnerName)), N'')), 200)
+    INTO #UprOwnerName
+    FROM OwnerBySource
+    WHERE UPropertyRecordsID IS NOT NULL
+    GROUP BY UPropertyRecordsID;
+
+    CREATE UNIQUE CLUSTERED INDEX IX_UprOwnerName ON #UprOwnerName (UPropertyRecordsID);
+
+    IF OBJECT_ID('tempdb..#UprContactSrc') IS NOT NULL DROP TABLE #UprContactSrc;
+
+    SELECT
+        upr.UPropertyRecordsID,
+        ContactOrg = CONVERT(NVARCHAR(200), COALESCE(
+            o.OwnerName,
+            NULLIF(LTRIM(RTRIM(upr.Owner)), N''),
+            NULLIF(LTRIM(RTRIM(upr.SDATAccountNumber)), N''),
+            NULLIF(LTRIM(RTRIM(upr.CNumber)), N'')
+        )),
+        HasOwnerName = CONVERT(BIT, CASE
+            WHEN COALESCE(o.OwnerName, NULLIF(LTRIM(RTRIM(upr.Owner)), N'')) IS NOT NULL THEN 1 ELSE 0
+        END)
+    INTO #UprContactSrc
+    FROM dbo.UPROPERTYRECORDS upr
+    LEFT JOIN #UprOwnerName o ON o.UPropertyRecordsID = upr.UPropertyRecordsID
+    WHERE upr.IsActive = 1;
+
+    CREATE UNIQUE CLUSTERED INDEX IX_UprContactSrc ON #UprContactSrc (UPropertyRecordsID);
+
+    /* ContactTypeCode marks which rows are real incoming owners vs Account#-only
+       placeholders, so the client can tell them apart without guessing. */
     INSERT INTO dbo.CONTACT (ContactTypeCode, OrganizationName, IsActive, CreatedDate, UpdatedDate)
-    SELECT DISTINCT N'OWNER', LEFT(LTRIM(RTRIM(w.OwnerName)), 200), 1, @Now, @Now
-    FROM #Work w
-    WHERE NULLIF(LTRIM(RTRIM(w.OwnerName)), N'') IS NOT NULL
-      AND NOT EXISTS (SELECT 1 FROM dbo.CONTACT c WHERE c.OrganizationName = LTRIM(RTRIM(w.OwnerName)));
+    SELECT
+        CASE WHEN MAX(CONVERT(TINYINT, s.HasOwnerName)) = 1 THEN N'OWNER' ELSE N'UNKNOWN' END,
+        s.ContactOrg, 1, @Now, @Now
+    FROM #UprContactSrc s
+    WHERE NULLIF(LTRIM(RTRIM(s.ContactOrg)), N'') IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM dbo.CONTACT c WHERE c.OrganizationName = s.ContactOrg)
+    GROUP BY s.ContactOrg;
 
     SET @ContactInserted = @@ROWCOUNT;
 
+    /* TOP 1 keeps the link 1:1 even when the same owner name exists twice in CONTACT */
     INSERT INTO dbo.PROPERTYCONTACT (UPropertyRecordsID, ContactID, ContactRoleCode, EffectiveStartDate, IsActive)
-    SELECT m.UPropertyRecordsID, c.ContactID, N'OWNER', @Now, 1
-    FROM #UPRMap m
-    INNER JOIN #Work w ON (w.MasterAddressID = m.MasterAddressID OR w.KdatRecordID = m.KdatRecordID)
-    INNER JOIN dbo.CONTACT c ON c.OrganizationName = LTRIM(RTRIM(w.OwnerName))
-    WHERE NULLIF(LTRIM(RTRIM(w.OwnerName)), N'') IS NOT NULL
+    SELECT s.UPropertyRecordsID, oc.ContactID, N'OWNER', @Now, 1
+    FROM #UprContactSrc s
+    CROSS APPLY (
+        SELECT TOP 1 c.ContactID
+        FROM dbo.CONTACT c
+        WHERE c.OrganizationName = s.ContactOrg
+        ORDER BY c.ContactID
+    ) oc
+    WHERE NULLIF(LTRIM(RTRIM(s.ContactOrg)), N'') IS NOT NULL
       AND NOT EXISTS (
           SELECT 1 FROM dbo.PROPERTYCONTACT pc
-          WHERE pc.UPropertyRecordsID = m.UPropertyRecordsID AND pc.ContactID = c.ContactID
+          WHERE pc.UPropertyRecordsID = s.UPropertyRecordsID
       );
 
     SET @PropertyContactInserted = @@ROWCOUNT;
@@ -3709,8 +3813,8 @@ BEGIN TRY
           WHERE m.PropertyGroupKey = u.PropertyGroupKey
       );
 
-    /* Building: one per UPR with address when type allows buildings
-       (CONDO/MULTI/APT/OFFICE/WAREHOUSE/VACANT/PARK/…) — Unit optional */
+    /* Building: exactly one per active UPR, every record type
+       (CONDO/MULTI/APT/OFFICE/WAREHOUSE/VACANT/PARK/SF/…) — Unit optional */
     INSERT INTO dbo.Building (
         UPropertyRecordsID, BuildingAddress,
         StatusCode, IsActive, CreatedDate, UpdatedDate, CreatedBy, UpdatedBy
@@ -3720,33 +3824,10 @@ BEGIN TRY
         COALESCE(upr.NormalizedFullAddress, upr.NormalizedStreetAddress),
         N'ACTIVE', 1, @Now, @Now, @RunUser, @RunUser
     FROM dbo.UPROPERTYRECORDS upr
-    LEFT JOIN dbo.REF_PROPERTYTYPE pt
-        ON pt.PropertyTypeCode = upr.PropertyTypeCode
-       AND ISNULL(pt.DeletedInd, 0) = 0
-    WHERE NULLIF(LTRIM(RTRIM(COALESCE(upr.NormalizedFullAddress, upr.NormalizedStreetAddress))), N'') IS NOT NULL
-      AND (
-            ISNULL(pt.AllowsBuildings, 0) = 1
-         OR upr.PropertyTypeCode IN (
-                N'CONDO', N'MULTI', N'APT', N'TH', N'MIXED', N'INSTCF',
-                N'OFFICE', N'WAREHS', N'LAND', N'PARK', N'SF'
-            )
-         OR upr.PropertyTypeCode LIKE N'WARE%'
-         OR EXISTS (SELECT 1 FROM #UnitTargetMap m WHERE m.UPropertyRecordsID = upr.UPropertyRecordsID)
-         OR EXISTS (
-                SELECT 1 FROM #UPRMap m
-                WHERE m.UPropertyRecordsID = upr.UPropertyRecordsID
-                  AND NULLIF(LTRIM(RTRIM(COALESCE(m.CondoUnit, m.Unit))), N'') IS NOT NULL
-            )
-         OR EXISTS (
-                SELECT 1 FROM #IncomingUnified u
-                WHERE (
-                        NULLIF(LTRIM(RTRIM(u.CondoUnit)), N'') IS NOT NULL
-                     OR NULLIF(LTRIM(RTRIM(u.Unit)), N'') IS NOT NULL
-                     OR u.PropertyType IN (N'CONDO', N'MULTI', N'APT')
-                  )
-                  AND u.IncomingNormAccount = upr.SDATAccountNumber
-            )
-          )
+    /* Client rule: UPR : Building is 1:1 — a property is in UPR because it has a
+       valid address, so it always gets a building regardless of record type
+       (WAREHOUSE, OFFICE, VACANT/LAND, PARK, SF included). */
+    WHERE upr.IsActive = 1
       AND NOT EXISTS (
           SELECT 1 FROM dbo.Building b
           WHERE b.UPropertyRecordsID = upr.UPropertyRecordsID
@@ -4030,6 +4111,41 @@ BEGIN TRY
     PRINT N'Unit records inserted: ' + CONVERT(VARCHAR(20), @UnitInserted);
     PRINT N'Contact records inserted: ' + CONVERT(VARCHAR(20), @ContactInserted);
     PRINT N'PropertyContact records inserted: ' + CONVERT(VARCHAR(20), @PropertyContactInserted);
+    PRINT N' ';
+    PRINT N'--- 1:1 / 1:many integrity (UPR vs Building / PropertyContact) ---';
+
+    DECLARE @UprActiveCount INT = (SELECT COUNT(*) FROM dbo.UPROPERTYRECORDS WHERE IsActive = 1);
+    DECLARE @BuildingTableCount INT = (SELECT COUNT(*) FROM dbo.Building);
+    DECLARE @PropertyContactTableCount INT = (SELECT COUNT(*) FROM dbo.PROPERTYCONTACT);
+    DECLARE @ContactTableCount INT = (SELECT COUNT(*) FROM dbo.CONTACT);
+    DECLARE @UnitTableCount INT = (SELECT COUNT(*) FROM dbo.Unit);
+    DECLARE @UprNoBuilding INT = (
+        SELECT COUNT(*) FROM dbo.UPROPERTYRECORDS upr
+        WHERE upr.IsActive = 1
+          AND NOT EXISTS (SELECT 1 FROM dbo.Building b WHERE b.UPropertyRecordsID = upr.UPropertyRecordsID)
+    );
+    DECLARE @UprNoPropertyContact INT = (
+        SELECT COUNT(*) FROM dbo.UPROPERTYRECORDS upr
+        WHERE upr.IsActive = 1
+          AND NOT EXISTS (SELECT 1 FROM dbo.PROPERTYCONTACT pc WHERE pc.UPropertyRecordsID = upr.UPropertyRecordsID)
+    );
+
+    PRINT N'UPR active count: ' + CONVERT(VARCHAR(20), @UprActiveCount);
+    PRINT N'Building table count (must equal UPR): ' + CONVERT(VARCHAR(20), @BuildingTableCount);
+    PRINT N'PropertyContact table count (must equal UPR): ' + CONVERT(VARCHAR(20), @PropertyContactTableCount);
+    PRINT N'Contact table count (may be fewer - owners are shared, or more): ' + CONVERT(VARCHAR(20), @ContactTableCount);
+    PRINT N'Unit table count (1:many, may be more): ' + CONVERT(VARCHAR(20), @UnitTableCount);
+    PRINT N'UPR rows missing a Building: ' + CONVERT(VARCHAR(20), @UprNoBuilding);
+    PRINT N'UPR rows missing a PropertyContact: ' + CONVERT(VARCHAR(20), @UprNoPropertyContact);
+
+    IF @UprNoBuilding > 0
+        PRINT N'WARNING: some active UPR rows have no Building record (1:1 rule broken).';
+    IF @UprNoPropertyContact > 0
+        PRINT N'WARNING: some active UPR rows have no PropertyContact record (1:1 rule broken).';
+    IF @UprNoBuilding = 0 AND @UprNoPropertyContact = 0
+        PRINT N'Check OK: every active UPR has one Building and one PropertyContact.';
+    PRINT N'NOTE: owner name comes from SDAT only. MA-only properties (C-number) have no'
+        + N' incoming owner, so their Contact carries the incoming Account#/CNumber - no invented names.';
     PRINT N'============================================================';
     PRINT N'UPR LOAD COMPLETE';
 

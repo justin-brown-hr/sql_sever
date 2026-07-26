@@ -160,6 +160,39 @@ check("Building for WAREHOUSE/OFFICE/LAND/PARK",
       and "N'LAND'" in main_batch
       and "N'PARK'" in main_batch
       and "AllowsBuildings" in main_batch)
+# Building is 1:1 with UPR — no property-type gate on the insert
+building_insert = re.search(
+    r"INSERT INTO dbo\.Building\s*\((.|\n)*?;", main_batch, re.I)
+building_sql = building_insert.group(0) if building_insert else ""
+check("Building insert is 1:1 with UPR (no property-type filter)",
+      bool(building_sql)
+      and "UPR : Building is 1:1" in building_sql
+      and "ISNULL(pt.AllowsBuildings, 0) = 1" not in building_sql
+      and "REF_PROPERTYTYPE" not in building_sql)
+# PropertyContact is 1:1 with UPR — driven from UPR, not from owner name presence
+check("PropertyContact driven from every active UPR",
+      "#UprContactSrc" in main_batch
+      and "FROM dbo.UPROPERTYRECORDS upr" in main_batch
+      and re.search(
+          r"INSERT INTO dbo\.PROPERTYCONTACT(.|\n)*?FROM #UprContactSrc",
+          main_batch, re.I) is not None)
+check("PropertyContact guard is per UPR (1:1, not per contact)",
+      re.search(
+          r"INSERT INTO dbo\.PROPERTYCONTACT(.|\n)*?NOT EXISTS\s*\(\s*"
+          r"SELECT 1 FROM dbo\.PROPERTYCONTACT pc\s*"
+          r"WHERE pc\.UPropertyRecordsID = s\.UPropertyRecordsID\s*\)",
+          main_batch, re.I) is not None)
+check("Contact falls back to incoming Account#/CNumber (no invented names)",
+      "NULLIF(LTRIM(RTRIM(upr.SDATAccountNumber)), N'')" in main_batch
+      and "NULLIF(LTRIM(RTRIM(upr.CNumber)), N'')" in main_batch
+      and "HasOwnerName" in main_batch)
+check("Owner lookup avoids OR fan-out between #UPRMap and #Work",
+      "OwnerBySource" in main_batch
+      and "w.MasterAddressID = m.MasterAddressID OR w.KdatRecordID = m.KdatRecordID"
+          not in main_batch)
+check("Summary verifies UPR = Building = PropertyContact",
+      "UPR rows missing a Building" in main_batch
+      and "UPR rows missing a PropertyContact" in main_batch)
 check("Multi-Family blank unit uses source row id not street",
       "N'MA-' + CONVERT(NVARCHAR(20), u.MasterAddressID)" in main_batch
       and "N'SD-' + CONVERT(NVARCHAR(20), u.KdatRecordID)" in main_batch
