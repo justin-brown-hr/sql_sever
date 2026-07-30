@@ -84,7 +84,7 @@ Re-run the script to see full detail for that one property.
 |------|---------|
 | `scripts/load_upr_master.sql` | **Run this** to process your data |
 | `test/run_test_and_results.sql` | **Run this after** to validate results |
-| `scripts/search_upr_master.sql` | Search UPR anytime |
+| `scripts/search_upr_master.sql` | Creates `dbo.usp_UPR_Search` — EXEC search by criteria |
 
 You do **NOT** need `test/seed_test_incoming.sql` for real data — that file is sample data only.
 

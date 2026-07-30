@@ -504,18 +504,23 @@ Re-run on same data **skips** already-inserted rows. Counts in summary will diff
 | Script | Purpose |
 |--------|---------|
 | `scripts/load_upr_master.sql` | Main load (this document) |
-| `scripts/search_upr_master.sql` | Parameterized UPR / XREF / Review_Q search |
+| `scripts/search_upr_master.sql` | Creates `dbo.usp_UPR_Search` (EXEC by criteria) |
 | `scripts/02_review_q_client_alter.sql` | One-time Review_Q schema verification |
 | `test/static_check_load.py` | Static analysis without SQL Server |
 
 ---
 
-## Search Script
+## Search Procedure
 
-`scripts/search_upr_master.sql` — parameterized search across:
+`scripts/search_upr_master.sql` creates `dbo.usp_UPR_Search` — EXEC with any criteria across:
 
 - `UPROPERTYRECORDS` (with optional `Unit` display)
 - `UPROPERTYRECORDS_XREF`
 - `UPRMATCHREVIEW_Q` (MA + SDAT column set)
 
-Filters include account (SDAT-normalized), parcel, address, owner, property type/status, source system, Review_Q reason, and `IncomingSourceSystem`. Set `@IncludeReviewQOnly = 1` to search Review_Q only.
+Filters include account (SDAT-normalized), parcel, address, owner, property type/status, source system, Review_Q reason, and `IncomingSourceSystem`. Set `@IncludeReviewQOnly = 1` to search Review_Q only. Omit unused parameters (NULL = ignore).
+
+```sql
+EXEC dbo.usp_UPR_Search @SDATAccountNumber = N'C000461';
+EXEC dbo.usp_UPR_Search @StreetName = N'WASHINGTON', @City = N'SILVER SPRING';
+```

@@ -12,7 +12,7 @@
 | # | Item | File |
 |---|------|------|
 | 1 | **Single load script** (all tables + REF + AuditLog) | `scripts/load_upr_master.sql` |
-| 2 | **Search script** | `scripts/search_upr_master.sql` |
+| 2 | **Search procedure** | `scripts/search_upr_master.sql` → `dbo.usp_UPR_Search` |
 | 3 | **Test data** (~100 records each) | `test/seed_test_incoming.sql` |
 | 4 | **Test results script** (PASS/FAIL checks) | `test/run_test_and_results.sql` |
 | 5 | **README** (assumptions, normalization, run/rollback) | `README.md` |
@@ -37,7 +37,7 @@ Run scripts **in this order**:
 3. `test/seed_test_incoming.sql`
 4. `scripts/load_upr_master.sql` ← **main deliverable**
 5. `test/run_test_and_results.sql` ← **test results**
-6. `scripts/search_upr_master.sql` ← edit search params at top first
+6. `scripts/search_upr_master.sql` ← creates `dbo.usp_UPR_Search`; then EXEC with criteria
 
 > `load_upr_master.sql` is self-contained: it creates normalization functions, seeds REF data, runs the full load, and prints statistics.
 
@@ -109,14 +109,20 @@ Run `test/run_test_and_results.sql` to see **PASS/FAIL** for each scenario.
 
 ---
 
-## Search Script Usage
+## Search Procedure Usage
 
-Open `scripts/search_upr_master.sql` and set any combination of:
+Run `scripts/search_upr_master.sql` once to create `dbo.usp_UPR_Search`, then EXEC with any combination of criteria (omit unused params):
 
-- `@SDATAccountNumber`, `@ParcelID`, `@StreetName`, `@City`, `@ZipCode`
-- `@Owner`, `@PropertyType`, `@NormalizedAddress`, `@SourceSystem`, `@StatusCode`
+```sql
+EXEC dbo.usp_UPR_Search @SDATAccountNumber = N'C000461';
+EXEC dbo.usp_UPR_Search @StreetName = N'MAIN', @City = N'ROCKVILLE';
+EXEC dbo.usp_UPR_Search @SourceSystemCode = N'MPDU', @PropertyTypeCode = N'CONDO';
+EXEC dbo.usp_UPR_Search @ReasonForNoMatch = N'DUPLICATE', @IncludeReviewQOnly = 1;
+```
 
-Leave parameters as `NULL` to ignore that filter. Results include UPR rows, XREF links, and Review Queue entries.
+Parameters (all optional / NULL = ignore): `@SDATAccountNumber`, `@MA_Account`, `@ParcelID`, `@StreetNumber`, `@StreetName`, `@City`, `@ZipCode`, `@Owner`, `@PropertyTypeCode`, `@PropertyStatusCode`, `@NormalizedAddress`, `@SourceSystemCode`, `@ReasonForNoMatch`, `@IncomingSourceSystem`, `@IncludeReviewQOnly`, `@MaxRows`.
+
+Results include UPR rows, XREF links, and Review Queue entries (or Review_Q only when `@IncludeReviewQOnly = 1`).
 
 ---
 

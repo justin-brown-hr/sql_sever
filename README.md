@@ -17,7 +17,7 @@ SQL/
 │   └── 02_normalize_functions.sql # Normalization helpers (optional)
 ├── scripts/
 │   ├── load_upr_master.sql        # Main deliverable - single load script
-│   ├── search_upr_master.sql      # UPR search script
+│   ├── search_upr_master.sql      # Creates dbo.usp_UPR_Search (EXEC by criteria)
 │   └── diagnose_duplicate_reviewq.sql  # Find DUPLICATE Review_Q rows missing UPR
 │   └── run_all.sh                 # Full pipeline runner
 ├── test/
@@ -71,13 +71,19 @@ sqlcmd -S localhost -E -i test/run_test_and_results.sql
 
 ### 6. Search UPR
 
-Edit search parameters at the top of `scripts/search_upr_master.sql`, then:
+Create the search procedure once (edit `USE` database name first):
 
 ```bash
 sqlcmd -S localhost -E -i scripts/search_upr_master.sql
 ```
 
-Edit `USE` database name and search parameters at the top of the script before running.
+Then search with any criteria (NULL / omitted = ignore):
+
+```sql
+EXEC dbo.usp_UPR_Search @SDATAccountNumber = N'C000461';
+EXEC dbo.usp_UPR_Search @StreetName = N'WASHINGTON', @City = N'SILVER SPRING';
+EXEC dbo.usp_UPR_Search @ReasonForNoMatch = N'DUPLICATE', @IncludeReviewQOnly = 1;
+```
 
 ## Technical Documentation
 
