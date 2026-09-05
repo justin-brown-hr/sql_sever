@@ -1,44 +1,54 @@
 /*
 ================================================================================
-  UPR Master Search — stored procedure
+  UPR Hierarchical Search - dbo.usp_UPR_Search
   SQL Server 2016+
 
-  Creates dbo.usp_UPR_Search so you can EXEC a search with any criteria.
-  NULL / omitted parameters are ignored (combine freely).
+  Searches the new hierarchical model (NewUPRTABLEUSED + COMPLEX).
+  NULL / omitted parameters are ignored.
 
-  Aligns with docs/ddl.md and scripts/load_upr_master.sql schema.
+  Prerequisites: ddl/03_new_upr_schema.sql + load_upr_master.sql
   Change USE database name to match your environment.
 ================================================================================
 */
 USE UPRXDB_TEST;
 GO
 
+/* Required for filtered indexes. SSMS sets these ON, sqlcmd does not:
+   without them CREATE INDEX and later INSERTs fail with error 1934. */
+SET QUOTED_IDENTIFIER ON;
+SET ANSI_NULLS ON;
+SET ANSI_PADDING ON;
+SET ANSI_WARNINGS ON;
+SET CONCAT_NULL_YIELDS_NULL ON;
+SET ARITHABORT ON;
+SET NUMERIC_ROUNDABORT OFF;
+GO
+
 CREATE OR ALTER PROCEDURE dbo.usp_UPR_Search
-    @SDATAccountNumber     NVARCHAR(50)  = NULL,   -- e.g. N'10001001' (normalized on search)
-    @MA_Account            NVARCHAR(30)  = NULL,   -- Review_Q MA account filter
+    @AccountNumber         NVARCHAR(50)  = NULL,
     @ParcelID              NVARCHAR(50)  = NULL,
     @StreetNumber          NVARCHAR(20)  = NULL,
-    @StreetName            NVARCHAR(100) = NULL,   -- partial match
+    @StreetName            NVARCHAR(100) = NULL,
     @City                  NVARCHAR(100) = NULL,
     @ZipCode               NVARCHAR(10)  = NULL,
-    @Owner                 NVARCHAR(100) = NULL,   -- partial match
-    @PropertyTypeCode      NVARCHAR(100) = NULL,   -- e.g. N'CONDO'
-    @PropertyStatusCode    NVARCHAR(30)  = NULL,   -- ACTIVE | INACTIVE | PENDING | RETIRED
-    @NormalizedAddress     NVARCHAR(100) = NULL,   -- partial match on street or full normalized address
-    @SourceSystemCode      NVARCHAR(30)  = NULL,   -- ADDRESS_MASTER | KDAT | eProperty | CASE | MPDU | MULTIFAMILY
-    @ReasonForNoMatch      NVARCHAR(255) = NULL,   -- Review_Q only — e.g. N'DUPLICATE'
-    @IncomingSourceSystem  NVARCHAR(100) = NULL,   -- Review_Q — ADDRESS_MASTER | KDAT | BOTH
-    @IncludeReviewQOnly    BIT           = 0,      -- 1 = skip UPR/XREF, search Review_Q only
-    @MaxRows               INT           = 5000    -- safety cap per result set (NULL = no cap)
+    @OwnerName             NVARCHAR(100) = NULL,
+    @EntityType            NVARCHAR(50)  = NULL,   -- Complex | Property | Building | Unit | Condo | ADU
+    @PropertyTypeCode      NVARCHAR(128) = NULL,
+    @StatusCode            NVARCHAR(20)  = NULL,   -- ACTIVE | INACTIVE | RETIRED
+    @NormalizedAddress     NVARCHAR(300) = NULL,
+    @SourceSystem          NVARCHAR(50)  = NULL,   -- ADDRESS_MASTER | KDAT | eProperty | ...
+    @ReasonForNoMatch      NVARCHAR(255) = NULL,
+    @IncludeReviewQOnly    BIT           = 0,
+    @MaxRows               INT           = 5000
 AS
 BEGIN
     SET NOCOUNT ON;
 
     DECLARE @NormAccount NVARCHAR(50) = CASE
-        WHEN @SDATAccountNumber IS NULL THEN NULL
+        WHEN @AccountNumber IS NULL THEN NULL
         WHEN OBJECT_ID(N'dbo.fn_UPR_NormalizeSDATAccount', N'FN') IS NOT NULL
-            THEN dbo.fn_UPR_NormalizeSDATAccount(NULLIF(LTRIM(RTRIM(@SDATAccountNumber)), N''))
-        ELSE NULLIF(LTRIM(RTRIM(@SDATAccountNumber)), N'')
+            THEN dbo.fn_UPR_NormalizeSDATAccount(NULLIF(LTRIM(RTRIM(@AccountNumber)), N''))
+        ELSE NULLIF(LTRIM(RTRIM(@AccountNumber)), N'')
     END;
 
     DECLARE @Top INT = CASE
@@ -48,95 +58,138 @@ BEGIN
 
     PRINT N'';
     PRINT N'============================================================';
-    PRINT N'  UPR MASTER SEARCH (usp_UPR_Search)';
+    PRINT N'  UPR HIERARCHICAL SEARCH (usp_UPR_Search)';
     PRINT N'  Database: ' + DB_NAME();
     PRINT N'============================================================';
 
     IF @IncludeReviewQOnly = 0
     BEGIN
         PRINT N'';
-        PRINT N'--- UPR Properties (UPROPERTYRECORDS) ---';
+        PRINT N'--- UPR hub ---';
 
         SELECT TOP (@Top)
-            upr.UPropertyRecordsID,
-            upr.SDATAccountNumber,
-            upr.CNumber,
-            upr.ParcelID,
-            upr.PropertyName,
-            upr.Owner,
-            upr.StreetNumber,
-            upr.StreetName,
-            upr.StreetType,
-            upr.City,
-            upr.[State],
-            upr.ZipCode,
-            upr.NormalizedStreetAddress,
-            upr.NormalizedFullAddress,
-            upr.PropertyTypeCode,
-            upr.PropertyStatusCode,
-            upr.IsActive,
-            upr.Latitude,
-            upr.Longitude,
-            u.UnitNumber,
-            upr.CreatedDate,
-            upr.UpdatedDate
-        FROM dbo.UPROPERTYRECORDS upr
+            u.UPRID,
+            u.ParentUPRID,
+            et.Description AS EntityType,
+            u.AccountNumber,
+            u.StatusCode,
+            p.PropertyName,
+            pt.PropertyTypeCode,
+            p.OwnerName AS PropertyOwner,
+            c.CondoName,
+            cx.CommunityName,
+            b.BuildingName,
+            b.YearBuilt,
+            un.UnitNumber,
+            a.NormalizedAddress,
+            a.StreetNumber,
+            a.StreetName,
+            a.City,
+            a.ZipCode,
+            u.CreatedDate
+        FROM dbo.UPR u
+        INNER JOIN dbo.REF_ENTITYTYPE et ON et.EntityTypeID = u.EntityTypeID
+        LEFT JOIN dbo.PROPERTY p ON p.UPRID = u.UPRID
+        LEFT JOIN dbo.REF_PROPERTYTYPE pt ON pt.PropertyTypeID = p.PropertyTypeID
+        LEFT JOIN dbo.CONDO c ON c.UPRID = u.UPRID
+        LEFT JOIN dbo.COMPLEX cx ON cx.UPRID = u.UPRID
+        LEFT JOIN dbo.BUILDING b ON b.UPRID = u.UPRID
+        LEFT JOIN dbo.UNIT un ON un.UPRID = u.UPRID
+        /* Addresses live on Building UPRs. Fall back through the hierarchy so
+           parents (Complex/Property/Condo) show and match their first
+           building's address, and units show their building's address. */
         OUTER APPLY (
-            SELECT TOP 1 un.UnitNumber
-            FROM dbo.Unit un
-            WHERE un.UPropertyRecordsID = upr.UPropertyRecordsID
-              AND un.IsActive = 1
-            ORDER BY un.UnitNumber
-        ) u
-        WHERE (@NormAccount IS NULL OR upr.SDATAccountNumber = @NormAccount)
-          AND (@ParcelID IS NULL OR upr.ParcelID = @ParcelID)
-          AND (@StreetNumber IS NULL OR upr.StreetNumber = @StreetNumber)
-          AND (@StreetName IS NULL OR upr.StreetName LIKE N'%' + @StreetName + N'%')
-          AND (@City IS NULL OR upr.City = @City)
-          AND (@ZipCode IS NULL OR upr.ZipCode LIKE @ZipCode + N'%')
-          AND (@Owner IS NULL OR upr.Owner LIKE N'%' + @Owner + N'%')
-          AND (@PropertyTypeCode IS NULL OR upr.PropertyTypeCode = @PropertyTypeCode)
-          AND (@PropertyStatusCode IS NULL OR upr.PropertyStatusCode = @PropertyStatusCode)
+            SELECT TOP 1 ad.NormalizedAddress, ad.StreetNumber, ad.StreetName,
+                         ad.City, ad.ZipCode
+            FROM (
+                /* own address, then a descendant building's address */
+                SELECT ua.AddressID, ua.IsPrimary, ua.UPRAddressID,
+                       Pri = CASE WHEN ua.UPRID = u.UPRID THEN 0 ELSE 1 END
+                FROM dbo.UPR_CLOSURE cl
+                INNER JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = cl.DescendantUPRID
+                WHERE cl.AncestorUPRID = u.UPRID
+                UNION ALL
+                /* ancestor's address (units inherit from their building) */
+                SELECT ua.AddressID, ua.IsPrimary, ua.UPRAddressID, Pri = 2
+                FROM dbo.UPR_CLOSURE cl
+                INNER JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = cl.AncestorUPRID
+                WHERE cl.DescendantUPRID = u.UPRID
+                  AND cl.AncestorUPRID <> u.UPRID
+            ) rel
+            INNER JOIN dbo.ADDRESS ad ON ad.AddressID = rel.AddressID
+            ORDER BY rel.Pri, rel.IsPrimary DESC, rel.UPRAddressID
+        ) a
+        WHERE (@NormAccount IS NULL OR u.AccountNumber = @NormAccount)
+          AND (@StatusCode IS NULL OR u.StatusCode = @StatusCode)
+          AND (@EntityType IS NULL OR et.Description = @EntityType)
+          AND (@PropertyTypeCode IS NULL OR pt.PropertyTypeCode = @PropertyTypeCode
+               OR EXISTS (
+                    SELECT 1 FROM dbo.COMPLEX cx2
+                    INNER JOIN dbo.REF_PROPERTYTYPE pt2 ON pt2.PropertyTypeID = cx2.PropertyTypeID
+                    WHERE cx2.UPRID = u.UPRID AND pt2.PropertyTypeCode = @PropertyTypeCode
+               ))
+          AND (@ParcelID IS NULL OR p.Parcel = @ParcelID OR c.Parcel = @ParcelID)
+          AND (@OwnerName IS NULL
+               OR p.OwnerName LIKE N'%' + @OwnerName + N'%'
+               OR c.OwnerName LIKE N'%' + @OwnerName + N'%'
+               OR EXISTS (
+                    SELECT 1 FROM dbo.UPR_CONTACT uc
+                    INNER JOIN dbo.CONTACT ct ON ct.ContactID = uc.ContactID
+                    WHERE uc.UPRID = u.UPRID
+                      AND ct.OrganizationName LIKE N'%' + @OwnerName + N'%'
+               ))
+          AND (@StreetNumber IS NULL OR a.StreetNumber = @StreetNumber)
+          AND (@StreetName IS NULL OR a.StreetName LIKE N'%' + @StreetName + N'%')
+          AND (@City IS NULL OR a.City = @City)
+          AND (@ZipCode IS NULL OR a.ZipCode LIKE @ZipCode + N'%')
           AND (
                 @NormalizedAddress IS NULL
-                OR upr.NormalizedStreetAddress LIKE N'%' + @NormalizedAddress + N'%'
-                OR upr.NormalizedFullAddress LIKE N'%' + @NormalizedAddress + N'%'
+                OR a.NormalizedAddress LIKE N'%' + @NormalizedAddress + N'%'
               )
-          AND (@SourceSystemCode IS NULL OR EXISTS (
-                SELECT 1
-                FROM dbo.UPROPERTYRECORDS_XREF x
-                WHERE x.UPropertyRecordsID = upr.UPropertyRecordsID
-                  AND x.SourceSystemCode = @SourceSystemCode
-                  AND x.IsActive = 1
+          AND (@SourceSystem IS NULL OR EXISTS (
+                SELECT 1 FROM dbo.EXTERNAL_IDENTIFIER_XREF x
+                WHERE x.UPRID = u.UPRID AND x.SourceSystem = @SourceSystem
               ))
-        ORDER BY upr.UPropertyRecordsID;
+        ORDER BY u.UPRID;
 
         PRINT N'';
-        PRINT N'--- Cross-References (UPROPERTYRECORDS_XREF) ---';
+        PRINT N'--- EXTERNAL_IDENTIFIER_XREF ---';
 
         SELECT TOP (@Top)
-            upr.UPropertyRecordsID,
-            upr.SDATAccountNumber,
-            x.UPropertyRecords_XrefID,
-            x.SourceSystemCode,
-            x.SourceRecordID,
-            x.SourceEntityType,
-            x.MatchMethodCode,
-            x.MatchResult,
-            x.MatchConfidence,
-            x.ProcessingStatus,
-            x.EffectiveStartDate,
-            x.Notes
-        FROM dbo.UPROPERTYRECORDS upr
-        INNER JOIN dbo.UPROPERTYRECORDS_XREF x
-            ON x.UPropertyRecordsID = upr.UPropertyRecordsID
-           AND x.IsActive = 1
-        WHERE (@NormAccount IS NULL OR upr.SDATAccountNumber = @NormAccount)
-          AND (@ParcelID IS NULL OR upr.ParcelID = @ParcelID)
-          AND (@StreetName IS NULL OR upr.StreetName LIKE N'%' + @StreetName + N'%')
-          AND (@City IS NULL OR upr.City = @City)
-          AND (@SourceSystemCode IS NULL OR x.SourceSystemCode = @SourceSystemCode)
-        ORDER BY upr.UPropertyRecordsID, x.SourceSystemCode, x.SourceRecordID;
+            x.ExternalIdentifierID,
+            x.UPRID,
+            u.AccountNumber,
+            et.Description AS EntityType,
+            x.SourceSystem,
+            x.IdentifierType,
+            x.IdentifierValue,
+            x.CreatedDate
+        FROM dbo.EXTERNAL_IDENTIFIER_XREF x
+        INNER JOIN dbo.UPR u ON u.UPRID = x.UPRID
+        INNER JOIN dbo.REF_ENTITYTYPE et ON et.EntityTypeID = u.EntityTypeID
+        WHERE (@NormAccount IS NULL OR u.AccountNumber = @NormAccount)
+          AND (@SourceSystem IS NULL OR x.SourceSystem = @SourceSystem)
+          AND (@EntityType IS NULL OR et.Description = @EntityType)
+        ORDER BY x.UPRID, x.SourceSystem;
+
+        PRINT N'';
+        PRINT N'--- Hierarchy (UPR_CLOSURE descendants for matching parents) ---';
+
+        SELECT TOP (@Top)
+            c.AncestorUPRID,
+            aet.Description AS AncestorEntityType,
+            c.DescendantUPRID,
+            det.Description AS DescendantEntityType,
+            d.AccountNumber AS DescendantAccount
+        FROM dbo.UPR_CLOSURE c
+        INNER JOIN dbo.UPR a ON a.UPRID = c.AncestorUPRID
+        INNER JOIN dbo.UPR d ON d.UPRID = c.DescendantUPRID
+        INNER JOIN dbo.REF_ENTITYTYPE aet ON aet.EntityTypeID = a.EntityTypeID
+        INNER JOIN dbo.REF_ENTITYTYPE det ON det.EntityTypeID = d.EntityTypeID
+        WHERE c.AncestorUPRID <> c.DescendantUPRID
+          AND (@NormAccount IS NULL OR a.AccountNumber = @NormAccount OR d.AccountNumber = @NormAccount)
+          AND (@EntityType IS NULL OR aet.Description = @EntityType)
+        ORDER BY c.AncestorUPRID, c.DescendantUPRID;
     END;
 
     PRINT N'';
@@ -144,7 +197,7 @@ BEGIN
 
     SELECT TOP (@Top)
         q.UPRMatchReviewID,
-        q.UPropertyRecords_XrefID,
+        q.UPRID,
         q.IncomingSourceSystem,
         q.MA_Account,
         q.MA_NormalizedIncomingAddress,
@@ -156,11 +209,11 @@ BEGIN
         q.ReviewStatus,
         q.ProcessingTimestamp
     FROM dbo.UPRMATCHREVIEW_Q q
-    WHERE (@MA_Account IS NULL OR q.MA_Account = @MA_Account)
-      AND (@NormAccount IS NULL OR q.SDAT_AccountNumber = @NormAccount)
+    WHERE (@NormAccount IS NULL
+           OR q.SDAT_AccountNumber = @NormAccount
+           OR q.MA_Account = @NormAccount)
       AND (@ParcelID IS NULL OR q.MA_ParcelID = @ParcelID OR q.SDAT_ParcelID = @ParcelID)
       AND (@ReasonForNoMatch IS NULL OR q.ReasonForNoMatch = @ReasonForNoMatch)
-      AND (@IncomingSourceSystem IS NULL OR q.IncomingSourceSystem = @IncomingSourceSystem)
       AND (
             @NormalizedAddress IS NULL
             OR q.MA_NormalizedIncomingAddress LIKE N'%' + @NormalizedAddress + N'%'
@@ -174,40 +227,13 @@ END;
 GO
 
 /*
-================================================================================
-  Examples — run after creating the procedure (omit unused params)
-================================================================================
+Examples:
 
--- By account (C000461 or numeric SDAT)
-EXEC dbo.usp_UPR_Search @SDATAccountNumber = N'C000461';
-
--- By street name + city
-EXEC dbo.usp_UPR_Search
-    @StreetName = N'WASHINGTON',
-    @City       = N'SILVER SPRING';
-
--- By parcel
-EXEC dbo.usp_UPR_Search @ParcelID = N'P101';
-
--- By source system (XREF filter) + property type
-EXEC dbo.usp_UPR_Search
-    @SourceSystemCode = N'MPDU',
-    @PropertyTypeCode = N'CONDO';
-
--- Review_Q only — duplicates
-EXEC dbo.usp_UPR_Search
-    @ReasonForNoMatch   = N'DUPLICATE',
-    @IncludeReviewQOnly = 1;
-
--- Review_Q by MA account
-EXEC dbo.usp_UPR_Search
-    @MA_Account         = N'00272531',
-    @IncludeReviewQOnly = 1;
-
--- Partial normalized address + raise row cap
-EXEC dbo.usp_UPR_Search
-    @NormalizedAddress = N'2100 WASHINGTON',
-    @MaxRows           = 10000;
+EXEC dbo.usp_UPR_Search @AccountNumber = N'00272531';
+EXEC dbo.usp_UPR_Search @EntityType = N'Complex', @StreetName = N'OAK RIDGE';
+EXEC dbo.usp_UPR_Search @EntityType = N'Condo', @AccountNumber = N'00048535';
+EXEC dbo.usp_UPR_Search @OwnerName = N'LLC';
+EXEC dbo.usp_UPR_Search @ReasonForNoMatch = N'INSUFFICIENT_DATA', @IncludeReviewQOnly = 1;
 
 */
 GO

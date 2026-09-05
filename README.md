@@ -1,75 +1,77 @@
 # UPR Master Load Project
 
-SQL Server integration that loads **AddressMaster** and **SDAT** staging data into the **Unified Property Record (UPR)** master, with address normalization, cross-system matching, audit logging, and review queue handling.
+SQL Server integration that loads **AddressMaster** and **SDAT** into the **hierarchical UPR** model (Complex / Property / Condo / Building / Unit), with address normalization, entity tables, XREF, review queue, closure, and audit logging.
+
+**Model:** `docs/NewUPRTABLEUSED.docx` + `docs/Response.docx` (COMPLEX).  
+**Old flat model** archived under `legacy/` for reference only - do not run it.
 
 ## Requirements
 
 - SQL Server 2016 or later
-- Database: `UPR_Master` (created by DDL script)
+- Target test DB (edit `USE` in scripts): e.g. `UPRXDB_TEST`
 
 ## Project Structure
 
 ```
 SQL/
-├── DELIVERY.md                    # Delivery cover sheet (start here)
+├── DELIVERY.md                    # Delivery package overview
+├── CLIENT_REAL_DATA_TEST.md       # Client guide for real-data testing
 ├── ddl/
-│   ├── 01_create_schema.sql       # Creates database and all tables
-│   └── 02_normalize_functions.sql # Normalization helpers (optional)
+│   └── 03_new_upr_schema.sql      # Hierarchical schema (run first)
 ├── scripts/
-│   ├── load_upr_master.sql        # Main deliverable - single load script
-│   ├── search_upr_master.sql      # Creates dbo.usp_UPR_Search (EXEC by criteria)
-│   └── diagnose_duplicate_reviewq.sql  # Find DUPLICATE Review_Q rows missing UPR
-│   └── run_all.sh                 # Full pipeline runner
+│   ├── load_upr_master.sql        # Hierarchical load (main deliverable)
+│   ├── search_upr_master.sql      # dbo.usp_UPR_Search
+│   └── run_all.sh                 # Full pipeline in one command
 ├── test/
-│   ├── seed_reference_data.sql    # Reference/lookup seed data
-│   ├── seed_test_incoming.sql     # ~100 test rows per incoming table
-│   └── run_test_and_results.sql   # Test results with PASS/FAIL checks
-└── docs/                          # Client specification + technical docs
-    ├── load_upr_master_technical.md
-    └── UPR_Master_Load_Technical_Description.docx
+│   ├── run_test_and_results.sql   # Validation report (works with real data)
+│   ├── local_it_setup.sql         # Incoming tables + hostile sample data
+│   ├── local_it_verify.sql        # 33 hierarchy / client-rule assertions
+│   ├── run_local_it.sh            # End-to-end run on a throwaway SQL Server
+│   ├── static_check_hier.py       # Hierarchical rule checks
+│   └── schema_contract_check.py   # Every INSERT/MERGE vs the DDL contract
+├── legacy/                        # Archived flat-model scripts (do not run)
+└── docs/                          # Client specs (NewUPRTABLEUSED, Response, Program Spec)
 ```
 
 ## Run Steps
 
-### 1. Create schema
-
-```bash
-sqlcmd -S localhost -E -i ddl/01_create_schema.sql
-sqlcmd -S localhost -E -i ddl/02_normalize_functions.sql
-```
-
-Or run everything at once:
+Everything at once (sample data by default; add `--real-data` to skip it):
 
 ```bash
 chmod +x scripts/run_all.sh
 ./scripts/run_all.sh localhost sa 'YourPassword'
 ```
 
-### 2. Seed reference data (optional — load script also seeds refs)
+Or step by step:
+
+### 1. Create hierarchical schema (drops + recreates UPR tables)
 
 ```bash
-sqlcmd -S localhost -E -i test/seed_reference_data.sql
+sqlcmd -S localhost -E -i ddl/03_new_upr_schema.sql
 ```
 
-### 3. Load test incoming data (~100 records each)
+### 2. Load incoming data
+
+Real data: load into `dbo.MAIncomingTableX1` / `dbo.SDATIncomingTableX1` with
+your own process. Sample data instead:
 
 ```bash
-sqlcmd -S localhost -E -i test/seed_test_incoming.sql
+sqlcmd -S localhost -E -i test/local_it_setup.sql
 ```
 
-### 4. Run the UPR load
+### 3. Run the UPR load
 
 ```bash
 sqlcmd -S localhost -E -i scripts/load_upr_master.sql
 ```
 
-### 5. View test results
+### 4. View the validation report
 
 ```bash
 sqlcmd -S localhost -E -i test/run_test_and_results.sql
 ```
 
-### 6. Search UPR
+### 5. Search UPR
 
 Create the search procedure once (edit `USE` database name first):
 
@@ -80,32 +82,63 @@ sqlcmd -S localhost -E -i scripts/search_upr_master.sql
 Then search with any criteria (NULL / omitted = ignore):
 
 ```sql
-EXEC dbo.usp_UPR_Search @SDATAccountNumber = N'C000461';
-EXEC dbo.usp_UPR_Search @StreetName = N'WASHINGTON', @City = N'SILVER SPRING';
-EXEC dbo.usp_UPR_Search @ReasonForNoMatch = N'DUPLICATE', @IncludeReviewQOnly = 1;
+EXEC dbo.usp_UPR_Search @AccountNumber = N'00272531';
+EXEC dbo.usp_UPR_Search @EntityType = N'Complex', @StreetName = N'OAK RIDGE';
+EXEC dbo.usp_UPR_Search @ReasonForNoMatch = N'INSUFFICIENT_DATA', @IncludeReviewQOnly = 1;
 ```
 
-## Technical Documentation
+The load is re-runnable: a second run against unchanged incoming data adds no
+rows. Wiping the hierarchical tables first is only needed for a clean rebuild.
 
-Full section-by-section load script walkthrough for production programmers:
+## Pre-delivery Verification
 
-- **Word:** [docs/UPR_Master_Load_Technical_Description.docx](docs/UPR_Master_Load_Technical_Description.docx)
-- **Markdown:** [docs/load_upr_master_technical.md](docs/load_upr_master_technical.md)
+Static checks (no database needed):
+
+```bash
+python3 test/static_check_hier.py       # client rules + known regressions
+python3 test/schema_contract_check.py   # every INSERT/MERGE against the DDL
+```
+
+Full end-to-end run against a throwaway SQL Server container:
+
+```bash
+docker run -d --name uprtest -e ACCEPT_EULA=Y -e 'MSSQL_SA_PASSWORD=<pw>' \
+  -e MSSQL_PID=Developer -p 14333:1433 mcr.microsoft.com/mssql/server:2022-latest
+test/run_local_it.sh
+```
+
+`run_local_it.sh` seeds deliberately hostile data (long street names, YearBuilt
+0 and 9999, bad street numbers, missing zips, one account on several addresses,
+MA/SDAT overlaps), creates the schema, runs the load twice, and asserts 33
+hierarchy and client-rule invariants plus identical counts on the second run.
+
+## Source Specifications
+
+The hierarchical model is built from the client documents in `docs/`:
+
+- [docs/NewUPRTABLEUSED.docx](docs/NewUPRTABLEUSED.docx) - table definitions (source of truth)
+- [docs/Response.docx](docs/Response.docx) - answers on COMPLEX, Condo hierarchy, AccountNumber
+- [docs/Program SPEC_UPR_REC_LAYOUT_8_31_2026.docx](docs/Program%20SPEC_UPR_REC_LAYOUT_8_31_2026.docx)
+- [docs/ProgramSpec_Script_8_19_2026.docx](docs/ProgramSpec_Script_8_19_2026.docx)
+
+Each load step is commented in `scripts/load_upr_master.sql` (Steps 0-14).
 
 ## Assumptions
 
 | Topic | Assumption |
 |-------|------------|
-| Staging tables | `AddressMaster` and `SDAT` |
-| Join key | `AddressMaster.Account` = `SDAT.AccountNumber` |
-| Address match | `NormalizedAddress` OR `NormalizedFullAddress` |
-| `NO_MATCH` | Spec typo `N0_MATCH` interpreted as `NO_MATCH` |
-| Idempotency | MERGE/NOT EXISTS — safe to re-run without duplicate UPR or XREF rows |
-| Owner data | SDAT `Owner` → `CONTACT` + `PROPERTYCONTACT` |
-| CONDO/APT | `REF_PROPERTYTYPE.AllowsBuildings=1` and `AllowsUnits=1` → `Building` + `Unit` |
-| External match | Address match against `eProperty`, `Case`, `MPDU`, `MultifamilyLoanAddress` |
-| Confidence | Parcel/Account = HIGH; normalized address = MEDIUM |
-| Street types | External addresses normalized (LANE→LN, STREET→ST) via `fn_UPR_NormalizeAddressLine` |
+| Incoming tables | `dbo.MAIncomingTableX1` (MasterAddress) and `dbo.SDATIncomingTableX1` (SDAT) |
+| Join key | `MAIncomingTableX1.Account` = normalized `SDATIncomingTableX1.AccountNumber` (numeric accounts zero-padded to 8) |
+| AccountNumber | Nullable and **not unique** on UPR (client Response.docx) |
+| Complex rule | MA MultiFamily/Apartments + Account# + 2+ distinct addresses -> COMPLEX; addresses counted on MA rows only |
+| Condo rule | SDAT rows (and MA condo types) -> Condo parent (ParentUPRID NULL) -> Building -> Unit |
+| Unit numbers | `CondoUnit` first, then MA `Unit`; generated `MA-`/`SD-` ids only for multi-unit records with blank unit fields |
+| Record type | Blank `LUCategory` -> `UNKNWN` property type; never invented as SF |
+| Building names | Sources carry no building name -> `Building A`, `Building B`, ... per parent |
+| Complex name | Sources carry no complex name -> `<CITY> BUILDING COMPLEX` |
+| Owner data | Owner name, else Account#, else NULL -> `CONTACT` + `UPR_CONTACT` (OWNER role) |
+| Addresses | Written only through `ADDRESS` + `UPR_ADDRESS` (primary, PHYSICAL role) |
+| Idempotency | Safe to re-run - existing UPR/XREF/contact rows are reused, not duplicated |
 | Single script | `load_upr_master.sql` includes normalization functions + full load logic |
 
 ## Address Normalization
@@ -119,47 +152,59 @@ Per client spec example:
 
 ## Rollback
 
-The load script runs inside a **single transaction**. On any error it rolls back all changes and logs the failure to `AuditLog`.
+The load script runs inside a **single transaction**. On any error it rolls back all changes.
 
-To manually reset for a fresh test run:
+For a clean rebuild of the hierarchical tables, simply re-run
+`ddl/03_new_upr_schema.sql` - it drops and recreates every UPR table (the
+incoming tables `MAIncomingTableX1` / `SDATIncomingTableX1` are untouched).
+
+To reset data only, in dependency order:
 
 ```sql
-USE UPR_Master;
-DELETE FROM dbo.UPROPERTYMATCHREVIEW_Q;
-DELETE FROM dbo.UPROPERTYRECORD_XREF;
-DELETE FROM dbo.UPR_STATUSHISTORY;
-DELETE FROM dbo.UNITCONTACT;
-DELETE FROM dbo.UNITOWNER;
-DELETE FROM dbo.Unit;
-DELETE FROM dbo.Building;
-DELETE FROM dbo.PROPERTYCONTACT;
-DELETE FROM dbo.CONTACT;
-DELETE FROM dbo.UPROPERTYRECORD;
+USE UPRXDB_TEST;
+DELETE FROM dbo.UPRMATCHREVIEW_Q;
+DELETE FROM dbo.UPRSTATUSHISTORY;
 DELETE FROM dbo.AuditLog;
+DELETE FROM dbo.UPR_CLOSURE;
+DELETE FROM dbo.EXTERNAL_IDENTIFIER_XREF;
+DELETE FROM dbo.UPR_CONTACT;
+DELETE FROM dbo.CONTACT;
+DELETE FROM dbo.UPR_ADDRESS;
+DELETE FROM dbo.ADDRESS;
+DELETE FROM dbo.UNIT;
+DELETE FROM dbo.BUILDING;
+DELETE FROM dbo.CONDO;
+DELETE FROM dbo.PROPERTY;
+DELETE FROM dbo.COMPLEX;
+DELETE FROM dbo.ADU;
+DELETE FROM dbo.UPR;
 ```
 
 Then re-run the load script.
 
 ## Test Data Scenarios
 
-The generated test data (100 `AddressMaster`, 102 `SDAT`) covers:
+The sample data (`test/local_it_setup.sql`) deliberately covers hostile cases:
 
-- MA + SDAT matched pairs (account + address)
-- AddressMaster-only records
-- SDAT-only records
-- External matches: eProperty, CASE, MPDU, MultifamilyLoanAddress
-- No external match → Review Queue
-- Bad/incomplete address data
-- Various street type formats (ST, STREET, LN, LANE, etc.)
-- Client sample records (accounts 10001001–40004004)
+- Complex: one MULTI account with 3 distinct building addresses (some with units)
+- MultiFamily with a single address (Property -> Building -> Unit)
+- SDAT condos with and without `CondoUnit`; zero-padded account variants
+- Warehouse / Office / Vacant / Park (building, no unit)
+- Institutional/Community Facilities (long record type -> `INSTCF` short code)
+- Blank record type (must become `UNKNWN`, not SF)
+- One account on several non-multifamily addresses
+- MA and SDAT rows for the same property (must merge, not duplicate)
+- YearBuilt 0 and 9999; 300-character street name; garbage state; bad street
+  numbers; missing zips; NULL and placeholder parcels
 
 ## Acceptance Criteria
 
-- Idempotent execution (re-run safe)
+- Hierarchy per NewUPRTABLEUSED + Response.docx (Complex / Property / Condo / Building / Unit)
+- Idempotent execution (re-run adds no rows)
 - Address normalization per client example
 - Statistics printed at end of load
-- Audit log written for all processing
-- Review queue for unmatched/insufficient records
+- Audit log + status history written for all processing
+- Review queue for unmatched/insufficient records with mapped reasons
 
 
 
