@@ -77,7 +77,24 @@ This produces a **Validation Report** with plain-English checks like:
 
 **PASS** = OK | **FAIL** = needs attention | **N/A** = nothing to check (not a failure)
 
-### Step 5 (optional) - Look up one account
+### Step 5 - List the full parent/child hierarchy
+
+To see every UPR as Parent followed by its children (Account#, UPRID, address,
+unit, etc.), run:
+
+```
+scripts/list_upr_hierarchy.sql
+```
+
+At the top of that script you can set:
+
+```sql
+DECLARE @FilterAccount NVARCHAR(50) = NULL;   -- NULL = all, or e.g. N'00272531'
+```
+
+Section 2 is the full tree. Section 3 lists any completeness gaps (empty = good).
+
+### Step 6 (optional) - Look up one account
 
 At the top of `test/run_test_and_results.sql`, set:
 
@@ -106,7 +123,8 @@ EXEC dbo.usp_UPR_Search @IncludeReviewQOnly = 1;
 |------|---------|
 | `ddl/03_new_upr_schema.sql` | **Run first (once)** - creates the hierarchical schema |
 | `scripts/load_upr_master.sql` | **Run this** to process your data |
-| `test/run_test_and_results.sql` | **Run this after** to validate results |
+| `scripts/list_upr_hierarchy.sql` | **Run this after** to list Parent then child hierarchy |
+| `test/run_test_and_results.sql` | **Run this after** to validate results (PASS/FAIL grid) |
 | `scripts/search_upr_master.sql` | Creates `dbo.usp_UPR_Search` - EXEC search by criteria |
 
 You do **NOT** need anything else from the `test/` folder for real data - those
