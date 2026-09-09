@@ -45,3 +45,6 @@ run_sql run_test_and_results.sql | tail -30
 echo "### 10. create + exercise search procedure"
 run_sql search_upr_master.sql | tail -3
 run_sql local_it_search.sql | tail -25
+
+echo "### 11. hierarchy listing regression checks (separate disposable database)"
+CONTAINER="$CONTAINER" python3 "$ROOT/test/check_hierarchy_listing.py"

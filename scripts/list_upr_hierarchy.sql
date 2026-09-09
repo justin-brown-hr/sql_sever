@@ -12,7 +12,7 @@
   EDIT:
     - USE database name if yours differs
     - @FilterAccount  = NULL for ALL records, or set one Account# to drill down
-    - @MaxRows        = safety cap (raise if you have more parents)
+    - @MaxRows        = NULL for all root trees, or a positive root-tree cap
 ================================================================================
 */
 USE UPRXDB_TEST;
@@ -24,14 +24,21 @@ SET NOCOUNT ON;
 GO
 
 DECLARE @FilterAccount NVARCHAR(50) = NULL;   -- e.g. N'00272531'  |  NULL = all
-DECLARE @MaxRows       INT          = 50000;
+DECLARE @MaxRows       INT          = NULL;  -- optional cap on roots, not children
 
-DECLARE @NormAccount NVARCHAR(50) = CASE
-    WHEN @FilterAccount IS NULL THEN NULL
-    WHEN OBJECT_ID(N'dbo.fn_UPR_NormalizeSDATAccount', N'FN') IS NOT NULL
-        THEN dbo.fn_UPR_NormalizeSDATAccount(NULLIF(LTRIM(RTRIM(@FilterAccount)), N''))
-    ELSE NULLIF(LTRIM(RTRIM(@FilterAccount)), N'')
-END;
+IF @MaxRows IS NOT NULL AND @MaxRows <= 0
+    THROW 50001, '@MaxRows must be NULL (all roots) or a positive integer.', 1;
+
+/* Normalize filter locally - do not call load-script functions.
+   (SSMS / SQL Server still bind those names at compile time even
+   inside OBJECT_ID checks, which causes "Cannot find object".)
+   Match the loader exactly: numeric accounts of 1-12 digits are padded
+   or reduced to their rightmost 8 digits; longer values are unchanged. */
+DECLARE @NormAccount NVARCHAR(50) = NULLIF(LTRIM(RTRIM(@FilterAccount)), N'');
+IF @NormAccount IS NOT NULL
+   AND @NormAccount NOT LIKE N'%[^0-9]%'
+   AND LEN(@NormAccount) BETWEEN 1 AND 12
+    SET @NormAccount = RIGHT(REPLICATE(N'0', 8) + @NormAccount, 8);
 
 PRINT N'============================================================';
 PRINT N'  UPR HIERARCHY LISTING';
@@ -84,9 +91,29 @@ ORDER BY
 PRINT N'';
 PRINT N'--- Section 2: Parent -> child hierarchy (complete records) ---';
 
+DECLARE @MatchingRoots BIGINT;
+SELECT @MatchingRoots = COUNT_BIG(*)
+FROM dbo.UPR u
+INNER JOIN dbo.REF_ENTITYTYPE e ON e.EntityTypeID = u.EntityTypeID
+WHERE u.ParentUPRID IS NULL
+  AND e.Description IN (N'Complex', N'Property', N'Condo')
+  AND (@NormAccount IS NULL OR u.AccountNumber = @NormAccount);
+
+DECLARE @RootLimit BIGINT = COALESCE(CONVERT(BIGINT, @MaxRows), @MatchingRoots);
+IF @RootLimit < @MatchingRoots
+BEGIN
+    PRINT N'WARNING: Section 2 is capped. Set @MaxRows = NULL to list all root trees.';
+    /* Also show the warning in Results, where the client reviews the tree. */
+    SELECT
+        Warning = N'Section 2 is capped; Sections 1 and 3 still cover all matching records.',
+        MatchingRoots = @MatchingRoots,
+        ListedRoots = @RootLimit,
+        OmittedRoots = @MatchingRoots - @RootLimit;
+END;
+
 ;WITH Roots AS
 (
-    SELECT TOP (@MaxRows)
+    SELECT TOP (@RootLimit)
         u.UPRID AS RootUPRID,
         u.AccountNumber AS RootAccount
     FROM dbo.UPR u
@@ -178,7 +205,7 @@ SELECT
     ZipCode       = a.ZipCode,
     OwnerName     = COALESCE(p.OwnerName, d.OwnerName, ct.OrganizationName),
     ContactName   = ct.OrganizationName,
-    BuildingID    = b.BuildingID,
+    BuildingID    = COALESCE(b.BuildingID, un.BuildingID),
     UnitID        = un.UnitID
 FROM Tree t
 INNER JOIN dbo.REF_ENTITYTYPE e ON e.EntityTypeID = t.EntityTypeID
@@ -226,7 +253,7 @@ OPTION (MAXRECURSION 100);
 
 /* ------------------------------------------------------------
    SECTION 3 - Completeness flags (parents missing expected children)
-   Empty result = complete. Any row listed needs attention.
+   Empty result = no issues found by these checks. Any row needs attention.
    ------------------------------------------------------------ */
 PRINT N'';
 PRINT N'--- Section 3: Completeness flags (empty = good) ---';
@@ -298,14 +325,29 @@ FROM (
 
     UNION ALL
 
-    /* Unit with no Building link */
+    /* A Unit may be under its Building, or directly under a Condo with
+       its linked Building under that same Condo (the loader's condo model). */
     SELECT
-        Issue  = N'Unit missing BuildingID',
+        Issue  = N'Unit has invalid Building link',
         un.UPRID,
-        Detail = COALESCE(un.UnitNumber, N'(no unit number)')
+        Detail = N'Unit ' + COALESCE(un.UnitNumber, N'(no unit number)')
+               + N': BuildingID must match its Building parent or a Building under its Condo parent'
     FROM dbo.UNIT un
     INNER JOIN dbo.UPR u ON u.UPRID = un.UPRID
-    WHERE un.BuildingID IS NULL
+    WHERE NOT EXISTS (
+            SELECT 1
+            FROM dbo.BUILDING linked
+            INNER JOIN dbo.UPR bu ON bu.UPRID = linked.UPRID
+            INNER JOIN dbo.REF_ENTITYTYPE be ON be.EntityTypeID = bu.EntityTypeID
+            INNER JOIN dbo.UPR parent ON parent.UPRID = u.ParentUPRID
+            INNER JOIN dbo.REF_ENTITYTYPE pe ON pe.EntityTypeID = parent.EntityTypeID
+            WHERE linked.BuildingID = un.BuildingID
+              AND be.Description = N'Building'
+              AND (
+                    (pe.Description = N'Building' AND parent.UPRID = linked.UPRID)
+                 OR (pe.Description = N'Condo' AND bu.ParentUPRID = parent.UPRID)
+                  )
+          )
       AND (@NormAccount IS NULL
            OR u.AccountNumber = @NormAccount
            OR EXISTS (
@@ -322,6 +364,6 @@ ORDER BY Issue, u.AccountNumber, u.UPRID;
 
 PRINT N'';
 PRINT N'HIERARCHY LISTING COMPLETE';
-PRINT N'  Section 2 = full parent/child tree (use Results grid, not Messages).';
-PRINT N'  Section 3 empty = records look complete.';
+PRINT N'  Section 2 = parent/child trees within the selected root limit (Results grid).';
+PRINT N'  Section 3 empty = no issues found by these checks; not a full integrity audit.';
 GO
