@@ -32,11 +32,12 @@ Use your own import process (SSIS, BCP, INSERT scripts, etc.).
 If `SDATIncomingTableX1` has no `CondoUnit` column, the load script adds it
 automatically.
 
-### Step 3 - Run the load
+### Step 3 - Install auditing and run the load
 
 Execute:
 
 ```
+scripts/install_upr_audit.sql
 scripts/load_upr_master.sql
 ```
 
@@ -51,7 +52,10 @@ UPR hierarchical load COMPLETE
   UNIT rows inserted           : ...
 ```
 
-The load is safe to re-run: existing records are reused, not duplicated.
+The audit installer preserves existing records and starts auditing future writes.
+The load is safe to re-run: existing records are reused, not duplicated. Missing
+source UnitNumbers, names, State and ZIP values are not filled with guesses.
+For corrections to an existing load, follow `CLIENT_FIX_2026-09-10.md`.
 
 ### Step 4 - Run the validation report
 
@@ -68,12 +72,13 @@ This produces a **Validation Report** with plain-English checks like:
 | Incoming MasterAddress data loaded | Your staging data was read |
 | UPR records created | Records loaded into the UPR hierarchy |
 | Every UPR has its entity record | Each UPR row has its Complex/Property/Condo/Building/Unit row |
-| Every Building has a primary Address | Address written through ADDRESS + UPR_ADDRESS |
-| Every parent record has a Contact | Owner/organization contact linked |
-| Every Unit has a Building | No orphan units |
+| Every UPR has a primary Address link | Parent, Building and Unit linked to source Address records |
+| Every UPR has a Contact link | Source contact linked; missing owner details remain NULL |
+| Every Unit has the correct Building link | Building belongs to its structural parent |
 | Hierarchy closure table complete | Parent-child paths are all recorded |
 | Review queue populated | Records needing manual review |
-| Audit log written | Processing was audited |
+| Persistent row audit triggers installed | All 22 UPR model/reference tables covered |
+| Individual row audit events recorded | INSERT/UPDATE/DELETE events since installation |
 
 **PASS** = OK | **FAIL** = needs attention | **N/A** = nothing to check (not a failure)
 
@@ -122,6 +127,7 @@ EXEC dbo.usp_UPR_Search @IncludeReviewQOnly = 1;
 | File | Purpose |
 |------|---------|
 | `ddl/03_new_upr_schema.sql` | **Run first (once)** - creates the hierarchical schema |
+| `scripts/install_upr_audit.sql` | **Run before load** - install persistent row auditing |
 | `scripts/load_upr_master.sql` | **Run this** to process your data |
 | `scripts/list_upr_hierarchy.sql` | **Run this after** to list Parent then child hierarchy |
 | `test/run_test_and_results.sql` | **Run this after** to validate results (PASS/FAIL grid) |

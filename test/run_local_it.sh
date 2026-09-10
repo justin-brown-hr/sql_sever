@@ -20,7 +20,7 @@ run_sql() {
 
 for f in test/local_it_setup.sql test/local_it_verify.sql test/local_it_counts.sql \
          test/local_it_search.sql test/run_test_and_results.sql \
-         ddl/03_new_upr_schema.sql scripts/load_upr_master.sql scripts/search_upr_master.sql; do
+         ddl/03_new_upr_schema.sql scripts/load_upr_master.sql scripts/search_upr_master.sql scripts/install_upr_audit.sql; do
     docker cp "$ROOT/$f" "$CONTAINER:$DEST/"
 done
 
@@ -28,23 +28,42 @@ echo "### 1. seed incoming data"
 run_sql local_it_setup.sql | tail -3
 echo "### 2. create hierarchical schema"
 run_sql 03_new_upr_schema.sql | tail -2
+echo "### 2b. install persistent row audit triggers"
+run_sql install_upr_audit.sql | tail -2
 echo "### 3. first load"
 run_sql load_upr_master.sql | tail -22
 echo "### 4. verify"
 run_sql local_it_verify.sql | tail -40
 echo "### 5. counts after first load"
-run_sql local_it_counts.sql | tail -4
+first_counts="$(run_sql local_it_counts.sql)"
+echo "$first_counts"
 echo "### 6. second load (idempotency)"
 run_sql load_upr_master.sql | tail -22
 echo "### 7. counts after second load - must be identical"
-run_sql local_it_counts.sql | tail -4
+second_counts="$(run_sql local_it_counts.sql)"
+echo "$second_counts"
+if [[ "$first_counts" != "$second_counts" ]]; then
+    echo "FAIL: unchanged rerun changed business row counts" >&2
+    exit 1
+fi
 echo "### 8. verify again"
 run_sql local_it_verify.sql | tail -6
 echo "### 9. client validation report (run_test_and_results.sql)"
-run_sql run_test_and_results.sql | tail -30
+client_report="$(run_sql run_test_and_results.sql)"
+echo "$client_report" | tail -30
+if [[ "$client_report" == *$'\nFAIL|'* ]]; then
+    echo "FAIL: client validation report contains failing checks" >&2
+    exit 1
+fi
 echo "### 10. create + exercise search procedure"
 run_sql search_upr_master.sql | tail -3
 run_sql local_it_search.sql | tail -25
 
 echo "### 11. hierarchy listing regression checks (separate disposable database)"
 CONTAINER="$CONTAINER" python3 "$ROOT/test/check_hierarchy_listing.py"
+
+echo "### 12. source-only data, legacy repair and persistent audit regressions"
+CONTAINER="$CONTAINER" python3 "$ROOT/test/check_source_audit.py"
+
+echo "### 13. exact client-supplied MasterAddress row 20977 (separate database)"
+CONTAINER="$CONTAINER" python3 "$ROOT/test/check_client_sample.py"

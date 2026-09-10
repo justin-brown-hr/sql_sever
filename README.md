@@ -19,6 +19,8 @@ SQL/
 ├── ddl/
 │   └── 03_new_upr_schema.sql      # Hierarchical schema (run first)
 ├── scripts/
+│   ├── install_upr_audit.sql      # Persistent INSERT/UPDATE/DELETE auditing
+│   ├── diagnose_upr_accounts.sql  # Read-only client account diagnostics
 │   ├── load_upr_master.sql        # Hierarchical load (main deliverable)
 │   ├── search_upr_master.sql      # dbo.usp_UPR_Search
 │   └── run_all.sh                 # Full pipeline in one command
@@ -32,6 +34,10 @@ SQL/
 ├── legacy/                        # Archived flat-model scripts (do not run)
 └── docs/                          # Client specs (NewUPRTABLEUSED, Response, Program Spec)
 ```
+
+For the September 10 corrections on an existing database, follow
+[CLIENT_FIX_2026-09-10.md](CLIENT_FIX_2026-09-10.md). The client's source-only
+requirement supersedes the older generated-name conventions.
 
 ## Run Steps
 
@@ -59,9 +65,10 @@ your own process. Sample data instead:
 sqlcmd -S localhost -E -i test/local_it_setup.sql
 ```
 
-### 3. Run the UPR load
+### 3. Install auditing and run the UPR load
 
 ```bash
+sqlcmd -S localhost -E -i scripts/install_upr_audit.sql
 sqlcmd -S localhost -E -i scripts/load_upr_master.sql
 ```
 
@@ -87,8 +94,8 @@ EXEC dbo.usp_UPR_Search @EntityType = N'Complex', @StreetName = N'OAK RIDGE';
 EXEC dbo.usp_UPR_Search @ReasonForNoMatch = N'INSUFFICIENT_DATA', @IncludeReviewQOnly = 1;
 ```
 
-The load is re-runnable: a second run against unchanged incoming data adds no
-rows. Wiping the hierarchical tables first is only needed for a clean rebuild.
+The load is re-runnable: unchanged incoming data adds no business rows; a batch
+audit summary is still recorded. Wiping the hierarchical tables first is only needed for a clean rebuild.
 
 ## Pre-delivery Verification
 
@@ -109,8 +116,10 @@ test/run_local_it.sh
 
 `run_local_it.sh` seeds deliberately hostile data (long street names, YearBuilt
 0 and 9999, bad street numbers, missing zips, one account on several addresses,
-MA/SDAT overlaps), creates the schema, runs the load twice, and asserts 33
-hierarchy and client-rule invariants plus identical counts on the second run.
+MA/SDAT overlaps), creates the schema and audit triggers, runs the load twice,
+and checks 33 hierarchy invariants plus identical business counts. It also tests
+50,001-root listings, source-only fields, targeted legacy repairs, and audit
+INSERT/UPDATE/DELETE/MERGE events and rollback behavior.
 
 ## Source Specifications
 
@@ -131,15 +140,15 @@ Each load step is commented in `scripts/load_upr_master.sql` (Steps 0-14).
 | Join key | `MAIncomingTableX1.Account` = normalized `SDATIncomingTableX1.AccountNumber` (numeric accounts zero-padded to 8) |
 | AccountNumber | Nullable and **not unique** on UPR (client Response.docx) |
 | Complex rule | MA MultiFamily/Apartments + Account# + 2+ distinct addresses -> COMPLEX; addresses counted on MA rows only |
-| Condo rule | SDAT rows (and MA condo types) -> Condo parent (ParentUPRID NULL) -> Building -> Unit |
-| Unit numbers | `CondoUnit` first, then MA `Unit`; generated `MA-`/`SD-` ids only for multi-unit records with blank unit fields |
+| Condo rule | Condo parent (ParentUPRID NULL); Buildings and numbered Units are its children; Units link to their Building by BuildingID |
+| Unit numbers | Only incoming `CondoUnit` / MA `Unit`; blank fields do not create new Units. Source-proven legacy generated numbers are cleared to NULL without deleting existing Units |
 | Record type | Blank `LUCategory` -> `UNKNWN` property type; never invented as SF |
-| Building names | Sources carry no building name -> `Building A`, `Building B`, ... per parent |
-| Complex name | Sources carry no complex name -> `<CITY> BUILDING COMPLEX` |
-| Owner data | Owner name, else Account#, else NULL -> `CONTACT` + `UPR_CONTACT` (OWNER role) |
-| Addresses | Written only through `ADDRESS` + `UPR_ADDRESS` (primary, PHYSICAL role) |
+| Building names | NULL when the incoming tables supply no building name |
+| Complex name | NULL when the incoming tables supply no complex name |
+| Owner data | Incoming owner or NULL; account numbers are not substituted for names. Required Contact links share the source contact across each tree |
+| Addresses | Source street number/name create Building + Address regardless of record type; blank street type/city/ZIP do not block. Missing State/ZIP stay NULL. Direct Address links are added to parents and Units |
 | Idempotency | Safe to re-run - existing UPR/XREF/contact rows are reused, not duplicated |
-| Single script | `load_upr_master.sql` includes normalization functions + full load logic |
+| Audit | Run `install_upr_audit.sql` first: persistent row auditing on 22 UPR model/reference tables, with full JSON before/after values |
 
 ## Address Normalization
 
@@ -203,7 +212,7 @@ The sample data (`test/local_it_setup.sql`) deliberately covers hostile cases:
 - Idempotent execution (re-run adds no rows)
 - Address normalization per client example
 - Statistics printed at end of load
-- Audit log + status history written for all processing
+- INSERT/UPDATE/DELETE on the 22 UPR model/reference tables audited from installation onward; batch summaries and initial status history also retained
 - Review queue for unmatched/insufficient records with mapped reasons
 
 

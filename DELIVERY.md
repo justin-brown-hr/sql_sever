@@ -18,6 +18,8 @@
 | 4 | **Validation report** (PASS/FAIL checks, works with real data) | `test/run_test_and_results.sql` |
 | 5 | **Real-data test guide** | `CLIENT_REAL_DATA_TEST.md` |
 | 6 | **README** (structure, run steps, assumptions) | `README.md` |
+| 7 | **Persistent row auditing** (install before loading) | `scripts/install_upr_audit.sql` |
+| 8 | **September 10 correction guide and account diagnostics** | `CLIENT_FIX_2026-09-10.md`, `scripts/diagnose_upr_accounts.sql` |
 
 Supporting files:
 
@@ -32,6 +34,9 @@ Supporting files:
 
 ---
 
+For an **existing database**, apply [CLIENT_FIX_2026-09-10.md](CLIENT_FIX_2026-09-10.md)
+instead of the clean-schema setup below.
+
 ## Quick Start (SSMS)
 
 Run scripts **in this order**:
@@ -39,11 +44,12 @@ Run scripts **in this order**:
 1. `ddl/03_new_upr_schema.sql`  <- creates the hierarchical schema (drops + recreates)
 2. Load your data into `dbo.MAIncomingTableX1` and `dbo.SDATIncomingTableX1`
    (or run `test/local_it_setup.sql` for sample data)
-3. `scripts/load_upr_master.sql`  <- **main deliverable**
-4. `test/run_test_and_results.sql`  <- **validation report**
-5. `scripts/search_upr_master.sql`  <- creates `dbo.usp_UPR_Search`; then EXEC with criteria
+3. `scripts/install_upr_audit.sql` <- persistent auditing (also safe on existing databases)
+4. `scripts/load_upr_master.sql`  <- **main deliverable**
+5. `test/run_test_and_results.sql`  <- **validation report**
+6. `scripts/search_upr_master.sql`  <- creates `dbo.usp_UPR_Search`; then EXEC with criteria
 
-> `load_upr_master.sql` is self-contained: it creates normalization functions,
+> After audit installation, `load_upr_master.sql` creates normalization functions,
 > seeds REF codes, adds `CondoUnit` to the SDAT table when missing, runs the
 > full load in one transaction, and prints statistics per step.
 
@@ -54,6 +60,7 @@ Run scripts **in this order**:
 ```bash
 sqlcmd -S YourServer -U sa -P 'YourPassword' -C -i ddl/03_new_upr_schema.sql
 sqlcmd -S YourServer -U sa -P 'YourPassword' -C -i test/local_it_setup.sql   # sample data only
+sqlcmd -S YourServer -U sa -P 'YourPassword' -C -i scripts/install_upr_audit.sql
 sqlcmd -S YourServer -U sa -P 'YourPassword' -C -i scripts/load_upr_master.sql
 sqlcmd -S YourServer -U sa -P 'YourPassword' -C -i test/run_test_and_results.sql
 sqlcmd -S YourServer -U sa -P 'YourPassword' -C -i scripts/search_upr_master.sql
@@ -75,17 +82,20 @@ Or: `chmod +x scripts/run_all.sh && ./scripts/run_all.sh YourServer sa 'YourPass
    - **CONDO** - SDAT rows (or MA condo records); Condo parent has Parent NULL
    - **PROPERTY** - everything else (SF, Townhouse, Office, Warehouse, Vacant, Park, ...)
 7. Inserts parent UPRs + `COMPLEX` / `PROPERTY` / `CONDO` entity rows
-8. Inserts Building UPRs per distinct address ("Building A", "Building B", ...)
+8. Inserts Building UPRs per distinct source address, leaving missing names NULL
    with `ADDRESS` + `UPR_ADDRESS` (primary, PHYSICAL role)
-9. Inserts Unit UPRs + `UNIT` (from `CondoUnit`, then MA `Unit`; generated
-   MA-/SD- ids only for multi-unit records with blank unit fields)
-10. Creates `CONTACT` + `UPR_CONTACT` (OWNER role) for every parent
+9. Inserts numbered Unit UPRs + `UNIT` only from incoming `CondoUnit` / MA `Unit`;
+   clears source-proven legacy generated numbers without deleting existing Units
+10. Creates required `CONTACT` + `UPR_CONTACT` links with incoming owner or NULL;
+    shares source Address/Contact links across the hierarchy
 11. Writes `EXTERNAL_IDENTIFIER_XREF` (source record ids + account numbers)
-12. Rebuilds `UPR_CLOSURE` (full ancestor/descendant paths)
-13. Writes `UPRSTATUSHISTORY` and `AuditLog`, prints the summary
+12. Synchronizes `UPR_CLOSURE` (only changed paths are written)
+13. Writes `UPRSTATUSHISTORY` and the batch summary; persistent triggers audit
+    individual model/reference table changes with full before/after values
 
 All steps run inside a **single transaction** (rollback on error).
-**Re-runs are safe**: a second run against unchanged incoming data inserts nothing.
+**Re-runs are safe**: unchanged incoming data inserts no business rows; the
+batch audit summary is still recorded.
 
 ---
 
@@ -93,9 +103,9 @@ All steps run inside a **single transaction** (rollback on error).
 
 - `NewUPRTABLEUSED.docx` is the source of truth; the flat model is fully replaced
 - `AccountNumber` is **nullable and not unique** (one account can span records)
-- `CommunityName` lives on **COMPLEX only**; label built from city
-  (e.g. `SILVER SPRING BUILDING COMPLEX`) since sources carry no complex name
-- Buildings without a source name are labelled **Building A, Building B, ...**
+- The September 10 source-only requirement supersedes generated-name rules.
+- `CommunityName` lives on **COMPLEX only**; absent source names remain NULL
+- Buildings without a source name have NULL BuildingName
 - MultiFamily with **one** address stays Property -> Building -> Unit
 - Condo (SDAT): **Condo (Parent NULL) -> Unit**; account stored on the Condo UPR
 - Addresses only via **ADDRESS + UPR_ADDRESS**; contact required when address valid
@@ -135,7 +145,9 @@ Queue entries.
 - End-to-end run on SQL Server 2022 with deliberately hostile data
   (NVARCHAR(MAX) sources, 300-char street names, YearBuilt 0/9999, bad street
   numbers, missing zips, shared accounts, MA/SDAT overlaps)
-- Load executed **twice**: second run inserted zero rows (idempotency)
+- Load executed **twice**: second run inserted zero business rows (idempotency)
+- Source-only fields, legacy placeholder repairs, missing Address links, and
+  persistent multirow audit/rollback/MERGE cases tested on SQL Server 2022
 - All 7 search procedure variants executed without error
 
 ---

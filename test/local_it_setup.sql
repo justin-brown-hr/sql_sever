@@ -6,7 +6,9 @@
   types found in the client schema (SDAT columns are NVARCHAR(MAX)), then seeds
   rows designed to break the load:
 
-    - Complex: MULTI account with 3 distinct building addresses
+    - Complex: MULTI account with 3 distinct MA building addresses, plus an
+      SDAT condo-unit row on the SAME account at a 4th address (must stay ONE
+      Complex - never also a Condo)
     - MULTI with a single address (Property -> Building -> Unit)
     - SDAT condos with and without CondoUnit
     - Warehouse / Office / Vacant / Park (building, no unit)
@@ -18,7 +20,7 @@
     - 300-character street name (truncation)
     - bad street number / missing zip (Review_Q, not loaded)
     - NULL parcel (loaded AND flagged)
-    - garbage PremisesState (must fall back to MD)
+    - garbage PremisesState (must remain NULL)
 ================================================================================
 */
 IF DB_ID(N'UPRXDB_TEST') IS NULL
@@ -118,7 +120,7 @@ VALUES
     (80, N'00000161', NULL,    N'34', N'NOPARCEL', N'ST', NULL, N'ROCKVILLE', N'20850', N'Single Family Detached', NULL, NULL),
     (81, N'00000171', N'000',  N'35', N'ZEROPARCEL', N'ST', NULL, N'ROCKVILLE', N'20850', N'Single Family Detached', NULL, NULL),
 
-    /* 10. No account and no condo unit -> INSUFFICIENT_DATA */
+    /* 10. Address with no account still loads, and is flagged INSUFFICIENT_DATA */
     (90, NULL, N'P90', N'36', N'NOACCOUNT', N'ST', NULL, N'ROCKVILLE', N'20850', N'Single Family Detached', NULL, NULL),
 
     /* 11. Apartment complex spelling + 2 addresses */
@@ -148,13 +150,17 @@ VALUES
     /* Owner NULL - contact must still be created */
     (1007, N'00077889', N'P1007', NULL, 1960, 1, N'830', N'NOOWNER', N'ST', N'ROCKVILLE', N'MD', N'20850'),
 
-    /* Rejects: bad number, no zip digits */
+    /* Bad number rejects; invalid ZIP stays NULL and no longer blocks loading */
     (1008, N'00088990', N'P1008', N'BAD NUMBER OWNER', 1980, 1, N'0',  N'BADNUM', N'ST', N'ROCKVILLE', N'MD', N'20850'),
     (1009, N'00099001', N'P1009', N'NO ZIP OWNER',     1980, 1, N'840', N'NOZIP',  N'ST', N'ROCKVILLE', N'MD', N'ABCDE'),
 
     /* Zero-padding: 31024 and 00031024 are the same account */
     (1010, N'31024',    N'P1010', N'PAD OWNER', 1990, 4, N'850', N'PADDED', N'ST', N'ROCKVILLE', N'MD', N'20850'),
-    (1011, N'00031024', N'P1010', N'PAD OWNER', 1990, 4, N'850', N'PADDED', N'ST', N'ROCKVILLE', N'MD', N'20850');
+    (1011, N'00031024', N'P1010', N'PAD OWNER', 1990, 4, N'850', N'PADDED', N'ST', N'ROCKVILLE', N'MD', N'20850'),
+
+    /* SDAT condo-unit row on the Complex account 00272531 (4th distinct address).
+       Must join the existing Complex as Building + Unit - NOT create a Condo. */
+    (1012, N'272531',   N'P1', N'GLENMONT OWNER LLC', 1985, 12, N'106', N'GLENMONT', N'AVENUE', N'SILVER SPRING', N'MD', N'20902');
 GO
 
 /* CondoUnit is added by the load script's schema-ensure batch; add it here too
@@ -168,6 +174,7 @@ UPDATE dbo.SDATIncomingTableX1 SET CondoUnit = N'101' WHERE RealPropertyTaxInfor
 UPDATE dbo.SDATIncomingTableX1 SET CondoUnit = N'102' WHERE RealPropertyTaxInformationID = 1002;
 UPDATE dbo.SDATIncomingTableX1 SET CondoUnit = N'PH1' WHERE RealPropertyTaxInformationID = 1010;
 UPDATE dbo.SDATIncomingTableX1 SET CondoUnit = N'PH2' WHERE RealPropertyTaxInformationID = 1011;
+UPDATE dbo.SDATIncomingTableX1 SET CondoUnit = N'301' WHERE RealPropertyTaxInformationID = 1012;
 GO
 
 PRINT N'Setup complete.';

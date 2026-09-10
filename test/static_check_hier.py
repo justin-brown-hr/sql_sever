@@ -45,6 +45,9 @@ check("Load PathType COMPLEX/PROPERTY/CONDO",
       "N'COMPLEX'" in load and "N'PROPERTY'" in load and "N'CONDO'" in load)
 check("Load Complex rule: MULTI + account + 2+ addresses",
       "DistinctAddrOnAccount" in load and "> 1" in load)
+check("Complex account keeps its condo rows in the Complex (no split Condo)",
+      "IsComplexAccount" in load and "HasMultiFamilyRow" in load
+      and "AND s.IsComplexAccount = 1 THEN N'COMPLEX'" in load)
 check("Load writes COMPLEX entity", "INSERT INTO dbo.COMPLEX" in load)
 check("Load writes PROPERTY entity", "INSERT INTO dbo.PROPERTY" in load)
 check("Load writes CONDO entity", "INSERT INTO dbo.CONDO" in load)
@@ -71,10 +74,10 @@ check("CondoUnit column added in its own batch (needs GO before it is read)",
       and "\nGO\n" in load[load.index("ADD CondoUnit"):load.index("s.CondoUnit")])
 check("YearBuilt range-guarded before BUILDING insert",
       "BETWEEN 1600 AND YEAR(DATEADD(YEAR, 1, SYSDATETIME()))" in load)
-check("Buildings labelled Building A / Building B",
-      "N'Building '" in load and "BuildingSeq" in load)
-check("Complex name is a business label, not Account# + COMPLEX",
-      "BUILDING COMPLEX" in load and "N' COMPLEX'" not in load)
+check("Source-less building names stay NULL",
+      "NULL,   /* No BuildingName is supplied" in load)
+check("Source-less complex names stay NULL",
+      "CommunityName = CAST(NULL AS VARCHAR(200))" in load)
 check("No invented SF property type (UNKNWN fallback)",
       "UNKNWN" in load and "N'SF')" not in load)
 check("Account# XREF cannot break the source-record unique index",

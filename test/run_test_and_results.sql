@@ -132,25 +132,31 @@ WHERE (e.Description = 'Complex'  AND NOT EXISTS (SELECT 1 FROM dbo.COMPLEX  x W
 INSERT #V VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
     'Entity type matches entity table', CONVERT(VARCHAR(20), @n) + ' mismatches');
 
-/* every building has one primary address */
-SELECT @n = COUNT(*) FROM dbo.BUILDING b
-WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_ADDRESS ua WHERE ua.UPRID = b.UPRID AND ua.IsPrimary = 1);
+/* Every loaded UPR entity has direct source Address and Contact links. */
+SELECT @n = COUNT(*) FROM dbo.UPR u
+WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_ADDRESS ua WHERE ua.UPRID = u.UPRID AND ua.IsPrimary = 1);
 INSERT #V VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
-    'Every Building has a primary Address', CONVERT(VARCHAR(20), @n) + ' without address');
+    'Every UPR has a primary Address link', CONVERT(VARCHAR(20), @n) + ' without primary address');
+SELECT @n = COUNT(*) FROM dbo.UPR u
+WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_CONTACT uc WHERE uc.UPRID = u.UPRID);
+INSERT #V VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
+    'Every UPR has a Contact link', CONVERT(VARCHAR(20), @n) + ' without contact');
 
-/* every parent (Complex/Property/Condo) has a contact */
-SELECT @n = COUNT(*)
-FROM dbo.UPR u
-INNER JOIN dbo.REF_ENTITYTYPE e ON e.EntityTypeID = u.EntityTypeID
-WHERE e.Description IN ('Complex', 'Property', 'Condo')
-  AND NOT EXISTS (SELECT 1 FROM dbo.UPR_CONTACT uc WHERE uc.UPRID = u.UPRID);
+/* Unit's Building must belong to the same structural parent. */
+SELECT @n = COUNT(*) FROM dbo.UNIT un
+INNER JOIN dbo.UPR u ON u.UPRID = un.UPRID
+WHERE NOT EXISTS (
+    SELECT 1 FROM dbo.BUILDING b
+    INNER JOIN dbo.UPR bu ON bu.UPRID = b.UPRID
+    INNER JOIN dbo.REF_ENTITYTYPE be ON be.EntityTypeID = bu.EntityTypeID
+    INNER JOIN dbo.UPR parent ON parent.UPRID = u.ParentUPRID
+    INNER JOIN dbo.REF_ENTITYTYPE pe ON pe.EntityTypeID = parent.EntityTypeID
+    WHERE b.BuildingID = un.BuildingID AND be.Description = 'Building'
+      AND ((pe.Description = 'Building' AND parent.UPRID = bu.UPRID)
+        OR (pe.Description = 'Condo' AND parent.UPRID = bu.ParentUPRID))
+);
 INSERT #V VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
-    'Every parent record has a Contact', CONVERT(VARCHAR(20), @n) + ' without contact');
-
-/* every unit belongs to a building */
-SELECT @n = COUNT(*) FROM dbo.UNIT WHERE BuildingID IS NULL;
-INSERT #V VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
-    'Every Unit has a Building', CONVERT(VARCHAR(20), @n) + ' units without building');
+    'Every Unit has the correct Building link', CONVERT(VARCHAR(20), @n) + ' invalid links');
 
 /* unit parent must be Building or Condo */
 SELECT @n = COUNT(*)
@@ -210,10 +216,14 @@ INSERT #V VALUES (CASE WHEN @n > 0 THEN 'PASS' ELSE 'N/A' END,
     'Review queue populated', CONVERT(VARCHAR(20), @n)
     + ' rows (N/A = nothing needed review)');
 
-/* audit log */
-SELECT @n = COUNT(*) FROM dbo.AuditLog WHERE EntityName = 'UPR_HIER_LOAD';
-INSERT #V VALUES (CASE WHEN @n > 0 THEN 'PASS' ELSE 'FAIL' END,
-    'Audit log written', CONVERT(VARCHAR(20), @n) + ' batch rows');
+/* Auditing must cover writes outside the loader as well as batch summaries. */
+SELECT @n = COUNT(*) FROM sys.triggers tr
+WHERE tr.name = N'tr_UPR_Audit_' + OBJECT_NAME(tr.parent_id) AND tr.is_disabled = 0;
+INSERT #V VALUES (CASE WHEN @n = 22 THEN 'PASS' ELSE 'FAIL' END,
+    'Persistent row audit triggers installed', CONVERT(VARCHAR(20), @n) + ' of 22 UPR model/reference tables');
+SELECT @n = COUNT(*) FROM dbo.AuditLog WHERE EntityName <> 'UPR_HIER_LOAD';
+INSERT #V VALUES (CASE WHEN @n > 0 THEN 'PASS' ELSE 'N/A' END,
+    'Individual row audit events recorded', CONVERT(VARCHAR(20), @n) + ' events since audit installation');
 
 SELECT Result, CheckName, Detail FROM #V ORDER BY Seq;
 

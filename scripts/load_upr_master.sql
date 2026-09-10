@@ -10,16 +10,19 @@
 
   CLIENT RULES (Response.docx):
     1) NewUPRTABLEUSED is source of truth; replace old model completely
-    2) COMPLEX when MA MultiFamily + Account# + 2+ distinct building addresses
+    2) COMPLEX when MA MultiFamily + Account# + 2+ distinct building addresses.
+       Every incoming row for that account - including SDAT / condo-typed rows -
+       stays inside the one Complex. The account never also becomes a Condo.
     3) MultiFamily with 1 address -> Property -> Building -> Unit
     4) Condo (SDAT): Condo (Parent NULL) -> Unit; account on Condo UPR
+       (only when the account is NOT a Complex under rule 2)
     5) SF / Warehouse / Office / Park / etc -> Property -> Building -> Unit
     6) Address via ADDRESS + UPR_ADDRESS only; Contact required when address valid
     7) Staging in temp tables after validate/normalize; print statistics
     8) AccountNumber nullable, not unique; CommunityName on COMPLEX only
 
-  Prerequisites: run ddl/03_new_upr_schema.sql first.
-  Re-runnable: a second run against unchanged incoming data inserts nothing.
+  Prerequisites: create the schema once, then run scripts/install_upr_audit.sql.
+  Re-runnable: unchanged incoming data inserts no business rows (batch audit remains).
 
   EDIT USE database name to match your environment.
 ================================================================================
@@ -82,30 +85,19 @@ BEGIN
 END;
 GO
 
-/* UPR ZipCode CHECK: ##### or #####-#### - strip non-digits, pad/ format */
+/* Preserve supported source ZIP formats; never manufacture missing digits. */
 CREATE OR ALTER FUNCTION dbo.fn_UPR_NormalizeZipCode (@zip NVARCHAR(20))
 RETURNS NVARCHAR(10)
 AS
 BEGIN
-    DECLARE @raw   NVARCHAR(20) = LTRIM(RTRIM(ISNULL(@zip, N'')));
-    DECLARE @digits NVARCHAR(20) = N'';
-    DECLARE @i     INT = 1;
-
-    WHILE @i <= LEN(@raw)
-    BEGIN
-        IF SUBSTRING(@raw, @i, 1) LIKE N'[0-9]'
-            SET @digits = @digits + SUBSTRING(@raw, @i, 1);
-        SET @i = @i + 1;
-    END;
-
-    IF LEN(@digits) >= 9
-        RETURN LEFT(@digits, 5) + N'-' + SUBSTRING(@digits, 6, 4);
-    IF LEN(@digits) >= 5
-        RETURN LEFT(@digits, 5);
-    IF LEN(@digits) > 0
-        RETURN RIGHT(REPLICATE(N'0', 5) + @digits, 5);
-
-    RETURN N'00000';
+    DECLARE @raw NVARCHAR(20) = NULLIF(LTRIM(RTRIM(@zip)), N'');
+    IF @raw NOT LIKE N'%[^0-9]%' AND LEN(@raw) = 9
+        RETURN LEFT(@raw, 5) + N'-' + RIGHT(@raw, 4);
+    IF LEN(@raw) = 5 AND @raw NOT LIKE N'%[^0-9]%'
+        RETURN @raw;
+    IF LEN(@raw) = 10 AND @raw LIKE N'[0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9]'
+        RETURN @raw;
+    RETURN NULL;
 END;
 GO
 
@@ -253,7 +245,7 @@ BEGIN
     RETURN LTRIM(RTRIM(
         ISNULL(dbo.fn_UPR_NormalizeAddressLine(@line), N'') + N' ' +
         UPPER(LTRIM(RTRIM(ISNULL(@city, N'')))) + N' ' +
-        LEFT(REPLACE(dbo.fn_UPR_NormalizeZipCode(@zip), N'-', N''), 5)
+        ISNULL(LEFT(REPLACE(dbo.fn_UPR_NormalizeZipCode(@zip), N'-', N''), 5), N'')
     ));
 END;
 GO
@@ -287,7 +279,6 @@ DECLARE @AuditUser   NVARCHAR(128) = COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(NVARCHA
    which can produce a timestamp in the future and trip <= SYSDATETIME() checks */
 DECLARE @Now         DATETIME2(0)  = CONVERT(DATETIME2(0), CONVERT(VARCHAR(19), SYSDATETIME(), 126));
 DECLARE @BatchStart  DATETIME2(0)  = SYSDATETIME();
-DECLARE @DefaultState CHAR(2)      = N'MD';
 DECLARE @ErrorMessage NVARCHAR(500);
 DECLARE @PreflightErrors NVARCHAR(MAX) = N'';
 
@@ -354,6 +345,21 @@ BEGIN
     SET @ErrorMessage = N'Preflight failed - missing objects: ' + @PreflightErrors;
     THROW 50001, @ErrorMessage, 1;
 END;
+
+IF EXISTS (
+    SELECT 1 FROM sys.tables t
+    WHERE t.schema_id = SCHEMA_ID(N'dbo')
+      AND t.name IN (N'UPR', N'ADDRESS', N'COMPLEX', N'PROPERTY', N'CONDO',
+          N'BUILDING', N'UNIT', N'ADU', N'CONTACT', N'UPR_ADDRESS', N'UPR_CONTACT',
+          N'EXTERNAL_IDENTIFIER_XREF', N'UPR_CLOSURE', N'UPRMATCHREVIEW_Q', N'UPRSTATUSHISTORY',
+          N'REF_ENTITYTYPE', N'REF_PROPERTYTYPE', N'REF_PROPERTY_STATUSCODE',
+          N'REF_CONTACTTYPE', N'REF_ROLETYPE', N'REF_ADDRESSROLE', N'REF_UNITTYPECODE')
+      AND NOT EXISTS (
+          SELECT 1 FROM sys.triggers tr WHERE tr.parent_id = t.object_id
+            AND tr.name = N'tr_UPR_Audit_' + t.name AND tr.is_disabled = 0
+      )
+)
+    THROW 50004, 'Run scripts/install_upr_audit.sql before loading data.', 1;
 
 PRINT N'Step 0 complete - required tables/functions present.';
 
@@ -475,7 +481,7 @@ BEGIN TRY
         UnitNumber           = NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(50), ma.Unit))), N''),
         CondoUnit            = CAST(NULL AS NVARCHAR(50)),
         City                 = NULLIF(UPPER(LTRIM(RTRIM(ma.City))), N''),
-        [State]              = @DefaultState,
+        [State]              = CAST(NULL AS CHAR(2)),
         ZipCode              = dbo.fn_UPR_NormalizeZipCode(ma.ZipCode),
         PropertyTypeRaw      = NULLIF(UPPER(LTRIM(RTRIM(ma.LUCategory))), N''),
         PropertyType         = CONVERT(NVARCHAR(6), CASE
@@ -516,22 +522,20 @@ BEGIN TRY
         NormalizedStreetAddress = UPPER(LTRIM(RTRIM(
             ISNULL(dbo.fn_UPR_NormalizeStreetNumber(CONVERT(NVARCHAR(20), ma.StreetNumber)), N'') + N' ' +
             ISNULL(UPPER(LTRIM(RTRIM(ma.StreetName))), N'') + N' ' +
-            ISNULL(dbo.fn_UPR_StdStreetToken(CONVERT(NVARCHAR(50), ma.StreetType)),
-                   NULLIF(UPPER(LTRIM(RTRIM(ma.StreetType))), N''))
+            COALESCE(dbo.fn_UPR_StdStreetToken(CONVERT(NVARCHAR(50), ma.StreetType)),
+                   NULLIF(UPPER(LTRIM(RTRIM(ma.StreetType))), N''), N'')
         ))),
         NormalizedFullAddress = UPPER(LTRIM(RTRIM(
             ISNULL(dbo.fn_UPR_NormalizeStreetNumber(CONVERT(NVARCHAR(20), ma.StreetNumber)), N'') + N' ' +
             ISNULL(UPPER(LTRIM(RTRIM(ma.StreetName))), N'') + N' ' +
-            ISNULL(dbo.fn_UPR_StdStreetToken(CONVERT(NVARCHAR(50), ma.StreetType)),
-                   NULLIF(UPPER(LTRIM(RTRIM(ma.StreetType))), N'')) + N' ' +
+            COALESCE(dbo.fn_UPR_StdStreetToken(CONVERT(NVARCHAR(50), ma.StreetType)),
+                   NULLIF(UPPER(LTRIM(RTRIM(ma.StreetType))), N''), N'') + N' ' +
             ISNULL(UPPER(LTRIM(RTRIM(ma.City))), N'') + N' ' +
-            LEFT(REPLACE(dbo.fn_UPR_NormalizeZipCode(ma.ZipCode), N'-', N''), 5)
+            ISNULL(LEFT(REPLACE(dbo.fn_UPR_NormalizeZipCode(ma.ZipCode), N'-', N''), 5), N'')
         ))),
         HasRequiredAddress   = CASE
             WHEN NULLIF(UPPER(LTRIM(RTRIM(ma.StreetName))), N'') IS NULL THEN 0
-            WHEN NULLIF(UPPER(LTRIM(RTRIM(ma.City))), N'') IS NULL THEN 0
             WHEN dbo.fn_UPR_IsValidStreetNumber(ma.StreetNumber) = 0 THEN 0
-            WHEN dbo.fn_UPR_IsValidZipCode(ma.ZipCode) = 0 THEN 0
             ELSE 1
         END
     INTO #MA
@@ -619,7 +623,7 @@ BEGIN TRY
             WHEN LEN(UPPER(LTRIM(RTRIM(ISNULL(s.PremisesState, N''))))) = 2
              AND UPPER(LTRIM(RTRIM(s.PremisesState))) NOT LIKE N'%[^A-Z]%'
                 THEN UPPER(LTRIM(RTRIM(s.PremisesState)))
-            ELSE @DefaultState
+            ELSE NULL
         END,
         ZipCode              = dbo.fn_UPR_NormalizeZipCode(s.PremisesZipCode),
         PropertyTypeRaw      = CAST(NULL AS NVARCHAR(50)),
@@ -632,22 +636,20 @@ BEGIN TRY
         NormalizedStreetAddress = UPPER(LTRIM(RTRIM(
             ISNULL(dbo.fn_UPR_NormalizeStreetNumber(LTRIM(RTRIM(s.PremisesNumber))), N'') + N' ' +
             ISNULL(UPPER(LTRIM(RTRIM(s.PremisesStreetName))), N'') + N' ' +
-            ISNULL(dbo.fn_UPR_StdStreetToken(CONVERT(NVARCHAR(50), s.PremisesStreetType)),
-                   NULLIF(UPPER(LTRIM(RTRIM(s.PremisesStreetType))), N''))
+            COALESCE(dbo.fn_UPR_StdStreetToken(CONVERT(NVARCHAR(50), s.PremisesStreetType)),
+                   NULLIF(UPPER(LTRIM(RTRIM(s.PremisesStreetType))), N''), N'')
         ))),
         NormalizedFullAddress = UPPER(LTRIM(RTRIM(
             ISNULL(dbo.fn_UPR_NormalizeStreetNumber(LTRIM(RTRIM(s.PremisesNumber))), N'') + N' ' +
             ISNULL(UPPER(LTRIM(RTRIM(s.PremisesStreetName))), N'') + N' ' +
-            ISNULL(dbo.fn_UPR_StdStreetToken(CONVERT(NVARCHAR(50), s.PremisesStreetType)),
-                   NULLIF(UPPER(LTRIM(RTRIM(s.PremisesStreetType))), N'')) + N' ' +
+            COALESCE(dbo.fn_UPR_StdStreetToken(CONVERT(NVARCHAR(50), s.PremisesStreetType)),
+                   NULLIF(UPPER(LTRIM(RTRIM(s.PremisesStreetType))), N''), N'') + N' ' +
             ISNULL(UPPER(LTRIM(RTRIM(s.PremisesCity))), N'') + N' ' +
-            LEFT(REPLACE(dbo.fn_UPR_NormalizeZipCode(s.PremisesZipCode), N'-', N''), 5)
+            ISNULL(LEFT(REPLACE(dbo.fn_UPR_NormalizeZipCode(s.PremisesZipCode), N'-', N''), 5), N'')
         ))),
         HasRequiredAddress   = CASE
             WHEN NULLIF(UPPER(LTRIM(RTRIM(s.PremisesStreetName))), N'') IS NULL THEN 0
-            WHEN NULLIF(UPPER(LTRIM(RTRIM(s.PremisesCity))), N'') IS NULL THEN 0
             WHEN dbo.fn_UPR_IsValidStreetNumber(s.PremisesNumber) = 0 THEN 0
-            WHEN dbo.fn_UPR_IsValidZipCode(s.PremisesZipCode) = 0 THEN 0
             ELSE 1
         END
     INTO #SDAT
@@ -698,7 +700,10 @@ CREATE TABLE #Stage (
     ReviewReason            NVARCHAR(255) NULL,
     PathType                VARCHAR(20)  NULL,  /* COMPLEX | PROPERTY | CONDO */
     GroupKey                NVARCHAR(450) NULL,
-    DistinctAddrOnAccount   INT          NULL
+    DistinctAddrOnAccount   INT          NULL,
+    /* 1 when the row's account qualifies as a Complex (rule 2). SDAT / condo
+       rows on such an account then join that Complex instead of a new Condo. */
+    IsComplexAccount        BIT          NOT NULL CONSTRAINT DF_Stage_IsComplexAccount DEFAULT (0)
 );
 
 INSERT INTO #Stage (
@@ -734,6 +739,27 @@ FROM #SDAT;
 
 SET @StageRows = (SELECT COUNT(*) FROM #Stage);
 
+/* Repair only legacy generated UnitNumbers proven by their source XREF.
+   Keep the existing Unit/UPR IDs and links. A real incoming MA-/SD- value
+   must never be cleared merely because it resembles an old placeholder. */
+UPDATE un
+SET UnitNumber = NULL
+FROM dbo.UNIT un
+INNER JOIN dbo.EXTERNAL_IDENTIFIER_XREF x ON x.UPRID = un.UPRID
+    AND x.IdentifierType = N'SOURCE_RECORD_ID'
+INNER JOIN #Stage s ON s.SourceSystem = x.SourceSystem AND s.SourceRecordID = x.IdentifierValue
+WHERE NULLIF(LTRIM(RTRIM(s.UnitNumber)), N'') IS NULL
+  AND NULLIF(LTRIM(RTRIM(s.CondoUnit)), N'') IS NULL
+  AND un.UnitNumber = CASE s.SourceSystem
+        WHEN N'ADDRESS_MASTER' THEN N'MA-' + CONVERT(VARCHAR(50), s.MasterAddressID)
+        WHEN N'KDAT' THEN N'SD-' + CONVERT(VARCHAR(50), s.KdatRecordID) END
+  AND NOT EXISTS (
+      SELECT 1 FROM dbo.EXTERNAL_IDENTIFIER_XREF other
+      LEFT JOIN #Stage os ON os.SourceSystem = other.SourceSystem AND os.SourceRecordID = other.IdentifierValue
+      WHERE other.UPRID = un.UPRID AND other.IdentifierType = N'SOURCE_RECORD_ID'
+        AND (os.StageKey IS NULL OR os.UnitNumber IS NOT NULL OR os.CondoUnit IS NOT NULL)
+  );
+
 /* Placeholder parcels -> NULL */
 UPDATE #Stage
 SET ParcelID = NULL
@@ -750,7 +776,9 @@ WHERE ParcelID IS NOT NULL
 IF OBJECT_ID('tempdb..#AcctAddrCnt') IS NOT NULL DROP TABLE #AcctAddrCnt;
 SELECT
     AccountNumber,
-    COUNT(DISTINCT NormalizedFullAddress) AS DistinctAddrCnt
+    COUNT(DISTINCT NormalizedFullAddress) AS DistinctAddrCnt,
+    /* Does the account carry at least one MA MultiFamily / Apartment row? */
+    MAX(CASE WHEN PropertyType IN (N'MULTI', N'APT') THEN 1 ELSE 0 END) AS HasMultiFamilyRow
 INTO #AcctAddrCnt
 FROM #Stage
 WHERE AccountNumber IS NOT NULL
@@ -759,24 +787,27 @@ WHERE AccountNumber IS NOT NULL
   AND NULLIF(LTRIM(RTRIM(NormalizedFullAddress)), N'') IS NOT NULL
 GROUP BY AccountNumber;
 
+/* An account is a Complex (rule 2) when it has an MA MultiFamily/Apartment row
+   and 2+ distinct MA building addresses. Flag every staged row on that account -
+   MA and SDAT alike - so its condo-typed rows join the Complex, not a new Condo. */
 UPDATE s
-SET s.DistinctAddrOnAccount = a.DistinctAddrCnt
+SET s.DistinctAddrOnAccount = a.DistinctAddrCnt,
+    s.IsComplexAccount = CASE
+        WHEN a.HasMultiFamilyRow = 1 AND a.DistinctAddrCnt > 1 THEN 1 ELSE 0 END
 FROM #Stage s
 INNER JOIN #AcctAddrCnt a ON a.AccountNumber = s.AccountNumber;
 
 /*
    IsValid for UPR write:
      - required address present
-     - AccountNumber present, OR Condo path (PropertyType CONDO / CondoUnit)
+     - City, ZIP, account and parcel may be missing; never fill them with guesses
    Missing ParcelID does NOT block load (still flagged to Review_Q).
 */
 UPDATE #Stage
 SET
     IsValid = CASE
         WHEN HasRequiredAddress = 0 THEN 0
-        WHEN AccountNumber IS NOT NULL THEN 1
-        WHEN PropertyType = N'CONDO' OR CondoUnit IS NOT NULL THEN 1
-        ELSE 0
+        ELSE 1
     END,
     ReviewReason = CASE
         WHEN HasRequiredAddress = 0 THEN N'NO_ADDRESS_MATCH'
@@ -790,6 +821,9 @@ SET
 UPDATE s
 SET
     PathType = CASE
+        /* Complex account (rule 2): its condo-typed rows join the Complex. */
+        WHEN (s.PropertyType = N'CONDO' OR s.CondoUnit IS NOT NULL)
+         AND s.IsComplexAccount = 1 THEN N'COMPLEX'
         WHEN s.PropertyType = N'CONDO' OR s.CondoUnit IS NOT NULL THEN N'CONDO'
         WHEN s.PropertyType IN (N'MULTI', N'APT')
          AND s.AccountNumber IS NOT NULL
@@ -797,6 +831,9 @@ SET
         ELSE N'PROPERTY'
     END,
     GroupKey = CASE
+        WHEN (s.PropertyType = N'CONDO' OR s.CondoUnit IS NOT NULL)
+         AND s.IsComplexAccount = 1 THEN
+            N'COMPLEX|' + s.AccountNumber
         WHEN s.PropertyType = N'CONDO' OR s.CondoUnit IS NOT NULL THEN
             N'CONDO|' + ISNULL(s.AccountNumber, N'NOACCT') + N'|' +
             CASE WHEN s.AccountNumber IS NULL THEN ISNULL(s.NormalizedFullAddress, N'') ELSE N'' END
@@ -846,6 +883,7 @@ SELECT
 INTO #ReviewSrc
 FROM #Stage
 WHERE IsValid = 0
+   OR ReviewReason IS NOT NULL
    OR (IsValid = 1 AND ParcelID IS NULL);
 
 /* Re-run dedupe below scans UPRMATCHREVIEW_Q per row - index it or the load crawls */
@@ -928,11 +966,8 @@ SELECT
         CASE s.PathType WHEN N'CONDO' THEN N'CONDO' WHEN N'COMPLEX' THEN N'MULTI' ELSE N'UNKNWN' END
     ),
     OwnerName = MAX(s.OwnerName),
-    /* Complex has no name in MA/SDAT - business label from city, per client */
-    CommunityName = CASE WHEN s.PathType = N'COMPLEX' THEN
-        LEFT(COALESCE(MAX(s.City) + N' BUILDING COMPLEX',
-                      MAX(s.AccountNumber) + N' BUILDING COMPLEX',
-                      N'BUILDING COMPLEX'), 200) END,
+    /* Neither incoming table supplies a community name. */
+    CommunityName = CAST(NULL AS VARCHAR(200)),
     ParcelID = MAX(s.ParcelID),
     EntityTypeID = CASE s.PathType
         WHEN N'COMPLEX' THEN @EtComplex
@@ -973,7 +1008,7 @@ INNER JOIN dbo.EXTERNAL_IDENTIFIER_XREF x
    The closure contains self rows, which covers rows linked to the parent. */
 INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = x.UPRID
 INNER JOIN dbo.UPR anc ON anc.UPRID = cl.AncestorUPRID AND anc.EntityTypeID = g.EntityTypeID
-WHERE g.PathType = N'PROPERTY'
+WHERE (g.PathType = N'PROPERTY' OR (g.PathType = N'CONDO' AND g.AccountNumber IS NULL))
   AND NOT EXISTS (SELECT 1 FROM #ParentSkip p WHERE p.GroupKey = g.GroupKey)
 GROUP BY g.GroupKey;
 
@@ -1094,7 +1129,7 @@ SELECT
     ParentUPRID = pm.UPRID,
     PathType = pm.PathType,
     s.NormalizedFullAddress,
-    /* Building A, Building B, ... within each parent (client rule: no source name) */
+    /* Sequence is used only to recognize legacy generated names for repair. */
     BuildingSeq = ROW_NUMBER() OVER (PARTITION BY pm.UPRID ORDER BY s.NormalizedFullAddress),
     StreetNumber = MAX(s.StreetNumber),
     StreetName   = MAX(s.StreetName),
@@ -1124,6 +1159,22 @@ CREATE TABLE #BuildingMap (
     PathType VARCHAR(20) NOT NULL
 );
 
+/* A source-matching Address link may already exist with IsPrimary = 0.
+   Restore its primary flag before looking for reusable Buildings. */
+;WITH PrimaryBuildingAddress AS (
+    SELECT u.UPRID, UPRAddressID = MIN(ua.UPRAddressID)
+    FROM #BuildingSrc src
+    INNER JOIN dbo.UPR u ON u.ParentUPRID = src.ParentUPRID AND u.EntityTypeID = @EtBuilding
+    INNER JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = u.UPRID
+    INNER JOIN dbo.ADDRESS a ON a.AddressID = ua.AddressID
+        AND a.NormalizedAddress = src.NormalizedFullAddress
+    WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_ADDRESS p WHERE p.UPRID = u.UPRID AND p.IsPrimary = 1)
+    GROUP BY u.UPRID
+)
+UPDATE ua SET IsPrimary = 1
+FROM dbo.UPR_ADDRESS ua
+INNER JOIN PrimaryBuildingAddress p ON p.UPRAddressID = ua.UPRAddressID;
+
 /* Skip buildings already under parent with same normalized address.
    MIN() keeps one row per BuildingKey if an earlier run left duplicates. */
 INSERT INTO #BuildingMap (BuildingKey, GroupKey, BuildingUPRID, NormalizedFullAddress, PathType)
@@ -1133,6 +1184,20 @@ INNER JOIN dbo.UPR u ON u.ParentUPRID = b.ParentUPRID AND u.EntityTypeID = @EtBu
 INNER JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = u.UPRID AND ua.IsPrimary = 1
 INNER JOIN dbo.ADDRESS a ON a.AddressID = ua.AddressID AND a.NormalizedAddress = b.NormalizedFullAddress
 GROUP BY b.BuildingKey;
+
+/* An earlier load may have left a Building without an address. Reuse it only
+   when both the source address and unaddressed Building are unambiguous. */
+INSERT INTO #BuildingMap (BuildingKey, GroupKey, BuildingUPRID, NormalizedFullAddress, PathType)
+SELECT b.BuildingKey, MIN(b.GroupKey), MIN(u.UPRID), MIN(b.NormalizedFullAddress), MIN(b.PathType)
+FROM #BuildingSrc b
+INNER JOIN dbo.UPR u ON u.ParentUPRID = b.ParentUPRID AND u.EntityTypeID = @EtBuilding
+INNER JOIN dbo.BUILDING entity ON entity.UPRID = u.UPRID
+WHERE NOT EXISTS (SELECT 1 FROM #BuildingMap m WHERE m.BuildingKey = b.BuildingKey)
+  AND NOT EXISTS (SELECT 1 FROM dbo.UPR_ADDRESS ua WHERE ua.UPRID = u.UPRID)
+  AND NOT EXISTS (SELECT 1 FROM #BuildingSrc other WHERE other.ParentUPRID = b.ParentUPRID
+                    AND other.BuildingKey <> b.BuildingKey)
+GROUP BY b.BuildingKey
+HAVING COUNT(*) = 1;
 
 MERGE dbo.UPR AS t
 USING (
@@ -1152,16 +1217,28 @@ SET @BuildingInserted = @@ROWCOUNT;
 INSERT INTO dbo.BUILDING (UPRID, BuildingName, YearBuilt, StatusCode)
 SELECT
     bm.BuildingUPRID,
-    /* Building A .. Building Z, then Building 27, Building 28, ... */
-    CASE WHEN b.BuildingSeq <= 26
-         THEN N'Building ' + CHAR(64 + CONVERT(INT, b.BuildingSeq))
-         ELSE N'Building ' + CONVERT(NVARCHAR(20), b.BuildingSeq)
-    END,
+    NULL,   /* No BuildingName is supplied by the incoming tables. */
     b.YearBuilt,
     N'ACTIVE'
 FROM #BuildingMap bm
 INNER JOIN #BuildingSrc b ON b.BuildingKey = bm.BuildingKey
 WHERE NOT EXISTS (SELECT 1 FROM dbo.BUILDING x WHERE x.UPRID = bm.BuildingUPRID);
+
+/* Clear the exact names generated by the previous loader for these groups. */
+UPDATE target SET BuildingName = NULL
+FROM dbo.BUILDING target
+INNER JOIN #BuildingMap bm ON bm.BuildingUPRID = target.UPRID
+INNER JOIN #BuildingSrc src ON src.BuildingKey = bm.BuildingKey
+WHERE target.BuildingName = CASE WHEN src.BuildingSeq <= 26
+    THEN N'Building ' + CHAR(64 + CONVERT(INT, src.BuildingSeq))
+    ELSE N'Building ' + CONVERT(NVARCHAR(20), src.BuildingSeq) END;
+
+UPDATE target SET CommunityName = NULL
+FROM dbo.COMPLEX target
+INNER JOIN #ParentMap pm ON pm.UPRID = target.UPRID
+WHERE target.CommunityName IN (N'BUILDING COMPLEX', pm.AccountNumber + N' BUILDING COMPLEX')
+   OR (EXISTS (SELECT 1 FROM #Stage s WHERE s.GroupKey = pm.GroupKey
+                 AND target.CommunityName = s.City + N' BUILDING COMPLEX'));
 
 CREATE INDEX IX_BuildingMap_Lookup ON #BuildingMap (GroupKey, NormalizedFullAddress);
 
@@ -1188,14 +1265,39 @@ WHERE NOT EXISTS (
     WHERE bm.BuildingKey = b.BuildingKey
 );
 
+/* Remove the former MD fallback on a matched source address when no valid
+   state was supplied. The incoming tables do not provide a state for MA. */
+UPDATE a SET State = NULL
+FROM dbo.ADDRESS a
+INNER JOIN dbo.UPR_ADDRESS ua ON ua.AddressID = a.AddressID AND ua.IsPrimary = 1
+INNER JOIN #BuildingMap bm ON bm.BuildingUPRID = ua.UPRID
+INNER JOIN #BuildingSrc src ON src.BuildingKey = bm.BuildingKey
+WHERE a.State = N'MD' AND src.State IS NULL;
+
 IF OBJECT_ID('tempdb..#AddressMap') IS NOT NULL DROP TABLE #AddressMap;
 CREATE TABLE #AddressMap (
     AddressKey BIGINT NOT NULL PRIMARY KEY,
     AddressID BIGINT NOT NULL
 );
 
+/* Reuse a source-identical Address already present (for example, when only
+   the Building-to-Address association was missing from a previous run). */
+INSERT INTO #AddressMap (AddressKey, AddressID)
+SELECT src.AddressKey, MIN(a.AddressID)
+FROM #AddressSrc src
+INNER JOIN dbo.ADDRESS a ON a.NormalizedAddress = src.NormalizedAddress
+WHERE NOT EXISTS (
+    SELECT a.StreetNumber, a.StreetName, a.StreetType, a.City, a.State, a.ZipCode, a.XCoordinate, a.YCoordinate
+    EXCEPT
+    SELECT src.StreetNumber, src.StreetName, src.StreetType, src.City, src.State, src.ZipCode, src.XCoordinate, src.YCoordinate
+)
+GROUP BY src.AddressKey;
+
 MERGE dbo.ADDRESS AS t
-USING #AddressSrc AS s
+USING (
+    SELECT src.* FROM #AddressSrc src
+    WHERE NOT EXISTS (SELECT 1 FROM #AddressMap m WHERE m.AddressKey = src.AddressKey)
+) AS s
 ON 1 = 0
 WHEN NOT MATCHED THEN
     INSERT (StreetNumber, StreetName, StreetType, City, State, ZipCode, NormalizedAddress, YCoordinate, XCoordinate)
@@ -1242,17 +1344,7 @@ IF OBJECT_ID('tempdb..#UnitSrc') IS NOT NULL DROP TABLE #UnitSrc;
         s.NormalizedFullAddress,
         UnitNumber = COALESCE(
             NULLIF(LTRIM(RTRIM(s.CondoUnit)), N''),
-            NULLIF(LTRIM(RTRIM(s.UnitNumber)), N''),
-            CASE
-                WHEN s.PathType IN (N'COMPLEX', N'CONDO')
-                  OR s.PropertyType IN (N'MULTI', N'APT', N'CONDO')
-                THEN CASE
-                    WHEN s.SourceSystem = N'ADDRESS_MASTER'
-                        THEN N'MA-' + CONVERT(VARCHAR(50), s.MasterAddressID)
-                    ELSE N'SD-' + CONVERT(VARCHAR(50), ISNULL(s.KdatRecordID, 0))
-                END
-                ELSE NULL
-            END
+            NULLIF(LTRIM(RTRIM(s.UnitNumber)), N'')
         ),
         NeedsUnit = CASE
             WHEN s.PathType = N'CONDO' THEN 1
@@ -1316,11 +1408,22 @@ CREATE TABLE #UnitMap (
     GroupKey NVARCHAR(450) NOT NULL
 );
 
+/* A newly arrived source row can describe an already loaded numbered Unit.
+   Reuse that same structural Unit and attach its new source XREF to it. */
+INSERT INTO #UnitMap (StageKey, UnitUPRID, GroupKey)
+SELECT src.StageKey, MIN(u.UPRID), MIN(src.GroupKey)
+FROM #UnitSrc src
+INNER JOIN dbo.UNIT un ON un.BuildingID = src.BuildingTableID AND un.UnitNumber = src.UnitNumber
+INNER JOIN dbo.UPR u ON u.UPRID = un.UPRID
+    AND u.ParentUPRID = src.ParentUPRID AND u.EntityTypeID = @EtUnit
+GROUP BY src.StageKey;
+
 MERGE dbo.UPR AS t
 USING (
     SELECT u.*
     FROM #UnitSrc u
-    WHERE NOT EXISTS (
+    WHERE NOT EXISTS (SELECT 1 FROM #UnitMap m WHERE m.StageKey = u.StageKey)
+      AND NOT EXISTS (
         SELECT 1
         FROM dbo.EXTERNAL_IDENTIFIER_XREF x
         INNER JOIN #Stage s ON s.StageKey = u.StageKey
@@ -1362,19 +1465,23 @@ IF OBJECT_ID('tempdb..#ContactSrc') IS NOT NULL DROP TABLE #ContactSrc;
 SELECT
     pm.GroupKey,
     pm.UPRID AS ParentUPRID,
-    /* Owner name, else the Account# so the row is traceable, else NULL
-       (client: owner/organization name may be NULL when not supplied) */
-    OrgName = CONVERT(VARCHAR(200),
-        COALESCE(
-            NULLIF(LTRIM(RTRIM(pm.OwnerName)), N''),
-            NULLIF(LTRIM(RTRIM(pm.AccountNumber)), N'')
-        ))
+    /* Contact row is required; unavailable owner details remain NULL. */
+    OrgName = CONVERT(VARCHAR(200), NULLIF(LTRIM(RTRIM(pm.OwnerName)), N''))
 INTO #ContactSrc
 FROM #ParentMap pm
 WHERE EXISTS (
     SELECT 1 FROM #Stage s
     WHERE s.GroupKey = pm.GroupKey AND s.IsValid = 1 AND s.HasRequiredAddress = 1
 );
+
+/* Remove the previous account-as-owner fallback, without changing real names. */
+UPDATE c SET OrganizationName = src.OrgName
+FROM dbo.CONTACT c
+INNER JOIN dbo.UPR_CONTACT uc ON uc.ContactID = c.ContactID AND uc.RoleTypeID = @RoleOwner
+INNER JOIN #ContactSrc src ON src.ParentUPRID = uc.UPRID
+INNER JOIN #ParentMap pm ON pm.UPRID = src.ParentUPRID
+WHERE c.OrganizationName = pm.AccountNumber
+  AND (src.OrgName IS NULL OR src.OrgName <> c.OrganizationName);
 
 IF OBJECT_ID('tempdb..#ContactMap') IS NOT NULL DROP TABLE #ContactMap;
 CREATE TABLE #ContactMap (
@@ -1435,17 +1542,7 @@ IF OBJECT_ID('tempdb..#XrefSrc') IS NOT NULL DROP TABLE #XrefSrc;
         s.AccountNumber,
         UnitNumber = COALESCE(
             NULLIF(LTRIM(RTRIM(s.CondoUnit)), N''),
-            NULLIF(LTRIM(RTRIM(s.UnitNumber)), N''),
-            CASE
-                WHEN s.PathType IN (N'COMPLEX', N'CONDO')
-                  OR s.PropertyType IN (N'MULTI', N'APT', N'CONDO')
-                THEN CASE
-                    WHEN s.SourceSystem = N'ADDRESS_MASTER'
-                        THEN N'MA-' + CONVERT(VARCHAR(50), s.MasterAddressID)
-                    ELSE N'SD-' + CONVERT(VARCHAR(50), ISNULL(s.KdatRecordID, 0))
-                END
-                ELSE NULL
-            END
+            NULLIF(LTRIM(RTRIM(s.UnitNumber)), N'')
         ),
         s.NormalizedFullAddress
     FROM #Stage s
@@ -1518,27 +1615,91 @@ PRINT N'Step 11 complete - XREF inserted: ' + CONVERT(NVARCHAR(20), @XrefInserte
    ============================================================================ */
 PRINT N'Step 12: Rebuild UPR_CLOSURE...';
 
-DELETE FROM dbo.UPR_CLOSURE;
-
-INSERT INTO dbo.UPR_CLOSURE (AncestorUPRID, DescendantUPRID)
-SELECT u.UPRID, u.UPRID
-FROM dbo.UPR u;
-
+/* Build the expected paths separately, then apply only real differences.
+   Unchanged loads must not produce thousands of delete/reinsert audit events. */
+IF OBJECT_ID('tempdb..#ExpectedClosure') IS NOT NULL DROP TABLE #ExpectedClosure;
+CREATE TABLE #ExpectedClosure (
+    AncestorUPRID BIGINT NOT NULL,
+    DescendantUPRID BIGINT NOT NULL,
+    PRIMARY KEY (AncestorUPRID, DescendantUPRID)
+);
+INSERT INTO #ExpectedClosure (AncestorUPRID, DescendantUPRID)
+SELECT UPRID, UPRID FROM dbo.UPR;
 DECLARE @ClosureAdded INT = 1;
 WHILE @ClosureAdded > 0
 BEGIN
-    INSERT INTO dbo.UPR_CLOSURE (AncestorUPRID, DescendantUPRID)
+    INSERT INTO #ExpectedClosure (AncestorUPRID, DescendantUPRID)
     SELECT c.AncestorUPRID, child.UPRID
-    FROM dbo.UPR_CLOSURE c
+    FROM #ExpectedClosure c
     INNER JOIN dbo.UPR child ON child.ParentUPRID = c.DescendantUPRID
-    WHERE NOT EXISTS (
-        SELECT 1 FROM dbo.UPR_CLOSURE x
-        WHERE x.AncestorUPRID = c.AncestorUPRID
-          AND x.DescendantUPRID = child.UPRID
-    );
+    WHERE NOT EXISTS (SELECT 1 FROM #ExpectedClosure x
+        WHERE x.AncestorUPRID = c.AncestorUPRID AND x.DescendantUPRID = child.UPRID);
     SET @ClosureAdded = @@ROWCOUNT;
 END;
+DELETE c FROM dbo.UPR_CLOSURE c
+WHERE NOT EXISTS (SELECT 1 FROM #ExpectedClosure e
+    WHERE e.AncestorUPRID = c.AncestorUPRID AND e.DescendantUPRID = c.DescendantUPRID);
+INSERT INTO dbo.UPR_CLOSURE (AncestorUPRID, DescendantUPRID)
+SELECT e.AncestorUPRID, e.DescendantUPRID FROM #ExpectedClosure e
+WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_CLOSURE c
+    WHERE c.AncestorUPRID = e.AncestorUPRID AND c.DescendantUPRID = e.DescendantUPRID);
 
+/* Link the same source address records to their parent and Units as well.
+   This creates associations, not extra addresses or guessed address values. */
+IF OBJECT_ID('tempdb..#HierarchyAddressLinks') IS NOT NULL DROP TABLE #HierarchyAddressLinks;
+;WITH AddressLinks AS (
+    SELECT pm.UPRID, ua.AddressID
+    FROM #ParentMap pm
+    INNER JOIN #BuildingMap bm ON bm.GroupKey = pm.GroupKey
+    INNER JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = bm.BuildingUPRID AND ua.IsPrimary = 1
+    UNION
+    SELECT un.UPRID, ua.AddressID
+    FROM dbo.UNIT un
+    INNER JOIN dbo.BUILDING b ON b.BuildingID = un.BuildingID
+    INNER JOIN #BuildingMap bm ON bm.BuildingUPRID = b.UPRID
+    INNER JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = b.UPRID AND ua.IsPrimary = 1
+)
+SELECT UPRID, AddressID INTO #HierarchyAddressLinks FROM AddressLinks;
+
+;WITH NumberedLinks AS (
+    SELECT UPRID, AddressID, Rn = ROW_NUMBER() OVER (PARTITION BY UPRID ORDER BY AddressID)
+    FROM #HierarchyAddressLinks
+)
+INSERT INTO dbo.UPR_ADDRESS (UPRID, AddressID, AddressRoleID, IsPrimary, EffectiveDate)
+SELECT l.UPRID, l.AddressID, @AddrPhysical,
+    CASE WHEN l.Rn = 1 AND NOT EXISTS (
+        SELECT 1 FROM dbo.UPR_ADDRESS p WHERE p.UPRID = l.UPRID AND p.IsPrimary = 1
+    ) THEN 1 ELSE 0 END,
+    CONVERT(DATE, @Now)
+FROM NumberedLinks l
+WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_ADDRESS ua
+    WHERE ua.UPRID = l.UPRID AND ua.AddressID = l.AddressID);
+
+/* Restore a missing primary flag even when the parent/Unit association
+   already existed and therefore did not need another INSERT above. */
+;WITH PrimaryHierarchyAddress AS (
+    SELECT ua.UPRID, UPRAddressID = MIN(ua.UPRAddressID)
+    FROM #HierarchyAddressLinks l
+    INNER JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = l.UPRID AND ua.AddressID = l.AddressID
+    WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_ADDRESS p WHERE p.UPRID = ua.UPRID AND p.IsPrimary = 1)
+    GROUP BY ua.UPRID
+)
+UPDATE ua SET IsPrimary = 1
+FROM dbo.UPR_ADDRESS ua
+INNER JOIN PrimaryHierarchyAddress p ON p.UPRAddressID = ua.UPRAddressID;
+
+/* Share each parent's source contact with its Building/Unit/ADU descendants. */
+INSERT INTO dbo.UPR_CONTACT (UPRID, ContactID, RoleTypeID, EffectiveDate)
+SELECT DISTINCT cl.DescendantUPRID, uc.ContactID, uc.RoleTypeID, CONVERT(DATE, @Now)
+FROM #ParentMap pm
+INNER JOIN dbo.UPR_CONTACT uc ON uc.UPRID = pm.UPRID AND uc.RoleTypeID = @RoleOwner
+INNER JOIN dbo.UPR_CLOSURE cl ON cl.AncestorUPRID = pm.UPRID
+WHERE cl.DescendantUPRID <> pm.UPRID
+  AND NOT EXISTS (SELECT 1 FROM dbo.UPR_CONTACT existing
+      WHERE existing.UPRID = cl.DescendantUPRID AND existing.ContactID = uc.ContactID
+        AND existing.RoleTypeID = uc.RoleTypeID);
+
+SET @UPRContactInserted = @UPRContactInserted + @@ROWCOUNT;
 SET @ClosureRows = (SELECT COUNT(*) FROM dbo.UPR_CLOSURE);
 PRINT N'Step 12 complete - UPR_CLOSURE rows: ' + CONVERT(NVARCHAR(20), @ClosureRows);
 
@@ -1623,7 +1784,7 @@ PRINT N'CONTACT / UPR_CONTACT        : '
 PRINT N'XREF inserted                : ' + CONVERT(NVARCHAR(20), @XrefInserted);
 PRINT N'UPR_CLOSURE rows             : ' + CONVERT(NVARCHAR(20), @ClosureRows);
 PRINT N'StatusHistory inserted       : ' + CONVERT(NVARCHAR(20), @StatusHistInserted);
-PRINT N'AuditLog inserted            : ' + CONVERT(NVARCHAR(20), @AuditInserted);
+PRINT N'Audit batch summaries        : ' + CONVERT(NVARCHAR(20), @AuditInserted);
 PRINT N'Elapsed seconds              : '
     + CONVERT(NVARCHAR(20), DATEDIFF(SECOND, @BatchStart, SYSDATETIME()));
 PRINT N'NOTE: Safe to re-run - existing UPRs are reused, not duplicated.';

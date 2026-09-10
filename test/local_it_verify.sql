@@ -80,20 +80,57 @@ FROM dbo.COMPLEX c
 INNER JOIN dbo.UPR u ON u.UPRID = c.UPRID
 INNER JOIN dbo.UPR b ON b.ParentUPRID = u.UPRID
 WHERE u.AccountNumber = '00272531';
-INSERT #R VALUES (CASE WHEN @n = 3 THEN 'PASS' ELSE 'FAIL' END,
-                  'Complex 00272531 has 3 buildings', CONVERT(VARCHAR(20), @n) + ' (expected 3)');
+INSERT #R VALUES (CASE WHEN @n = 4 THEN 'PASS' ELSE 'FAIL' END,
+                  'Complex 00272531 has 4 buildings', CONVERT(VARCHAR(20), @n) + ' (expected 4)');
 
 SELECT @n = COUNT(*)
 FROM dbo.BUILDING b
 INNER JOIN dbo.UPR u ON u.UPRID = b.UPRID
 INNER JOIN dbo.UPR p ON p.UPRID = u.ParentUPRID AND p.AccountNumber = '00272531'
-WHERE b.BuildingName IN ('Building A', 'Building B', 'Building C');
-INSERT #R VALUES (CASE WHEN @n = 3 THEN 'PASS' ELSE 'FAIL' END,
-                  'Buildings labelled Building A/B/C', CONVERT(VARCHAR(20), @n) + ' (expected 3)');
+WHERE b.BuildingName IS NULL;
+INSERT #R VALUES (CASE WHEN @n = 4 THEN 'PASS' ELSE 'FAIL' END,
+                  'Missing building names remain NULL', CONVERT(VARCHAR(20), @n) + ' (expected 4)');
 
-SELECT @n = COUNT(*) FROM dbo.COMPLEX WHERE CommunityName LIKE '%BUILDING COMPLEX';
+/* Complex account (rule 2) must NOT also produce a Condo, even though it has
+   SDAT condo-unit rows. Regression for the client 00272531 report. */
+SELECT @n = COUNT(*)
+FROM dbo.CONDO d
+INNER JOIN dbo.UPR u ON u.UPRID = d.UPRID
+WHERE EXISTS (SELECT 1 FROM dbo.UPR cx
+              INNER JOIN dbo.COMPLEX c ON c.UPRID = cx.UPRID
+              WHERE cx.AccountNumber = u.AccountNumber);
+INSERT #R VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
+                  'No Complex account also has a Condo', CONVERT(VARCHAR(20), @n) + ' (expected 0)');
+
+SELECT @n = COUNT(*) FROM dbo.CONDO d
+INNER JOIN dbo.UPR u ON u.UPRID = d.UPRID
+WHERE u.AccountNumber = '00272531';
+INSERT #R VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
+                  'Account 00272531 has no Condo', CONVERT(VARCHAR(20), @n) + ' (expected 0)');
+
+/* All 4 units (3 from MA, 1 from the SDAT CondoUnit row) sit in the Complex tree */
+SELECT @n = COUNT(*)
+FROM dbo.UNIT n
+INNER JOIN dbo.UPR u ON u.UPRID = n.UPRID
+INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = u.UPRID
+INNER JOIN dbo.UPR anc ON anc.UPRID = cl.AncestorUPRID
+INNER JOIN dbo.COMPLEX c ON c.UPRID = anc.UPRID AND anc.AccountNumber = '00272531';
+INSERT #R VALUES (CASE WHEN @n = 4 THEN 'PASS' ELSE 'FAIL' END,
+                  'Complex 00272531 has 4 units', CONVERT(VARCHAR(20), @n) + ' (expected 4)');
+
+/* The SDAT condo-unit row (KDAT 1012) resolves into the Complex, not a Condo */
+SELECT @n = COUNT(*)
+FROM dbo.EXTERNAL_IDENTIFIER_XREF x
+INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = x.UPRID
+INNER JOIN dbo.UPR anc ON anc.UPRID = cl.AncestorUPRID
+INNER JOIN dbo.COMPLEX c ON c.UPRID = anc.UPRID AND anc.AccountNumber = '00272531'
+WHERE x.IdentifierType = 'SOURCE_RECORD_ID' AND x.SourceSystem = 'KDAT' AND x.IdentifierValue = '1012';
+INSERT #R VALUES (CASE WHEN @n >= 1 THEN 'PASS' ELSE 'FAIL' END,
+                  'SDAT row on Complex account is in the Complex', CONVERT(VARCHAR(20), @n) + ' (expected >=1)');
+
+SELECT @n = COUNT(*) FROM dbo.COMPLEX WHERE CommunityName IS NULL;
 INSERT #R VALUES (CASE WHEN @n = 2 THEN 'PASS' ELSE 'FAIL' END,
-                  'CommunityName is a business label', CONVERT(VARCHAR(20), @n) + ' (expected 2)');
+                  'Missing community names remain NULL', CONVERT(VARCHAR(20), @n) + ' (expected 2)');
 
 /* ---- 7. MULTI with one address stays a Property -------------------------- */
 SELECT @n = COUNT(*)
@@ -187,20 +224,20 @@ INSERT #R VALUES (CASE WHEN @n = 2 THEN 'PASS' ELSE 'FAIL' END,
 SELECT @n = COUNT(*) FROM dbo.UPR WHERE AccountNumber = '00066778';
 INSERT #R VALUES (CASE WHEN @n = 1 THEN 'PASS' ELSE 'FAIL' END,
                   'Very long street name loaded', CONVERT(VARCHAR(20), @n) + ' (expected 1)');
-SELECT @n = COUNT(*) FROM dbo.ADDRESS WHERE State = 'MD' AND StreetName LIKE 'VERYLONG%';
+SELECT @n = COUNT(*) FROM dbo.ADDRESS WHERE State IS NULL AND StreetName LIKE 'VERYLONG%';
 INSERT #R VALUES (CASE WHEN @n = 1 THEN 'PASS' ELSE 'FAIL' END,
-                  'Garbage PremisesState fell back to MD', CONVERT(VARCHAR(20), @n) + ' (expected 1)');
+                  'Unsupported source State remains NULL', CONVERT(VARCHAR(20), @n) + ' (expected 1)');
 
 /* ---- 16. rejects are in Review_Q and NOT in UPR -------------------------- */
-SELECT @n = COUNT(*) FROM dbo.UPR WHERE AccountNumber IN ('00000131', '00000141', '00000151', '00088990', '00099001');
+SELECT @n = COUNT(*) FROM dbo.UPR WHERE AccountNumber IN ('00000131', '00088990');
 INSERT #R VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
                   'Bad-address rows not loaded', CONVERT(VARCHAR(20), @n) + ' (expected 0)');
 SELECT @n = COUNT(*) FROM dbo.UPRMATCHREVIEW_Q WHERE ReasonForNoMatch = 'NO_ADDRESS_MATCH';
-INSERT #R VALUES (CASE WHEN @n >= 5 THEN 'PASS' ELSE 'FAIL' END,
-                  'Bad-address rows in Review_Q', CONVERT(VARCHAR(20), @n) + ' (expected >=5)');
+INSERT #R VALUES (CASE WHEN @n >= 2 THEN 'PASS' ELSE 'FAIL' END,
+                  'Bad-address rows in Review_Q', CONVERT(VARCHAR(20), @n) + ' (expected >=2)');
 SELECT @n = COUNT(*) FROM dbo.UPRMATCHREVIEW_Q WHERE ReasonForNoMatch = 'INSUFFICIENT_DATA';
 INSERT #R VALUES (CASE WHEN @n = 1 THEN 'PASS' ELSE 'FAIL' END,
-                  'No-account row -> INSUFFICIENT_DATA', CONVERT(VARCHAR(20), @n) + ' (expected 1)');
+                  'No-account row loaded and flagged', CONVERT(VARCHAR(20), @n) + ' (expected 1)');
 
 /* ---- 17. missing parcel: loaded AND flagged ------------------------------ */
 SELECT @n = COUNT(*) FROM dbo.UPR WHERE AccountNumber IN ('00000161', '00000171');
@@ -235,4 +272,6 @@ SELECT * FROM #R ORDER BY Seq;
 SELECT Failures = SUM(CASE WHEN Result = 'FAIL' THEN 1 ELSE 0 END),
        Passes   = SUM(CASE WHEN Result = 'PASS' THEN 1 ELSE 0 END)
 FROM #R;
+IF EXISTS (SELECT 1 FROM #R WHERE Result = 'FAIL')
+    THROW 51000, 'Local integration verification failed.', 1;
 GO
