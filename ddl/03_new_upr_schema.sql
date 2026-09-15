@@ -33,6 +33,7 @@ GO
 IF OBJECT_ID(N'dbo.UPRSTATUSHISTORY', N'U') IS NOT NULL DROP TABLE dbo.UPRSTATUSHISTORY;
 IF OBJECT_ID(N'dbo.UPRMATCHREVIEW_Q', N'U') IS NOT NULL DROP TABLE dbo.UPRMATCHREVIEW_Q;
 IF OBJECT_ID(N'dbo.AuditLog', N'U') IS NOT NULL DROP TABLE dbo.AuditLog;
+IF OBJECT_ID(N'dbo.UPR_LOAD_RUN', N'U') IS NOT NULL DROP TABLE dbo.UPR_LOAD_RUN;
 IF OBJECT_ID(N'dbo.UPR_CLOSURE', N'U') IS NOT NULL DROP TABLE dbo.UPR_CLOSURE;
 IF OBJECT_ID(N'dbo.UPR_CONTACT', N'U') IS NOT NULL DROP TABLE dbo.UPR_CONTACT;
 IF OBJECT_ID(N'dbo.EXTERNAL_IDENTIFIER_XREF', N'U') IS NOT NULL DROP TABLE dbo.EXTERNAL_IDENTIFIER_XREF;
@@ -505,6 +506,9 @@ CREATE TABLE dbo.UPR_CLOSURE
 (
     AncestorUPRID   BIGINT NOT NULL,
     DescendantUPRID BIGINT NOT NULL,
+    /* Descendant's depth from its root, matching the report's LevelNo. */
+    [Level]        INT NOT NULL,
+    CONSTRAINT CK_UPR_CLOSURE_Level CHECK ([Level] >= 0),
     CONSTRAINT PK_UPR_CLOSURE PRIMARY KEY CLUSTERED (AncestorUPRID, DescendantUPRID),
     CONSTRAINT FK_UPR_CLOSURE_Ancestor FOREIGN KEY (AncestorUPRID) REFERENCES dbo.UPR (UPRID),
     CONSTRAINT FK_UPR_CLOSURE_Descendant FOREIGN KEY (DescendantUPRID) REFERENCES dbo.UPR (UPRID)
@@ -527,6 +531,10 @@ CREATE TABLE dbo.AuditLog
     ChangedBy     NVARCHAR(100) NOT NULL,
     ChangedDate   DATETIME2(3) NOT NULL CONSTRAINT DF_AuditLog_ChangedDate DEFAULT (SYSDATETIME()),
     ChangeSummary NVARCHAR(2000) NULL,
+    OldValues     NVARCHAR(MAX) NULL,
+    NewValues     NVARCHAR(MAX) NULL,
+    RunID         UNIQUEIDENTIFIER NULL,
+    SessionID     INT NULL,
     CONSTRAINT PK_AuditLog PRIMARY KEY CLUSTERED (AuditID),
     CONSTRAINT CK_AuditLog_OperationType CHECK (OperationType IN (
         'INSERT', 'UPDATE', 'DELETE', 'MERGE', 'STATUS_CHANGE'
@@ -535,6 +543,24 @@ CREATE TABLE dbo.AuditLog
        SYSDATETIME() can land just after 'now' and fail a strict check */
     CONSTRAINT CK_AuditLog_ChangedDate CHECK (ChangedDate <= DATEADD(MINUTE, 1, SYSDATETIME()))
 );
+GO
+
+/* Load-run history is separate from row events, including empty/failed runs. */
+CREATE TABLE dbo.UPR_LOAD_RUN
+(
+    RunID UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_UPR_LOAD_RUN PRIMARY KEY,
+    StartedAt DATETIME2(3) NOT NULL,
+    FinishedAt DATETIME2(3) NULL,
+    RunStatus VARCHAR(12) NOT NULL,
+    StartedBy NVARCHAR(100) NOT NULL,
+    SessionID INT NOT NULL,
+    SourceRowsRead INT NULL,
+    RejectedRows INT NULL,
+    ErrorMessage NVARCHAR(4000) NULL,
+    CONSTRAINT CK_UPR_LOAD_RUN_Status CHECK (RunStatus IN ('RUNNING', 'COMPLETED', 'FAILED'))
+);
+GO
+CREATE INDEX IX_AuditLog_RunID ON dbo.AuditLog (RunID, AuditID) INCLUDE (EntityName, OperationType);
 GO
 
 /* ============================================================================

@@ -1,27 +1,34 @@
-/* Read-only source/destination evidence for the two client-reported accounts.
+/* Read-only source/destination evidence for the client-reported accounts.
    Run on the client's database; no normalization functions are required.
    These queries do not insert, update, or manufacture source data. */
 USE UPRXDB_TEST;
 GO
 SET NOCOUNT ON;
 
+/* Add every reported account to this list - it drives every query below. */
+IF OBJECT_ID('tempdb..#WatchAccount') IS NOT NULL DROP TABLE #WatchAccount;
+CREATE TABLE #WatchAccount (AccountNumber NVARCHAR(50) PRIMARY KEY);
+INSERT #WatchAccount VALUES
+    ('00089876'), ('01297731'), ('00272531'), ('00086862');
+
 PRINT N'Original MasterAddress source rows';
 SELECT ma.*
 FROM dbo.MAIncomingTableX1 ma
-WHERE RIGHT(N'00000000' + LTRIM(RTRIM(CONVERT(NVARCHAR(50), ma.Account))), 8)
-    IN (N'00089876', N'01297731');
+WHERE EXISTS (SELECT 1 FROM #WatchAccount w
+    WHERE w.AccountNumber = RIGHT(N'00000000' + LTRIM(RTRIM(CONVERT(NVARCHAR(50), ma.Account))), 8));
 
 PRINT N'Original SDAT source rows (includes CondoUnit if the column exists)';
 SELECT s.*
 FROM dbo.SDATIncomingTableX1 s
-WHERE RIGHT(N'00000000' + LTRIM(RTRIM(CONVERT(NVARCHAR(50), s.AccountNumber))), 8)
-    IN (N'00089876', N'01297731');
+WHERE EXISTS (SELECT 1 FROM #WatchAccount w
+    WHERE w.AccountNumber = RIGHT(N'00000000' + LTRIM(RTRIM(CONVERT(NVARCHAR(50), s.AccountNumber))), 8));
 
 PRINT N'Written UPR entities with direct Address and Contact links';
 ;WITH Tree AS (
     SELECT u.UPRID, u.ParentUPRID, RootAccount = u.AccountNumber
     FROM dbo.UPR u
-    WHERE u.ParentUPRID IS NULL AND u.AccountNumber IN ('00089876', '01297731')
+    WHERE u.ParentUPRID IS NULL
+      AND EXISTS (SELECT 1 FROM #WatchAccount w WHERE w.AccountNumber = u.AccountNumber)
     UNION ALL
     SELECT u.UPRID, u.ParentUPRID, t.RootAccount
     FROM dbo.UPR u INNER JOIN Tree t ON u.ParentUPRID = t.UPRID
@@ -45,10 +52,59 @@ OPTION (MAXRECURSION 100);
 
 PRINT N'Review queue entries for these source accounts';
 SELECT * FROM dbo.UPRMATCHREVIEW_Q
-WHERE MA_Account IN ('00089876', '01297731') OR SDAT_AccountNumber IN ('00089876', '01297731');
+WHERE EXISTS (SELECT 1 FROM #WatchAccount w WHERE w.AccountNumber = UPRMATCHREVIEW_Q.MA_Account)
+   OR EXISTS (SELECT 1 FROM #WatchAccount w WHERE w.AccountNumber = UPRMATCHREVIEW_Q.SDAT_AccountNumber);
 
-PRINT N'Installed audit triggers';
+PRINT N'Installed audit triggers (expect 22, all enabled)';
 SELECT TableName = OBJECT_NAME(parent_id), name, is_disabled
 FROM sys.triggers WHERE name LIKE N'tr_UPR_Audit[_]%'
 ORDER BY TableName;
+
+/* Audit coverage health check - explains a thin/empty AuditLog without
+   guessing. A trigger-driven row can only exist for a change made AFTER
+   scripts/install_upr_audit.sql was run; nothing is fabricated retroactively.
+   An unchanged rerun of the loader is expected to add only the one
+   UPR_HIER_LOAD batch-summary row - that is correct, not a bug. */
+PRINT N'Audit coverage summary';
+SELECT
+    TotalAuditRows       = (SELECT COUNT(*) FROM dbo.AuditLog),
+    RowLevelAuditRows     = (SELECT COUNT(*) FROM dbo.AuditLog WHERE EntityName <> 'UPR_HIER_LOAD'),
+    BatchSummaryRows      = (SELECT COUNT(*) FROM dbo.AuditLog WHERE EntityName = 'UPR_HIER_LOAD'),
+    DistinctTablesAudited = (SELECT COUNT(DISTINCT EntityName) FROM dbo.AuditLog WHERE EntityName <> 'UPR_HIER_LOAD'),
+    EnabledTriggerCount   = (SELECT COUNT(*) FROM sys.triggers WHERE name LIKE N'tr_UPR_Audit[_]%' AND is_disabled = 0),
+    EarliestAuditEvent    = (SELECT MIN(ChangedDate) FROM dbo.AuditLog WHERE EntityName <> 'UPR_HIER_LOAD'),
+    LatestAuditEvent      = (SELECT MAX(ChangedDate) FROM dbo.AuditLog),
+    EarliestUPRCreated    = (SELECT MIN(CreatedDate) FROM dbo.UPR);
+PRINT N'If EnabledTriggerCount < 22, run scripts/install_upr_audit.sql.';
+PRINT N'If EarliestUPRCreated is well before EarliestAuditEvent, some UPR rows';
+PRINT N'were loaded before auditing was installed - their creation cannot be';
+PRINT N'audited retroactively, only their future changes will be captured.';
+
+IF OBJECT_ID(N'dbo.UPR_LOAD_RUN', N'U') IS NOT NULL
+BEGIN
+    PRINT N'Recent load runs and their recorded row changes';
+    EXEC sys.sp_executesql N'
+        SELECT TOP (10) r.RunID, r.StartedAt, r.FinishedAt, r.RunStatus,
+            r.SourceRowsRead, r.RejectedRows,
+            RowsInserted = COALESCE(a.RowsInserted, 0),
+            RowsUpdated = COALESCE(a.RowsUpdated, 0),
+            RowsDeleted = COALESCE(a.RowsDeleted, 0), r.ErrorMessage
+        FROM dbo.UPR_LOAD_RUN r
+        OUTER APPLY (
+            SELECT RowsInserted = SUM(CASE WHEN OperationType = ''INSERT'' THEN 1 ELSE 0 END),
+                RowsUpdated = SUM(CASE WHEN OperationType = ''UPDATE'' THEN 1 ELSE 0 END),
+                RowsDeleted = SUM(CASE WHEN OperationType = ''DELETE'' THEN 1 ELSE 0 END)
+            FROM dbo.AuditLog WHERE RunID = r.RunID AND EntityName <> N''UPR_HIER_LOAD''
+        ) a
+        ORDER BY r.StartedAt DESC, r.RunID;';
+    PRINT N'Run scripts/list_upr_audit.sql to see every row and changed field.';
+END;
+
+/* Client rule: never an invented MA-<id> / SD-<id> UnitNumber anywhere. */
+PRINT N'Any remaining invented MA-/SD- UnitNumber (expect 0 rows)';
+SELECT un.UnitID, un.UnitNumber, u.AccountNumber
+FROM dbo.UNIT un
+INNER JOIN dbo.UPR u ON u.UPRID = un.UPRID
+WHERE (un.UnitNumber LIKE 'MA-%' AND SUBSTRING(un.UnitNumber, 4, 50) NOT LIKE '%[^0-9]%')
+   OR (un.UnitNumber LIKE 'SD-%' AND SUBSTRING(un.UnitNumber, 4, 50) NOT LIKE '%[^0-9]%');
 GO

@@ -108,15 +108,27 @@ WHERE u.AccountNumber = '00272531';
 INSERT #R VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
                   'Account 00272531 has no Condo', CONVERT(VARCHAR(20), @n) + ' (expected 0)');
 
-/* All 4 units (3 from MA, 1 from the SDAT CondoUnit row) sit in the Complex tree */
+/* 5 units in the Complex tree: 101/102/201 from MA, N'A' for the MA row at
+   104 GLENMONT with no Unit value (every MA row counted as a unit in its
+   building gets a Unit record), and 301 from the SDAT CondoUnit row. */
 SELECT @n = COUNT(*)
 FROM dbo.UNIT n
 INNER JOIN dbo.UPR u ON u.UPRID = n.UPRID
 INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = u.UPRID
 INNER JOIN dbo.UPR anc ON anc.UPRID = cl.AncestorUPRID
 INNER JOIN dbo.COMPLEX c ON c.UPRID = anc.UPRID AND anc.AccountNumber = '00272531';
-INSERT #R VALUES (CASE WHEN @n = 4 THEN 'PASS' ELSE 'FAIL' END,
-                  'Complex 00272531 has 4 units', CONVERT(VARCHAR(20), @n) + ' (expected 4)');
+INSERT #R VALUES (CASE WHEN @n = 5 THEN 'PASS' ELSE 'FAIL' END,
+                  'Complex 00272531 has 5 units', CONVERT(VARCHAR(20), @n) + ' (expected 5)');
+
+SELECT @n = COUNT(*)
+FROM dbo.UNIT n
+INNER JOIN dbo.UPR u ON u.UPRID = n.UPRID
+INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = u.UPRID
+INNER JOIN dbo.UPR anc ON anc.UPRID = cl.AncestorUPRID
+INNER JOIN dbo.COMPLEX c ON c.UPRID = anc.UPRID AND anc.AccountNumber = '00272531'
+WHERE n.UnitNumber = N'N/A';
+INSERT #R VALUES (CASE WHEN @n = 1 THEN 'PASS' ELSE 'FAIL' END,
+                  'MA row with no Unit value recorded as N/A, not skipped', CONVERT(VARCHAR(20), @n) + ' (expected 1)');
 
 /* The SDAT condo-unit row (KDAT 1012) resolves into the Complex, not a Condo */
 SELECT @n = COUNT(*)
@@ -140,6 +152,16 @@ WHERE u.AccountNumber = '00100001';
 INSERT #R VALUES (CASE WHEN @n = 1 THEN 'PASS' ELSE 'FAIL' END,
                   'Single-address MULTI is a Property', CONVERT(VARCHAR(20), @n) + ' (expected 1)');
 
+/* Property -> Building -> Unit per client rule 3, even with no source Unit value */
+SELECT @n = COUNT(*)
+FROM dbo.UNIT n
+INNER JOIN dbo.UPR u ON u.UPRID = n.UPRID
+INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = u.UPRID
+INNER JOIN dbo.UPR anc ON anc.UPRID = cl.AncestorUPRID AND anc.AccountNumber = '00100001'
+WHERE n.UnitNumber = N'N/A';
+INSERT #R VALUES (CASE WHEN @n = 1 THEN 'PASS' ELSE 'FAIL' END,
+                  'Single-address MULTI still gets a Unit (N/A, no source value)', CONVERT(VARCHAR(20), @n) + ' (expected 1)');
+
 /* ---- 8. Condo: SDAT account merges with the MA condo row ----------------- */
 SELECT @n = COUNT(*) FROM dbo.CONDO c INNER JOIN dbo.UPR u ON u.UPRID = c.UPRID
 WHERE u.AccountNumber = '00031023';
@@ -154,6 +176,17 @@ INNER JOIN dbo.UPR anc ON anc.UPRID = cl.AncestorUPRID AND anc.AccountNumber = '
 WHERE n.UnitNumber IN ('101', '102');
 INSERT #R VALUES (CASE WHEN @n = 2 THEN 'PASS' ELSE 'FAIL' END,
                   'Condo units 101/102 from CondoUnit', CONVERT(VARCHAR(20), @n) + ' (expected 2)');
+
+/* Condo with an AccountNumber but no CondoUnit value: still gets a Unit row
+   (client rule) - record NULL, the source column exists but was left blank. */
+SELECT @n = COUNT(*)
+FROM dbo.UNIT n
+INNER JOIN dbo.UPR u ON u.UPRID = n.UPRID
+INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = u.UPRID
+INNER JOIN dbo.UPR anc ON anc.UPRID = cl.AncestorUPRID AND anc.AccountNumber = '00044556'
+WHERE n.UnitNumber IS NULL;
+INSERT #R VALUES (CASE WHEN @n = 1 THEN 'PASS' ELSE 'FAIL' END,
+                  'Condo with no CondoUnit value still gets a Unit (NULL, not skipped)', CONVERT(VARCHAR(20), @n) + ' (expected 1)');
 
 /* zero-padded account 31024 / 00031024 must be one condo */
 SELECT @n = COUNT(*) FROM dbo.UPR WHERE AccountNumber = '00031024';
@@ -235,9 +268,17 @@ INSERT #R VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
 SELECT @n = COUNT(*) FROM dbo.UPRMATCHREVIEW_Q WHERE ReasonForNoMatch = 'NO_ADDRESS_MATCH';
 INSERT #R VALUES (CASE WHEN @n >= 2 THEN 'PASS' ELSE 'FAIL' END,
                   'Bad-address rows in Review_Q', CONVERT(VARCHAR(20), @n) + ' (expected >=2)');
+
+/* Client rule: any source record without an AccountNumber is rejected to
+   Review_Q and must NEVER appear in UPR (no exceptions for a valid address). */
 SELECT @n = COUNT(*) FROM dbo.UPRMATCHREVIEW_Q WHERE ReasonForNoMatch = 'INSUFFICIENT_DATA';
 INSERT #R VALUES (CASE WHEN @n = 1 THEN 'PASS' ELSE 'FAIL' END,
-                  'No-account row loaded and flagged', CONVERT(VARCHAR(20), @n) + ' (expected 1)');
+                  'No-account row flagged in Review_Q', CONVERT(VARCHAR(20), @n) + ' (expected 1)');
+SELECT @n = COUNT(*) FROM dbo.ADDRESS a
+INNER JOIN dbo.UPR_ADDRESS ua ON ua.AddressID = a.AddressID
+WHERE a.StreetName = 'NOACCOUNT';
+INSERT #R VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
+                  'No-account row rejected, NOT loaded into UPR', CONVERT(VARCHAR(20), @n) + ' (expected 0)');
 
 /* ---- 17. missing parcel: loaded AND flagged ------------------------------ */
 SELECT @n = COUNT(*) FROM dbo.UPR WHERE AccountNumber IN ('00000161', '00000171');
@@ -258,6 +299,20 @@ WHERE u.ParentUPRID IS NOT NULL
 INSERT #R VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
                   'Closure has parent-child rows', CONVERT(VARCHAR(20), @n));
 
+/* Level matches the descendant's root depth, including self rows. */
+;WITH Tree AS (
+    SELECT UPRID, LevelNo = 0 FROM dbo.UPR WHERE ParentUPRID IS NULL
+    UNION ALL
+    SELECT u.UPRID, t.LevelNo + 1 FROM dbo.UPR u
+    INNER JOIN Tree t ON t.UPRID = u.ParentUPRID
+)
+SELECT @n = COUNT(*) FROM dbo.UPR_CLOSURE c
+LEFT JOIN Tree t ON t.UPRID = c.DescendantUPRID
+WHERE t.UPRID IS NULL OR c.[Level] IS NULL OR c.[Level] <> t.LevelNo
+OPTION (MAXRECURSION 0);
+INSERT #R VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
+                  'Closure Level matches report root depth', CONVERT(VARCHAR(20), @n));
+
 /* ---- 19. contact / status history counts match parents ------------------- */
 SELECT @n = COUNT(*) FROM dbo.UPR u
 INNER JOIN dbo.REF_ENTITYTYPE e ON e.EntityTypeID = u.EntityTypeID
@@ -266,6 +321,13 @@ SELECT @m = COUNT(*) FROM dbo.UPRSTATUSHISTORY;
 INSERT #R VALUES (CASE WHEN @n = @m THEN 'PASS' ELSE 'FAIL' END,
                   'Status history row per parent', CONVERT(VARCHAR(20), @n) + ' parents / '
                   + CONVERT(VARCHAR(20), @m) + ' history');
+
+/* ---- 20. never an invented MA-<id> / SD-<id> UnitNumber (client rule) ---- */
+SELECT @n = COUNT(*) FROM dbo.UNIT
+WHERE (UnitNumber LIKE 'MA-%' AND SUBSTRING(UnitNumber, 4, 50) NOT LIKE '%[^0-9]%')
+   OR (UnitNumber LIKE 'SD-%' AND SUBSTRING(UnitNumber, 4, 50) NOT LIKE '%[^0-9]%');
+INSERT #R VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
+                  'No invented MA-/SD- UnitNumber anywhere', CONVERT(VARCHAR(20), @n) + ' (expected 0)');
 
 SELECT * FROM #R ORDER BY Seq;
 

@@ -6,6 +6,7 @@
   Each committed INSERT/UPDATE/DELETE writes the row key, login, timestamp,
   and full JSON before/after values to AuditLog, including writes from outside
   the loader. Audit writes share the business transaction and roll back with it.
+  Load changes share a RunID; UPR_LOAD_RUN records completed/failed/empty runs.
   Incoming staging tables and AuditLog itself are outside this model audit.
   SELECT, DDL, TRUNCATE, and failed/rolled-back attempts need SQL Server Audit
   if those operations also need to be retained.
@@ -27,6 +28,30 @@ IF COL_LENGTH(N'dbo.AuditLog', N'OldValues') IS NULL
     ALTER TABLE dbo.AuditLog ADD OldValues NVARCHAR(MAX) NULL;
 IF COL_LENGTH(N'dbo.AuditLog', N'NewValues') IS NULL
     ALTER TABLE dbo.AuditLog ADD NewValues NVARCHAR(MAX) NULL;
+IF COL_LENGTH(N'dbo.AuditLog', N'RunID') IS NULL
+    ALTER TABLE dbo.AuditLog ADD RunID UNIQUEIDENTIFIER NULL;
+IF COL_LENGTH(N'dbo.AuditLog', N'SessionID') IS NULL
+    ALTER TABLE dbo.AuditLog ADD SessionID INT NULL;
+
+IF OBJECT_ID(N'dbo.UPR_LOAD_RUN', N'U') IS NULL
+BEGIN
+    CREATE TABLE dbo.UPR_LOAD_RUN
+    (
+        RunID UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_UPR_LOAD_RUN PRIMARY KEY,
+        StartedAt DATETIME2(3) NOT NULL,
+        FinishedAt DATETIME2(3) NULL,
+        RunStatus VARCHAR(12) NOT NULL,
+        StartedBy NVARCHAR(100) NOT NULL,
+        SessionID INT NOT NULL,
+        SourceRowsRead INT NULL,
+        RejectedRows INT NULL,
+        ErrorMessage NVARCHAR(4000) NULL,
+        CONSTRAINT CK_UPR_LOAD_RUN_Status CHECK (RunStatus IN ('RUNNING', 'COMPLETED', 'FAILED'))
+    );
+END;
+IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE object_id = OBJECT_ID(N'dbo.AuditLog')
+               AND name = N'IX_AuditLog_RunID')
+    EXEC(N'CREATE INDEX IX_AuditLog_RunID ON dbo.AuditLog (RunID, AuditID) INCLUDE (EntityName, OperationType);');
 
 DECLARE @Tables TABLE (TableName SYSNAME PRIMARY KEY);
 INSERT @Tables VALUES
@@ -70,20 +95,28 @@ BEGIN
 BEGIN
     SET NOCOUNT ON;
     IF NOT EXISTS (SELECT 1 FROM inserted) AND NOT EXISTS (SELECT 1 FROM deleted) RETURN;
-    DECLARE @Operation NVARCHAR(20) = CASE
-        WHEN EXISTS (SELECT 1 FROM inserted) AND EXISTS (SELECT 1 FROM deleted) THEN N''UPDATE''
-        WHEN EXISTS (SELECT 1 FROM inserted) THEN N''INSERT'' ELSE N''DELETE'' END;
+    DECLARE @RunID UNIQUEIDENTIFIER = TRY_CONVERT(UNIQUEIDENTIFIER,
+        CONVERT(NVARCHAR(128), SESSION_CONTEXT(N''UPR_AuditRunID'')));
+    /* A stale context from a completed load must not claim later manual edits. */
+    IF NOT EXISTS (SELECT 1 FROM dbo.UPR_LOAD_RUN
+                   WHERE RunID = @RunID AND SessionID = @@SPID AND RunStatus = ''RUNNING'')
+        SET @RunID = NULL;
     INSERT dbo.AuditLog
-        (EntityName, EntityKey, OperationType, ChangedBy, ChangedDate, ChangeSummary, OldValues, NewValues)
+        (EntityName, EntityKey, OperationType, ChangedBy, ChangedDate, ChangeSummary, OldValues, NewValues, RunID, SessionID)
     SELECT N''' + @Table + N''',
         (SELECT ' + @Key + N' FOR JSON PATH, WITHOUT_ARRAY_WRAPPER),
-        @Operation, LEFT(ORIGINAL_LOGIN(), 100), SYSDATETIME(),
-        N''Row '' + @Operation,
+        op.OperationType, LEFT(ORIGINAL_LOGIN(), 100), SYSDATETIME(),
+        N''Row '' + op.OperationType,
         CASE WHEN d.' + QUOTENAME(@FirstKey) + N' IS NOT NULL
             THEN (SELECT d.* FOR JSON PATH, INCLUDE_NULL_VALUES, WITHOUT_ARRAY_WRAPPER) END,
         CASE WHEN i.' + QUOTENAME(@FirstKey) + N' IS NOT NULL
-            THEN (SELECT i.* FOR JSON PATH, INCLUDE_NULL_VALUES, WITHOUT_ARRAY_WRAPPER) END
-    FROM inserted i FULL OUTER JOIN deleted d ON ' + @Join + N';
+            THEN (SELECT i.* FOR JSON PATH, INCLUDE_NULL_VALUES, WITHOUT_ARRAY_WRAPPER) END,
+        @RunID, @@SPID
+    FROM inserted i FULL OUTER JOIN deleted d ON ' + @Join + N'
+    CROSS APPLY (SELECT OperationType = CASE
+        WHEN d.' + QUOTENAME(@FirstKey) + N' IS NULL THEN N''INSERT''
+        WHEN i.' + QUOTENAME(@FirstKey) + N' IS NULL THEN N''DELETE''
+        ELSE N''UPDATE'' END) op;
 END;';
     EXEC sys.sp_executesql @DDL;
     SET @DDL = N'ENABLE TRIGGER dbo.' + QUOTENAME(N'tr_UPR_Audit_' + @Table)
@@ -94,7 +127,8 @@ END;
 CLOSE AuditTables;
 DEALLOCATE AuditTables;
 COMMIT TRANSACTION;
-PRINT N'Auditing installed: 22 UPR model/reference tables, INSERT/UPDATE/DELETE, full before/after values.';
+PRINT N'Auditing installed: 22 UPR model/reference tables, row changes with before/after values and load RunID.';
+PRINT N'View records with scripts/list_upr_audit.sql.';
 END TRY
 BEGIN CATCH
     IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;

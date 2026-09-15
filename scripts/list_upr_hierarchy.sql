@@ -6,8 +6,10 @@
   Lists every UPR record as Parent followed by its children, so you can confirm
   complete records were written (Complex/Property/Condo -> Building -> Unit).
 
-  Columns include: Level, UPRID, ParentUPRID, AccountNumber, EntityType,
+  Columns include: LevelNo, UPRID, ParentUPRID, AccountNumber, EntityType,
   names, address, owner/contact, property type, parcel, unit number.
+  LevelNo is the depth from the root (0), matching UPR_CLOSURE.Level for
+  this descendant. ParentUPRID is the immediate parent; UPRID is the child.
 
   EDIT:
     - USE database name if yours differs

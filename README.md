@@ -20,6 +20,7 @@ SQL/
 │   └── 03_new_upr_schema.sql      # Hierarchical schema (run first)
 ├── scripts/
 │   ├── install_upr_audit.sql      # Persistent INSERT/UPDATE/DELETE auditing
+│   ├── list_upr_audit.sql         # Run history, row events and changed fields
 │   ├── diagnose_upr_accounts.sql  # Read-only client account diagnostics
 │   ├── load_upr_master.sql        # Hierarchical load (main deliverable)
 │   ├── search_upr_master.sql      # dbo.usp_UPR_Search
@@ -27,7 +28,7 @@ SQL/
 ├── test/
 │   ├── run_test_and_results.sql   # Validation report (works with real data)
 │   ├── local_it_setup.sql         # Incoming tables + hostile sample data
-│   ├── local_it_verify.sql        # 33 hierarchy / client-rule assertions
+│   ├── local_it_verify.sql        # 43 hierarchy / client-rule assertions
 │   ├── run_local_it.sh            # End-to-end run on a throwaway SQL Server
 │   ├── static_check_hier.py       # Hierarchical rule checks
 │   └── schema_contract_check.py   # Every INSERT/MERGE vs the DDL contract
@@ -35,8 +36,9 @@ SQL/
 └── docs/                          # Client specs (NewUPRTABLEUSED, Response, Program Spec)
 ```
 
-For the September 10 corrections on an existing database, follow
-[CLIENT_FIX_2026-09-10.md](CLIENT_FIX_2026-09-10.md). The client's source-only
+For the latest corrections on an existing database, follow
+[CLIENT_FIX_2026-09-15.md](CLIENT_FIX_2026-09-15.md), including per-run audit
+history and the automatic `UPR_CLOSURE.Level` upgrade. The client's source-only
 requirement supersedes the older generated-name conventions.
 
 ## Run Steps
@@ -70,6 +72,7 @@ sqlcmd -S localhost -E -i test/local_it_setup.sql
 ```bash
 sqlcmd -S localhost -E -i scripts/install_upr_audit.sql
 sqlcmd -S localhost -E -i scripts/load_upr_master.sql
+sqlcmd -S localhost -E -i scripts/list_upr_audit.sql
 ```
 
 ### 4. View the validation report
@@ -117,9 +120,10 @@ test/run_local_it.sh
 `run_local_it.sh` seeds deliberately hostile data (long street names, YearBuilt
 0 and 9999, bad street numbers, missing zips, one account on several addresses,
 MA/SDAT overlaps), creates the schema and audit triggers, runs the load twice,
-and checks 33 hierarchy invariants plus identical business counts. It also tests
+and checks 43 hierarchy invariants plus identical business counts. It also tests
 50,001-root listings, source-only fields, targeted legacy repairs, and audit
-INSERT/UPDATE/DELETE/MERGE events and rollback behavior.
+INSERT/UPDATE/DELETE/MERGE events and rollback behavior. Closure regressions cover
+the existing-table Level upgrade, reparenting, level repair, and cycle rollback.
 
 ## Source Specifications
 
@@ -138,17 +142,18 @@ Each load step is commented in `scripts/load_upr_master.sql` (Steps 0-14).
 |-------|------------|
 | Incoming tables | `dbo.MAIncomingTableX1` (MasterAddress) and `dbo.SDATIncomingTableX1` (SDAT) |
 | Join key | `MAIncomingTableX1.Account` = normalized `SDATIncomingTableX1.AccountNumber` (numeric accounts zero-padded to 8) |
-| AccountNumber | Nullable and **not unique** on UPR (client Response.docx) |
-| Complex rule | MA MultiFamily/Apartments + Account# + 2+ distinct addresses -> COMPLEX; addresses counted on MA rows only |
+| AccountNumber | **Required on every incoming record** - no account means reject to `UPRMATCHREVIEW_Q` (`INSUFFICIENT_DATA`), never in UPR. Column stays nullable and **not unique** on UPR itself (client Response.docx) |
+| Complex rule | MA MultiFamily/Apartments + Account# + 2+ distinct addresses -> COMPLEX; addresses counted on MA rows only. Every incoming row for that account, including SDAT/condo-typed rows, stays inside the one Complex - it never also becomes a Condo |
 | Condo rule | Condo parent (ParentUPRID NULL); Buildings and numbered Units are its children; Units link to their Building by BuildingID |
-| Unit numbers | Only incoming `CondoUnit` / MA `Unit`; blank fields do not create new Units. Source-proven legacy generated numbers are cleared to NULL without deleting existing Units |
+| Unit numbers | Real incoming `CondoUnit` / MA `Unit` value when given. Every MULTI/APT/CONDO record still gets a Unit row even when blank: a Condo/SDAT record keeps `NULL` (the source column exists, just empty); an MA record with no unit-number field gets literal `N/A`. Never an invented `MA-<id>`/`SD-<id>` label - any leftover legacy one is repaired to the same convention |
 | Record type | Blank `LUCategory` -> `UNKNWN` property type; never invented as SF |
 | Building names | NULL when the incoming tables supply no building name |
 | Complex name | NULL when the incoming tables supply no complex name |
 | Owner data | Incoming owner or NULL; account numbers are not substituted for names. Required Contact links share the source contact across each tree |
 | Addresses | Source street number/name create Building + Address regardless of record type; blank street type/city/ZIP do not block. Missing State/ZIP stay NULL. Direct Address links are added to parents and Units |
+| Closure Level | Descendant's depth from the root, matching report `LevelNo` (root 0, child 1, grandchild 2). All ancestor paths and self-links remain; the loader upgrades existing tables and repairs levels after reparenting |
 | Idempotency | Safe to re-run - existing UPR/XREF/contact rows are reused, not duplicated |
-| Audit | Run `install_upr_audit.sql` first: persistent row auditing on 22 UPR model/reference tables, with full JSON before/after values |
+| Audit | Run the updated `install_upr_audit.sql` first: row auditing on 22 UPR model/reference tables, full before/after values, RunID and session. `UPR_LOAD_RUN` retains completed/failed/empty runs; `list_upr_audit.sql` shows run history and row/field changes, including edits outside loads |
 
 ## Address Normalization
 
@@ -161,7 +166,10 @@ Per client spec example:
 
 ## Rollback
 
-The load script runs inside a **single transaction**. On any error it rolls back all changes.
+Business writes and their row audit events run inside a **single transaction**
+and roll back on error. The separate `UPR_LOAD_RUN` record retains the failure.
+Schema-ensure changes can persist for the next retry. Run the loader outside an
+existing transaction.
 
 For a clean rebuild of the hierarchical tables, simply re-run
 `ddl/03_new_upr_schema.sql` - it drops and recreates every UPR table (the
@@ -214,7 +222,4 @@ The sample data (`test/local_it_setup.sql`) deliberately covers hostile cases:
 - Statistics printed at end of load
 - INSERT/UPDATE/DELETE on the 22 UPR model/reference tables audited from installation onward; batch summaries and initial status history also retained
 - Review queue for unmatched/insufficient records with mapped reasons
-
-
-
 

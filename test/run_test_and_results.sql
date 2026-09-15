@@ -218,7 +218,10 @@ INSERT #V VALUES (CASE WHEN @n > 0 THEN 'PASS' ELSE 'N/A' END,
 
 /* Auditing must cover writes outside the loader as well as batch summaries. */
 SELECT @n = COUNT(*) FROM sys.triggers tr
-WHERE tr.name = N'tr_UPR_Audit_' + OBJECT_NAME(tr.parent_id) AND tr.is_disabled = 0;
+WHERE tr.name = N'tr_UPR_Audit_' + OBJECT_NAME(tr.parent_id) AND tr.is_disabled = 0
+  AND OBJECT_DEFINITION(tr.object_id) LIKE N'%UPR_AuditRunID%'
+  AND (SELECT COUNT(*) FROM sys.trigger_events ev WHERE ev.object_id = tr.object_id
+       AND ev.type_desc IN (N'INSERT', N'UPDATE', N'DELETE')) = 3;
 INSERT #V VALUES (CASE WHEN @n = 22 THEN 'PASS' ELSE 'FAIL' END,
     'Persistent row audit triggers installed', CONVERT(VARCHAR(20), @n) + ' of 22 UPR model/reference tables');
 SELECT @n = COUNT(*) FROM dbo.AuditLog WHERE EntityName <> 'UPR_HIER_LOAD';

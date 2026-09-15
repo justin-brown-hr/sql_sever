@@ -16,10 +16,18 @@
     3) MultiFamily with 1 address -> Property -> Building -> Unit
     4) Condo (SDAT): Condo (Parent NULL) -> Unit; account on Condo UPR
        (only when the account is NOT a Complex under rule 2)
-    5) SF / Warehouse / Office / Park / etc -> Property -> Building -> Unit
+    5) SF / Warehouse / Office / Park / etc -> Property -> Building only, no Unit
+       (not a dwelling-unit record type)
     6) Address via ADDRESS + UPR_ADDRESS only; Contact required when address valid
     7) Staging in temp tables after validate/normalize; print statistics
-    8) AccountNumber nullable, not unique; CommunityName on COMPLEX only
+    8) AccountNumber required on every incoming record; no account -> reject to
+       Review_Q (INSUFFICIENT_DATA), never written to UPR. Not unique on UPR
+       (one account can span several UPR rows). CommunityName on COMPLEX only.
+    9) Every MULTI/APT/CONDO record that needs a Unit gets one - never silently
+       dropped. Real source value when given. A KDAT/Condo record with none
+       keeps NULL (the column exists, source left it blank). An MA record with
+       no UnitNumber field, counted as a unit in its building/Complex address,
+       gets literal N'N/A' - never an invented MA-<id>/SD-<id> label.
 
   Prerequisites: create the schema once, then run scripts/install_upr_audit.sql.
   Re-runnable: unchanged incoming data inserts no business rows (batch audit remains).
@@ -39,6 +47,14 @@ SET ANSI_WARNINGS ON;
 SET CONCAT_NULL_YIELDS_NULL ON;
 SET ARITHABORT ON;
 SET NUMERIC_ROUNDABORT OFF;
+/* Run status must survive a rolled-back load, so use a dedicated connection
+   without a caller-owned transaction. Never roll back a caller's work. */
+IF @@TRANCOUNT <> 0
+BEGIN
+    /* RAISERROR leaves a caller transaction intact even with XACT_ABORT ON. */
+    RAISERROR ('Run the loader outside an existing transaction.', 16, 1);
+    RETURN;
+END;
 GO
 
 /* ---- Inline normalization functions (same helpers as legacy flat load) ---- */
@@ -254,7 +270,7 @@ GO
 /* ========================================================================
    SCHEMA ENSURE BATCH
    Must run in its own batch (before GO) because the main batch reads
-   SDATIncomingTableX1.CondoUnit. A column added in the same batch that
+   SDATIncomingTableX1.CondoUnit and UPR_CLOSURE.Level. A column added in the same batch that
    reads it fails with "Invalid column name".
    ======================================================================== */
 SET NOCOUNT ON;
@@ -264,6 +280,15 @@ IF OBJECT_ID(N'dbo.SDATIncomingTableX1', N'U') IS NOT NULL
 BEGIN
     ALTER TABLE dbo.SDATIncomingTableX1 ADD CondoUnit NVARCHAR(50) NULL;
     PRINT N'Schema: added CondoUnit NVARCHAR(50) NULL to dbo.SDATIncomingTableX1.';
+END;
+
+/* Existing databases: add without a guessed default. Step 12 backfills the
+   actual report levels and enforces NOT NULL inside the load transaction. */
+IF OBJECT_ID(N'dbo.UPR_CLOSURE', N'U') IS NOT NULL
+   AND COL_LENGTH(N'dbo.UPR_CLOSURE', N'Level') IS NULL
+BEGIN
+    ALTER TABLE dbo.UPR_CLOSURE ADD [Level] INT NULL;
+    PRINT N'Schema: added UPR_CLOSURE.Level; Step 12 will populate it.';
 END;
 GO
 
@@ -279,6 +304,9 @@ DECLARE @AuditUser   NVARCHAR(128) = COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(NVARCHA
    which can produce a timestamp in the future and trip <= SYSDATETIME() checks */
 DECLARE @Now         DATETIME2(0)  = CONVERT(DATETIME2(0), CONVERT(VARCHAR(19), SYSDATETIME(), 126));
 DECLARE @BatchStart  DATETIME2(0)  = SYSDATETIME();
+DECLARE @AuditRunID UNIQUEIDENTIFIER = NEWID();
+DECLARE @PreviousAuditRun SQL_VARIANT = SESSION_CONTEXT(N'UPR_AuditRunID');
+DECLARE @RunRecorded BIT = 0;
 DECLARE @ErrorMessage NVARCHAR(500);
 DECLARE @PreflightErrors NVARCHAR(MAX) = N'';
 
@@ -293,8 +321,26 @@ DECLARE @ComplexGroups INT = 0, @PropertyGroups INT = 0, @CondoGroups INT = 0, @
 DECLARE @EtComplex INT, @EtProperty INT, @EtBuilding INT, @EtUnit INT, @EtCondo INT;
 DECLARE @RoleOwner INT, @AddrPhysical INT, @CtOrg INT;
 
+IF @@TRANCOUNT <> 0
+BEGIN
+    /* RAISERROR leaves a caller transaction intact even with XACT_ABORT ON. */
+    RAISERROR ('Run the loader outside an existing transaction.', 16, 1);
+    RETURN;
+END;
 BEGIN TRY
-BEGIN TRANSACTION;
+
+/* Install/upgrade audit support before the main load. Dynamic SQL gives a
+   useful prerequisite error even when the run-history table is absent. */
+IF OBJECT_ID(N'dbo.UPR_LOAD_RUN', N'U') IS NULL
+   OR COL_LENGTH(N'dbo.AuditLog', N'RunID') IS NULL
+   OR COL_LENGTH(N'dbo.AuditLog', N'SessionID') IS NULL
+    THROW 50004, 'Run the updated scripts/install_upr_audit.sql before loading data.', 1;
+EXEC sys.sp_executesql N'
+    INSERT dbo.UPR_LOAD_RUN (RunID, StartedAt, RunStatus, StartedBy, SessionID)
+    VALUES (@id, SYSDATETIME(), ''RUNNING'', @who, @@SPID);',
+    N'@id UNIQUEIDENTIFIER, @who NVARCHAR(100)', @AuditRunID, @AuditUser;
+SET @RunRecorded = 1;
+EXEC sys.sp_set_session_context @key = N'UPR_AuditRunID', @value = @AuditRunID;
 
 PRINT N'================================================================';
 PRINT N'UPR hierarchical load starting: ' + CONVERT(NVARCHAR(30), @BatchStart, 121);
@@ -357,10 +403,14 @@ IF EXISTS (
       AND NOT EXISTS (
           SELECT 1 FROM sys.triggers tr WHERE tr.parent_id = t.object_id
             AND tr.name = N'tr_UPR_Audit_' + t.name AND tr.is_disabled = 0
+            AND OBJECT_DEFINITION(tr.object_id) LIKE N'%UPR_AuditRunID%'
+            AND (SELECT COUNT(*) FROM sys.trigger_events ev
+                 WHERE ev.object_id = tr.object_id AND ev.type_desc IN (N'INSERT', N'UPDATE', N'DELETE')) = 3
       )
 )
     THROW 50004, 'Run scripts/install_upr_audit.sql before loading data.', 1;
 
+BEGIN TRANSACTION;
 PRINT N'Step 0 complete - required tables/functions present.';
 
 /* ============================================================================
@@ -739,25 +789,30 @@ FROM #SDAT;
 
 SET @StageRows = (SELECT COUNT(*) FROM #Stage);
 
-/* Repair only legacy generated UnitNumbers proven by their source XREF.
-   Keep the existing Unit/UPR IDs and links. A real incoming MA-/SD- value
-   must never be cleared merely because it resembles an old placeholder. */
+/* Repair ANY leftover legacy generated UnitNumber (N'MA-<id>' / N'SD-<id>'),
+   even when its exact source row is no longer in the current incoming batch -
+   a stale invented label must never be shown or stored, per se. Never invent a
+   replacement value either: KDAT/condo records keep NULL (the source column
+   exists, it is just empty); ADDRESS_MASTER "unit" rows get N'N/A' (MA has no
+   UnitNumber field for these - distinguishes "no data" from "empty value").
+   Keep the existing Unit/UPR IDs and links. Skip only when another CURRENT
+   linked source record proves a real unit value for this same Unit. */
 UPDATE un
-SET UnitNumber = NULL
+SET UnitNumber = CASE x.SourceSystem WHEN N'KDAT' THEN NULL ELSE N'N/A' END
 FROM dbo.UNIT un
 INNER JOIN dbo.EXTERNAL_IDENTIFIER_XREF x ON x.UPRID = un.UPRID
     AND x.IdentifierType = N'SOURCE_RECORD_ID'
-INNER JOIN #Stage s ON s.SourceSystem = x.SourceSystem AND s.SourceRecordID = x.IdentifierValue
-WHERE NULLIF(LTRIM(RTRIM(s.UnitNumber)), N'') IS NULL
-  AND NULLIF(LTRIM(RTRIM(s.CondoUnit)), N'') IS NULL
-  AND un.UnitNumber = CASE s.SourceSystem
-        WHEN N'ADDRESS_MASTER' THEN N'MA-' + CONVERT(VARCHAR(50), s.MasterAddressID)
-        WHEN N'KDAT' THEN N'SD-' + CONVERT(VARCHAR(50), s.KdatRecordID) END
+WHERE (
+        (x.SourceSystem = N'ADDRESS_MASTER' AND un.UnitNumber LIKE N'MA-%'
+         AND SUBSTRING(un.UnitNumber, 4, 50) NOT LIKE N'%[^0-9]%')
+     OR (x.SourceSystem = N'KDAT' AND un.UnitNumber LIKE N'SD-%'
+         AND SUBSTRING(un.UnitNumber, 4, 50) NOT LIKE N'%[^0-9]%')
+      )
   AND NOT EXISTS (
       SELECT 1 FROM dbo.EXTERNAL_IDENTIFIER_XREF other
-      LEFT JOIN #Stage os ON os.SourceSystem = other.SourceSystem AND os.SourceRecordID = other.IdentifierValue
+      INNER JOIN #Stage os ON os.SourceSystem = other.SourceSystem AND os.SourceRecordID = other.IdentifierValue
       WHERE other.UPRID = un.UPRID AND other.IdentifierType = N'SOURCE_RECORD_ID'
-        AND (os.StageKey IS NULL OR os.UnitNumber IS NOT NULL OR os.CondoUnit IS NOT NULL)
+        AND (os.UnitNumber IS NOT NULL OR os.CondoUnit IS NOT NULL)
   );
 
 /* Placeholder parcels -> NULL */
@@ -799,25 +854,27 @@ INNER JOIN #AcctAddrCnt a ON a.AccountNumber = s.AccountNumber;
 
 /*
    IsValid for UPR write:
+     - AccountNumber required (client rule: no account -> reject to Review_Q, never in UPR)
      - required address present
-     - City, ZIP, account and parcel may be missing; never fill them with guesses
+     - City, ZIP and parcel may be missing; never fill them with guesses
    Missing ParcelID does NOT block load (still flagged to Review_Q).
 */
 UPDATE #Stage
 SET
     IsValid = CASE
+        WHEN AccountNumber IS NULL THEN 0
         WHEN HasRequiredAddress = 0 THEN 0
         ELSE 1
     END,
     ReviewReason = CASE
+        WHEN AccountNumber IS NULL THEN N'INSUFFICIENT_DATA'
         WHEN HasRequiredAddress = 0 THEN N'NO_ADDRESS_MATCH'
-        WHEN AccountNumber IS NULL
-         AND ISNULL(PropertyType, N'') <> N'CONDO'
-         AND CondoUnit IS NULL THEN N'INSUFFICIENT_DATA'
         WHEN ParcelID IS NULL THEN N'MISSING PARCELID'
         ELSE NULL
     END;
 
+/* AccountNumber is guaranteed non-NULL here - rows without one are IsValid = 0
+   (rejected to Review_Q, never in UPR). GroupKey no longer needs a NOACCT branch. */
 UPDATE s
 SET
     PathType = CASE
@@ -826,7 +883,6 @@ SET
          AND s.IsComplexAccount = 1 THEN N'COMPLEX'
         WHEN s.PropertyType = N'CONDO' OR s.CondoUnit IS NOT NULL THEN N'CONDO'
         WHEN s.PropertyType IN (N'MULTI', N'APT')
-         AND s.AccountNumber IS NOT NULL
          AND ISNULL(s.DistinctAddrOnAccount, 0) > 1 THEN N'COMPLEX'
         ELSE N'PROPERTY'
     END,
@@ -835,14 +891,12 @@ SET
          AND s.IsComplexAccount = 1 THEN
             N'COMPLEX|' + s.AccountNumber
         WHEN s.PropertyType = N'CONDO' OR s.CondoUnit IS NOT NULL THEN
-            N'CONDO|' + ISNULL(s.AccountNumber, N'NOACCT') + N'|' +
-            CASE WHEN s.AccountNumber IS NULL THEN ISNULL(s.NormalizedFullAddress, N'') ELSE N'' END
+            N'CONDO|' + s.AccountNumber
         WHEN s.PropertyType IN (N'MULTI', N'APT')
-         AND s.AccountNumber IS NOT NULL
          AND ISNULL(s.DistinctAddrOnAccount, 0) > 1 THEN
             N'COMPLEX|' + s.AccountNumber
         ELSE
-            N'PROPERTY|' + ISNULL(s.AccountNumber, N'NOACCT') + N'|' + ISNULL(s.NormalizedFullAddress, N'')
+            N'PROPERTY|' + s.AccountNumber + N'|' + ISNULL(s.NormalizedFullAddress, N'')
     END
 FROM #Stage s
 WHERE s.IsValid = 1;
@@ -873,8 +927,8 @@ SELECT
     ParcelID,
     NormalizedFullAddress,
     ReviewReason = CASE
+        WHEN AccountNumber IS NULL THEN N'INSUFFICIENT_DATA'
         WHEN HasRequiredAddress = 0 THEN N'NO_ADDRESS_MATCH'
-        WHEN AccountNumber IS NULL AND ISNULL(PropertyType, N'') <> N'CONDO' AND CondoUnit IS NULL THEN N'INSUFFICIENT_DATA'
         WHEN IsValid = 0 THEN ISNULL(ReviewReason, N'OTHER')
         WHEN ParcelID IS NULL THEN N'MISSING PARCELID'
         ELSE ISNULL(ReviewReason, N'OTHER')
@@ -1342,7 +1396,7 @@ IF OBJECT_ID('tempdb..#UnitSrc') IS NOT NULL DROP TABLE #UnitSrc;
         s.SourceSystem,
         s.SourceRecordID,
         s.NormalizedFullAddress,
-        UnitNumber = COALESCE(
+        RealUnitNumber = COALESCE(
             NULLIF(LTRIM(RTRIM(s.CondoUnit)), N''),
             NULLIF(LTRIM(RTRIM(s.UnitNumber)), N'')
         ),
@@ -1363,18 +1417,40 @@ UnitJoined AS (
         ub.GroupKey,
         ub.PathType,
         ub.NormalizedFullAddress,
-        ub.UnitNumber,
+        /* Every record that needs a unit gets one - never silently dropped.
+           Real source value when given. A KDAT/Condo record with none keeps
+           NULL (the column exists, source just left it blank). An MA record
+           counted as a unit in a building/Complex address has no UnitNumber
+           column at all, so it gets literal N'N/A' - never an invented label. */
+        UnitNumber = COALESCE(ub.RealUnitNumber,
+            CASE WHEN ub.SourceSystem = N'KDAT' THEN NULL ELSE N'N/A' END),
         ParentUPRID = CASE
             WHEN ub.PathType = N'CONDO' THEN pm.UPRID
             ELSE bm.BuildingUPRID
         END,
         BuildingUPRID = bm.BuildingUPRID,
         BuildingTableID = CAST(NULL AS BIGINT),
+        /* Only rows sharing a REAL source unit value are the same physical
+           unit and may collapse into one Unit row. A row with no real value
+           always keeps its own slot (keyed by StageKey) - it must never
+           silently merge with an unrelated blank/N'A' row at the same address. */
         Rn = ROW_NUMBER() OVER (
-            PARTITION BY ub.GroupKey, ub.NormalizedFullAddress, ub.UnitNumber
+            PARTITION BY ub.GroupKey, ub.NormalizedFullAddress,
+                COALESCE(ub.RealUnitNumber, N'#' + CONVERT(NVARCHAR(20), ub.StageKey))
             ORDER BY
                 CASE ub.SourceSystem WHEN N'KDAT' THEN 0 ELSE 1 END,
                 ub.StageKey
+        ),
+        /* Every stage row in the dedup group - including the ones collapsed
+           away below - needs to resolve to the SAME surviving Unit for XREF
+           linking. Carry that surviving row's own StageKey onto every row. */
+        WinnerStageKey = FIRST_VALUE(ub.StageKey) OVER (
+            PARTITION BY ub.GroupKey, ub.NormalizedFullAddress,
+                COALESCE(ub.RealUnitNumber, N'#' + CONVERT(NVARCHAR(20), ub.StageKey))
+            ORDER BY
+                CASE ub.SourceSystem WHEN N'KDAT' THEN 0 ELSE 1 END,
+                ub.StageKey
+            ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
         )
     FROM UnitBase ub
     INNER JOIN #ParentMap pm ON pm.GroupKey = ub.GroupKey
@@ -1382,13 +1458,23 @@ UnitJoined AS (
         ON bm.GroupKey = ub.GroupKey
        AND bm.NormalizedFullAddress = ub.NormalizedFullAddress
     WHERE ub.NeedsUnit = 1
-      AND ub.UnitNumber IS NOT NULL
 )
+/* A CTE is visible to only the one statement after it - materialize it once
+   so both #UnitStageMap and #UnitSrc below can be built from the same rows. */
+SELECT
+    StageKey, GroupKey, PathType, NormalizedFullAddress, UnitNumber,
+    ParentUPRID, BuildingUPRID, BuildingTableID, Rn, WinnerStageKey
+INTO #UnitJoinedAll
+FROM UnitJoined;
+
+SELECT StageKey, WinnerStageKey INTO #UnitStageMap FROM #UnitJoinedAll;
+CREATE UNIQUE INDEX UX_UnitStageMap_StageKey ON #UnitStageMap (StageKey);
+
 SELECT
     StageKey, GroupKey, PathType, NormalizedFullAddress, UnitNumber,
     ParentUPRID, BuildingUPRID, BuildingTableID
 INTO #UnitSrc
-FROM UnitJoined
+FROM #UnitJoinedAll
 WHERE Rn = 1;
 
 CREATE UNIQUE INDEX UX_UnitSrc_StageKey ON #UnitSrc (StageKey);
@@ -1409,13 +1495,16 @@ CREATE TABLE #UnitMap (
 );
 
 /* A newly arrived source row can describe an already loaded numbered Unit.
-   Reuse that same structural Unit and attach its new source XREF to it. */
+   Reuse that same structural Unit and attach its new source XREF to it.
+   Never reuse on a placeholder UnitNumber (NULL or N'N/A') - those do not
+   identify a physical unit, so each such row keeps its own separate Unit. */
 INSERT INTO #UnitMap (StageKey, UnitUPRID, GroupKey)
 SELECT src.StageKey, MIN(u.UPRID), MIN(src.GroupKey)
 FROM #UnitSrc src
 INNER JOIN dbo.UNIT un ON un.BuildingID = src.BuildingTableID AND un.UnitNumber = src.UnitNumber
 INNER JOIN dbo.UPR u ON u.UPRID = un.UPRID
     AND u.ParentUPRID = src.ParentUPRID AND u.EntityTypeID = @EtUnit
+WHERE src.UnitNumber IS NOT NULL AND src.UnitNumber <> N'N/A'
 GROUP BY src.StageKey;
 
 MERGE dbo.UPR AS t
@@ -1557,10 +1646,13 @@ SELECT
 INTO #XrefSrc
 FROM StageUnit su
 INNER JOIN #ParentMap pm ON pm.GroupKey = su.GroupKey
-LEFT JOIN #UnitSrc us
-    ON us.GroupKey = su.GroupKey
-   AND us.NormalizedFullAddress = su.NormalizedFullAddress
-   AND us.UnitNumber = su.UnitNumber
+/* Route through #UnitStageMap.WinnerStageKey, not a value match on
+   UnitNumber: #UnitSrc.UnitNumber may be the materialized NULL/N'A'
+   placeholder (never equal-matches su's raw value), and a stage row whose
+   real value was collapsed onto another row's Unit is not itself present in
+   #UnitSrc at all. Both cases must still resolve to the shared Unit. */
+LEFT JOIN #UnitStageMap usm ON usm.StageKey = su.StageKey
+LEFT JOIN #UnitSrc us ON us.StageKey = usm.WinnerStageKey
 LEFT JOIN #UnitMap um ON um.StageKey = us.StageKey;
 
 INSERT INTO dbo.EXTERNAL_IDENTIFIER_XREF (
@@ -1615,23 +1707,47 @@ PRINT N'Step 11 complete - XREF inserted: ' + CONVERT(NVARCHAR(20), @XrefInserte
    ============================================================================ */
 PRINT N'Step 12: Rebuild UPR_CLOSURE...';
 
+/* Level is the descendant's depth from the root (report LevelNo), not the
+   distance from each ancestor. Derive it from ParentUPRID, not entity type:
+   a Unit directly under a Condo is level 1; under its Building it is level 2.
+   Walking only rooted trees also detects cycles without an infinite loop. */
+IF OBJECT_ID('tempdb..#UPRLevels') IS NOT NULL DROP TABLE #UPRLevels;
+CREATE TABLE #UPRLevels (UPRID BIGINT NOT NULL PRIMARY KEY, [Level] INT NOT NULL);
+INSERT INTO #UPRLevels (UPRID, [Level])
+SELECT UPRID, 0 FROM dbo.UPR WHERE ParentUPRID IS NULL;
+DECLARE @LevelsAdded INT = 1;
+WHILE @LevelsAdded > 0
+BEGIN
+    INSERT INTO #UPRLevels (UPRID, [Level])
+    SELECT child.UPRID, parent.[Level] + 1
+    FROM dbo.UPR child
+    INNER JOIN #UPRLevels parent ON parent.UPRID = child.ParentUPRID
+    WHERE NOT EXISTS (SELECT 1 FROM #UPRLevels seen WHERE seen.UPRID = child.UPRID);
+    SET @LevelsAdded = @@ROWCOUNT;
+END;
+IF EXISTS (SELECT 1 FROM dbo.UPR u
+           WHERE NOT EXISTS (SELECT 1 FROM #UPRLevels l WHERE l.UPRID = u.UPRID))
+    THROW 50005, 'UPR hierarchy contains a cycle or an unreachable parent; cannot calculate closure levels.', 1;
+
 /* Build the expected paths separately, then apply only real differences.
    Unchanged loads must not produce thousands of delete/reinsert audit events. */
 IF OBJECT_ID('tempdb..#ExpectedClosure') IS NOT NULL DROP TABLE #ExpectedClosure;
 CREATE TABLE #ExpectedClosure (
     AncestorUPRID BIGINT NOT NULL,
     DescendantUPRID BIGINT NOT NULL,
+    [Level] INT NOT NULL,
     PRIMARY KEY (AncestorUPRID, DescendantUPRID)
 );
-INSERT INTO #ExpectedClosure (AncestorUPRID, DescendantUPRID)
-SELECT UPRID, UPRID FROM dbo.UPR;
+INSERT INTO #ExpectedClosure (AncestorUPRID, DescendantUPRID, [Level])
+SELECT UPRID, UPRID, [Level] FROM #UPRLevels;
 DECLARE @ClosureAdded INT = 1;
 WHILE @ClosureAdded > 0
 BEGIN
-    INSERT INTO #ExpectedClosure (AncestorUPRID, DescendantUPRID)
-    SELECT c.AncestorUPRID, child.UPRID
+    INSERT INTO #ExpectedClosure (AncestorUPRID, DescendantUPRID, [Level])
+    SELECT c.AncestorUPRID, child.UPRID, l.[Level]
     FROM #ExpectedClosure c
     INNER JOIN dbo.UPR child ON child.ParentUPRID = c.DescendantUPRID
+    INNER JOIN #UPRLevels l ON l.UPRID = child.UPRID
     WHERE NOT EXISTS (SELECT 1 FROM #ExpectedClosure x
         WHERE x.AncestorUPRID = c.AncestorUPRID AND x.DescendantUPRID = child.UPRID);
     SET @ClosureAdded = @@ROWCOUNT;
@@ -1639,10 +1755,21 @@ END;
 DELETE c FROM dbo.UPR_CLOSURE c
 WHERE NOT EXISTS (SELECT 1 FROM #ExpectedClosure e
     WHERE e.AncestorUPRID = c.AncestorUPRID AND e.DescendantUPRID = c.DescendantUPRID);
-INSERT INTO dbo.UPR_CLOSURE (AncestorUPRID, DescendantUPRID)
-SELECT e.AncestorUPRID, e.DescendantUPRID FROM #ExpectedClosure e
+UPDATE c SET [Level] = e.[Level]
+FROM dbo.UPR_CLOSURE c
+INNER JOIN #ExpectedClosure e
+    ON e.AncestorUPRID = c.AncestorUPRID AND e.DescendantUPRID = c.DescendantUPRID
+WHERE c.[Level] IS NULL OR c.[Level] <> e.[Level];
+INSERT INTO dbo.UPR_CLOSURE (AncestorUPRID, DescendantUPRID, [Level])
+SELECT e.AncestorUPRID, e.DescendantUPRID, e.[Level] FROM #ExpectedClosure e
 WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_CLOSURE c
     WHERE c.AncestorUPRID = e.AncestorUPRID AND c.DescendantUPRID = e.DescendantUPRID);
+
+IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.UPR_CLOSURE')
+           AND name = N'Level' AND is_nullable = 1)
+    ALTER TABLE dbo.UPR_CLOSURE ALTER COLUMN [Level] INT NOT NULL;
+IF OBJECT_ID(N'dbo.CK_UPR_CLOSURE_Level', N'C') IS NULL
+    ALTER TABLE dbo.UPR_CLOSURE WITH CHECK ADD CONSTRAINT CK_UPR_CLOSURE_Level CHECK ([Level] >= 0);
 
 /* Link the same source address records to their parent and Units as well.
    This creates associations, not extra addresses or guessed address values. */
@@ -1739,7 +1866,7 @@ PRINT N'Step 13 complete - status history: ' + CONVERT(NVARCHAR(20), @StatusHist
    ============================================================================ */
 PRINT N'Step 14: AuditLog...';
 
-INSERT INTO dbo.AuditLog (EntityName, EntityKey, OperationType, ChangedBy, ChangedDate, ChangeSummary)
+INSERT INTO dbo.AuditLog (EntityName, EntityKey, OperationType, ChangedBy, ChangedDate, ChangeSummary, RunID, SessionID)
 VALUES
     (N'UPR_HIER_LOAD', N'BATCH', N'INSERT', @AuditUser, @Now,
      N'Parents=' + CONVERT(NVARCHAR(20), @ParentInserted)
@@ -1752,13 +1879,19 @@ VALUES
      + N'; Contact=' + CONVERT(NVARCHAR(20), @ContactInserted)
      + N'; XREF=' + CONVERT(NVARCHAR(20), @XrefInserted)
      + N'; ReviewQ=' + CONVERT(NVARCHAR(20), @ReviewInserted)
-     + N'; Closure=' + CONVERT(NVARCHAR(20), @ClosureRows));
+     + N'; Closure=' + CONVERT(NVARCHAR(20), @ClosureRows), @AuditRunID, @@SPID);
 SET @AuditInserted = @@ROWCOUNT;
 
+UPDATE dbo.UPR_LOAD_RUN
+SET RunStatus = 'COMPLETED', FinishedAt = SYSDATETIME(),
+    SourceRowsRead = @MARead + @SDATRead, RejectedRows = @InvalidRows
+WHERE RunID = @AuditRunID;
 COMMIT TRANSACTION;
+EXEC sys.sp_set_session_context @key = N'UPR_AuditRunID', @value = @PreviousAuditRun;
 
 PRINT N'================================================================';
 PRINT N'UPR hierarchical load COMPLETE';
+PRINT N'Audit RunID: ' + CONVERT(NVARCHAR(36), @AuditRunID);
 PRINT N'----------------------------------------------------------------';
 PRINT N'MA rows read                 : ' + CONVERT(NVARCHAR(20), @MARead);
 PRINT N'SDAT rows read               : ' + CONVERT(NVARCHAR(20), @SDATRead);
@@ -1790,12 +1923,30 @@ PRINT N'Elapsed seconds              : '
 PRINT N'NOTE: Safe to re-run - existing UPRs are reused, not duplicated.';
 PRINT N'================================================================';
 
+/* Show actual committed row events for this run, including their full values.
+   list_upr_audit.sql also offers a field-by-field view and edits outside loads. */
+SELECT RunID = @AuditRunID, RunStatus = 'COMPLETED',
+    RowsInserted = COALESCE(SUM(CASE WHEN OperationType = 'INSERT' THEN 1 ELSE 0 END), 0),
+    RowsUpdated = COALESCE(SUM(CASE WHEN OperationType = 'UPDATE' THEN 1 ELSE 0 END), 0),
+    RowsDeleted = COALESCE(SUM(CASE WHEN OperationType = 'DELETE' THEN 1 ELSE 0 END), 0)
+FROM dbo.AuditLog WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD';
+SELECT AuditID, RunID, EntityName AS TableName, EntityKey AS RecordKey,
+    OperationType AS Action, ChangedDate, ChangedBy, OldValues, NewValues
+FROM dbo.AuditLog WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD'
+ORDER BY AuditID;
+
 END TRY
 BEGIN CATCH
     IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;
     DECLARE @ErrNum INT = ERROR_NUMBER();
     DECLARE @ErrLine INT = ERROR_LINE();
     DECLARE @ErrMsg NVARCHAR(4000) = ERROR_MESSAGE();
+    IF @RunRecorded = 1
+        EXEC sys.sp_executesql N'
+            UPDATE dbo.UPR_LOAD_RUN SET RunStatus = ''FAILED'', FinishedAt = SYSDATETIME(),
+                ErrorMessage = @err WHERE RunID = @id AND RunStatus = ''RUNNING'';',
+            N'@id UNIQUEIDENTIFIER, @err NVARCHAR(4000)', @AuditRunID, @ErrMsg;
+    EXEC sys.sp_set_session_context @key = N'UPR_AuditRunID', @value = @PreviousAuditRun;
     PRINT N'*** UPR hierarchical load FAILED ***';
     PRINT N'Error ' + CONVERT(NVARCHAR(20), @ErrNum)
         + N' at line ' + CONVERT(NVARCHAR(20), @ErrLine)

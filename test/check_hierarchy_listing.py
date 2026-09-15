@@ -94,7 +94,10 @@ INSERT dbo.UNIT (UPRID, BuildingID, UnitNumber) VALUES (SCOPE_IDENTITY(), @B2, '
     SELECT cl.AncestorUPRID, u.UPRID FROM Closure cl
     INNER JOIN dbo.UPR u ON u.ParentUPRID = cl.DescendantUPRID
 )
-INSERT dbo.UPR_CLOSURE SELECT AncestorUPRID, DescendantUPRID FROM Closure;
+INSERT dbo.UPR_CLOSURE (AncestorUPRID, DescendantUPRID, [Level])
+SELECT cl.AncestorUPRID, cl.DescendantUPRID,
+    (SELECT COUNT(*) - 1 FROM Closure path WHERE path.DescendantUPRID = cl.DescendantUPRID)
+FROM Closure cl;
 """)
     full = report()
     rows = tree(full)

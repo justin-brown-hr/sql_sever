@@ -67,3 +67,9 @@ CONTAINER="$CONTAINER" python3 "$ROOT/test/check_source_audit.py"
 
 echo "### 13. exact client-supplied MasterAddress row 20977 (separate database)"
 CONTAINER="$CONTAINER" python3 "$ROOT/test/check_client_sample.py"
+
+echo "### 14. closure levels, existing-schema upgrade, reparenting and audit idempotency"
+CONTAINER="$CONTAINER" python3 "$ROOT/test/check_closure_levels.py"
+
+echo "### 15. audit run history, upgrade and readable row/field report"
+CONTAINER="$CONTAINER" python3 "$ROOT/test/check_audit_runs.py"

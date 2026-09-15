@@ -42,12 +42,12 @@ VALUES (7352, '00089876', '30', 'SYNTHETIC CONDO TEST', NULL, NULL, NULL, NULL, 
 """)
 load()
 sql("""
-IF EXISTS (
+IF NOT EXISTS (
     SELECT 1 FROM dbo.UNIT un
     INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = un.UPRID
     INNER JOIN dbo.UPR root ON root.UPRID = cl.AncestorUPRID
-    WHERE root.AccountNumber = '00089876'
-) THROW 51001, 'Blank source unit field created an invented Unit.', 1;
+    WHERE root.AccountNumber = '00089876' AND un.UnitNumber IS NULL
+) THROW 51001, 'Condo record with an AccountNumber but no CondoUnit value must still get a Unit row (NULL, not skipped).', 1;
 IF NOT EXISTS (
     SELECT 1 FROM dbo.UNIT un
     INNER JOIN dbo.EXTERNAL_IDENTIFIER_XREF x ON x.UPRID = un.UPRID
