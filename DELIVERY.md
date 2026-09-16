@@ -19,7 +19,7 @@
 | 5 | **Real-data test guide** | `CLIENT_REAL_DATA_TEST.md` |
 | 6 | **README** (structure, run steps, assumptions) | `README.md` |
 | 7 | **Persistent row auditing** (install before loading) | `scripts/install_upr_audit.sql` |
-| 8 | **September 10 correction guide and account diagnostics** | `CLIENT_FIX_2026-09-10.md`, `scripts/diagnose_upr_accounts.sql` |
+| 8 | **Current correction guide and account diagnostics** | `CLIENT_FIX_2026-09-16.md`, `scripts/diagnose_upr_accounts.sql` |
 
 Supporting files:
 
@@ -34,7 +34,7 @@ Supporting files:
 
 ---
 
-For an **existing database**, apply [CLIENT_FIX_2026-09-10.md](CLIENT_FIX_2026-09-10.md)
+For an **existing database**, apply [CLIENT_FIX_2026-09-16.md](CLIENT_FIX_2026-09-16.md)
 instead of the clean-schema setup below.
 
 ## Quick Start (SSMS)

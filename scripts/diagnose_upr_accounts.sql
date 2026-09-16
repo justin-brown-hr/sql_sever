@@ -9,7 +9,11 @@ SET NOCOUNT ON;
 IF OBJECT_ID('tempdb..#WatchAccount') IS NOT NULL DROP TABLE #WatchAccount;
 CREATE TABLE #WatchAccount (AccountNumber NVARCHAR(50) PRIMARY KEY);
 INSERT #WatchAccount VALUES
-    ('00089876'), ('01297731'), ('00272531'), ('00086862');
+    ('00089876'), ('01297731'), ('00272531'), ('00086862'), ('00255115');
+
+PRINT N'Latest loader audit summaries (updated staging marker: MA-FIRST-2026-09-15)';
+SELECT TOP (5) AuditID, ChangedDate, ChangeSummary
+FROM dbo.AuditLog WHERE EntityName = N'UPR_HIER_LOAD' ORDER BY AuditID DESC;
 
 PRINT N'Original MasterAddress source rows';
 SELECT ma.*
@@ -49,6 +53,32 @@ LEFT JOIN dbo.UPR_CONTACT uc ON uc.UPRID = u.UPRID
 LEFT JOIN dbo.CONTACT ct ON ct.ContactID = uc.ContactID
 ORDER BY t.RootAccount, u.UPRID, a.AddressID, ct.ContactID
 OPTION (MAXRECURSION 100);
+
+PRINT N'Existing top-level parents by account - check for competing Condo/Complex roots';
+SELECT w.AccountNumber, u.UPRID, e.Description AS EntityType, u.StatusCode,
+    d.CondoName,
+    DirectChildren = (SELECT COUNT(*) FROM dbo.UPR child WHERE child.ParentUPRID = u.UPRID),
+    RootsOnAccount = (SELECT COUNT(*) FROM dbo.UPR r
+                     WHERE r.AccountNumber = w.AccountNumber AND r.ParentUPRID IS NULL)
+FROM #WatchAccount w
+LEFT JOIN dbo.UPR u ON u.AccountNumber = w.AccountNumber AND u.ParentUPRID IS NULL
+LEFT JOIN dbo.REF_ENTITYTYPE e ON e.EntityTypeID = u.EntityTypeID
+LEFT JOIN dbo.CONDO d ON d.UPRID = u.UPRID
+ORDER BY w.AccountNumber, u.UPRID;
+
+PRINT N'SDAT source record links and their current root classification';
+SELECT root.AccountNumber, RootUPRID = root.UPRID, e.Description AS RootEntityType,
+    x.IdentifierValue AS SDATSourceRecordID, x.UPRID AS LinkedUPRID,
+    linked.ParentUPRID, un.BuildingID, un.UnitNumber
+FROM dbo.EXTERNAL_IDENTIFIER_XREF x
+INNER JOIN dbo.UPR linked ON linked.UPRID = x.UPRID
+INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = x.UPRID
+INNER JOIN dbo.UPR root ON root.UPRID = cl.AncestorUPRID AND root.ParentUPRID IS NULL
+INNER JOIN dbo.REF_ENTITYTYPE e ON e.EntityTypeID = root.EntityTypeID
+LEFT JOIN dbo.UNIT un ON un.UPRID = x.UPRID
+WHERE x.SourceSystem = N'KDAT' AND x.IdentifierType = N'SOURCE_RECORD_ID'
+  AND EXISTS (SELECT 1 FROM #WatchAccount w WHERE w.AccountNumber = root.AccountNumber)
+ORDER BY root.AccountNumber, x.IdentifierValue;
 
 PRINT N'Review queue entries for these source accounts';
 SELECT * FROM dbo.UPRMATCHREVIEW_Q

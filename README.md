@@ -5,6 +5,10 @@ SQL Server integration that loads **AddressMaster** and **SDAT** into the **hier
 **Model:** `docs/NewUPRTABLEUSED.docx` + `docs/Response.docx` (COMPLEX).  
 **Old flat model** archived under `legacy/` for reference only - do not run it.
 
+Latest update: [optional parcels and supplied illustrations](CLIENT_FIX_2026-09-16.md).
+Use `UPR_Corrections_2026-09-16_Reviewed.zip`; it also corrects the coordinate
+pair defect found during the client-perspective review.
+
 ## Requirements
 
 - SQL Server 2016 or later
@@ -37,8 +41,9 @@ SQL/
 ```
 
 For the latest corrections on an existing database, follow
-[CLIENT_FIX_2026-09-15.md](CLIENT_FIX_2026-09-15.md), including per-run audit
-history and the automatic `UPR_CLOSURE.Level` upgrade. The client's source-only
+[CLIENT_FIX_2026-09-16.md](CLIENT_FIX_2026-09-16.md),
+including MA-first shared-account classification, guarded existing-Condo repair,
+per-run audit history and the automatic `UPR_CLOSURE.Level` upgrade. The client's source-only
 requirement supersedes the older generated-name conventions.
 
 ## Run Steps
@@ -143,7 +148,10 @@ Each load step is commented in `scripts/load_upr_master.sql` (Steps 0-14).
 | Incoming tables | `dbo.MAIncomingTableX1` (MasterAddress) and `dbo.SDATIncomingTableX1` (SDAT) |
 | Join key | `MAIncomingTableX1.Account` = normalized `SDATIncomingTableX1.AccountNumber` (numeric accounts zero-padded to 8) |
 | AccountNumber | **Required on every incoming record** - no account means reject to `UPRMATCHREVIEW_Q` (`INSUFFICIENT_DATA`), never in UPR. Column stays nullable and **not unique** on UPR itself (client Response.docx) |
-| Complex rule | MA MultiFamily/Apartments + Account# + 2+ distinct addresses -> COMPLEX; addresses counted on MA rows only. Every incoming row for that account, including SDAT/condo-typed rows, stays inside the one Complex - it never also becomes a Condo |
+| Parcel number | Optional for both MA and SDAT. Missing, blank and recognized placeholder parcels stay NULL; they do not cause Review_Q before or after loading. Other rejection reasons still apply. Existing historical review entries are retained |
+| Complex rule | MA MultiFamily/Apartments + Account# + 2+ distinct MA street addresses -> COMPLEX. All valid rows on that account share its MA-derived type and Complex group, including mixed MA types and SDAT rows |
+| Shared MA/SDAT accounts | Classify MA first. Shared SDAT rows inherit a unique matching MA group; unmatched/ambiguous rows go to Review_Q. SDAT-only accounts retain their Condo path. No blanket deletion of SDAT source data |
+| Existing Condo correction | A single source-linked, unnamed Condo can be reclassified to Complex with UPR/Building/Unit IDs preserved. Competing or incompatible existing roots are queued for review without adding another hierarchy |
 | Condo rule | Condo parent (ParentUPRID NULL); Buildings and numbered Units are its children; Units link to their Building by BuildingID |
 | Unit numbers | Real incoming `CondoUnit` / MA `Unit` value when given. Every MULTI/APT/CONDO record still gets a Unit row even when blank: a Condo/SDAT record keeps `NULL` (the source column exists, just empty); an MA record with no unit-number field gets literal `N/A`. Never an invented `MA-<id>`/`SD-<id>` label - any leftover legacy one is repaired to the same convention |
 | Record type | Blank `LUCategory` -> `UNKNWN` property type; never invented as SF |
@@ -222,4 +230,3 @@ The sample data (`test/local_it_setup.sql`) deliberately covers hostile cases:
 - Statistics printed at end of load
 - INSERT/UPDATE/DELETE on the 22 UPR model/reference tables audited from installation onward; batch summaries and initial status history also retained
 - Review queue for unmatched/insufficient records with mapped reasons
-

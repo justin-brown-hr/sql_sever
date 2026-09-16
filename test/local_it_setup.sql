@@ -19,7 +19,7 @@
     - YearBuilt 0 and 9999 (CHECK constraint)
     - 300-character street name (truncation)
     - bad street number / missing zip (Review_Q, not loaded)
-    - NULL parcel (loaded AND flagged)
+    - NULL parcel (loaded without a parcel-only review)
     - garbage PremisesState (must remain NULL)
 ================================================================================
 */
@@ -116,7 +116,7 @@ VALUES
     (71, N'00000141', N'P71', N'32', N'NOZIP',  N'ST', NULL, N'ROCKVILLE', NULL,     N'Single Family Detached', NULL, NULL),
     (72, N'00000151', N'P72', N'33', N'NOCITY', N'ST', NULL, NULL,         N'20850', N'Single Family Detached', NULL, NULL),
 
-    /* 9. Loaded but flagged: parcel NULL and placeholder '000' */
+    /* 9. Loaded without review: parcel NULL and placeholder '000' */
     (80, N'00000161', NULL,    N'34', N'NOPARCEL', N'ST', NULL, N'ROCKVILLE', N'20850', N'Single Family Detached', NULL, NULL),
     (81, N'00000171', N'000',  N'35', N'ZEROPARCEL', N'ST', NULL, N'ROCKVILLE', N'20850', N'Single Family Detached', NULL, NULL),
 

@@ -280,13 +280,13 @@ WHERE a.StreetName = 'NOACCOUNT';
 INSERT #R VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
                   'No-account row rejected, NOT loaded into UPR', CONVERT(VARCHAR(20), @n) + ' (expected 0)');
 
-/* ---- 17. missing parcel: loaded AND flagged ------------------------------ */
+/* ---- 17. missing parcel: loaded WITHOUT a parcel-only review ------------- */
 SELECT @n = COUNT(*) FROM dbo.UPR WHERE AccountNumber IN ('00000161', '00000171');
 INSERT #R VALUES (CASE WHEN @n = 2 THEN 'PASS' ELSE 'FAIL' END,
                   'Missing-parcel rows still loaded', CONVERT(VARCHAR(20), @n) + ' (expected 2)');
 SELECT @n = COUNT(*) FROM dbo.UPRMATCHREVIEW_Q WHERE ReasonForNoMatch = 'MISSING PARCELID';
-INSERT #R VALUES (CASE WHEN @n >= 2 THEN 'PASS' ELSE 'FAIL' END,
-                  'Missing-parcel rows flagged', CONVERT(VARCHAR(20), @n) + ' (expected >=2)');
+INSERT #R VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
+                  'No missing-parcel review entries', CONVERT(VARCHAR(20), @n) + ' (expected 0)');
 
 /* ---- 18. closure covers every ancestor path ------------------------------ */
 SELECT @n = COUNT(*) FROM dbo.UPR u

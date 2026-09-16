@@ -14,8 +14,9 @@
        Every incoming row for that account - including SDAT / condo-typed rows -
        stays inside the one Complex. The account never also becomes a Condo.
     3) MultiFamily with 1 address -> Property -> Building -> Unit
-    4) Condo (SDAT): Condo (Parent NULL) -> Unit; account on Condo UPR
-       (only when the account is NOT a Complex under rule 2)
+    4) SDAT-only account: Condo (Parent NULL) -> Unit; account on Condo UPR.
+       Shared accounts follow MA's Complex or uniquely matched MA group;
+       unmatched/ambiguous shared SDAT rows go to Review_Q, never default Condo.
     5) SF / Warehouse / Office / Park / etc -> Property -> Building only, no Unit
        (not a dwelling-unit record type)
     6) Address via ADDRESS + UPR_ADDRESS only; Contact required when address valid
@@ -28,6 +29,7 @@
        keeps NULL (the column exists, source left it blank). An MA record with
        no UnitNumber field, counted as a unit in its building/Complex address,
        gets literal N'N/A' - never an invented MA-<id>/SD-<id> label.
+   10) Missing/placeholder Parcel numbers stay NULL and do not cause Review_Q.
 
   Prerequisites: create the schema once, then run scripts/install_upr_audit.sql.
   Re-runnable: unchanged incoming data inserts no business rows (batch audit remains).
@@ -344,6 +346,9 @@ EXEC sys.sp_set_session_context @key = N'UPR_AuditRunID', @value = @AuditRunID;
 
 PRINT N'================================================================';
 PRINT N'UPR hierarchical load starting: ' + CONVERT(NVARCHAR(30), @BatchStart, 121);
+PRINT N'Staging rules: MA-FIRST-2026-09-15';
+PRINT N'Parcel rules: OPTIONAL-PARCEL-2026-09-16';
+PRINT N'Coordinate rules: SOURCE-PAIR-2026-09-16';
 PRINT N'================================================================';
 
 /* ============================================================================
@@ -738,6 +743,7 @@ CREATE TABLE #Stage (
     UnitNumber              VARCHAR(50)  NULL,
     CondoUnit               VARCHAR(50)  NULL,
     PropertyType            NVARCHAR(6)  NULL,
+    RawPropertyType         NVARCHAR(128) NULL,
     OwnerName               NVARCHAR(200) NULL,
     YearBuilt               SMALLINT     NULL,
     DwellingUnits           INT          NULL,
@@ -751,15 +757,17 @@ CREATE TABLE #Stage (
     PathType                VARCHAR(20)  NULL,  /* COMPLEX | PROPERTY | CONDO */
     GroupKey                NVARCHAR(450) NULL,
     DistinctAddrOnAccount   INT          NULL,
-    /* 1 when the row's account qualifies as a Complex (rule 2). SDAT / condo
-       rows on such an account then join that Complex instead of a new Condo. */
+    HasMAAccount            BIT          NOT NULL DEFAULT (0),
+    ClassificationReason    NVARCHAR(255) NULL,
+    /* All valid rows on a qualifying account inherit MA's type and Complex
+       group, including blank/different MA types and default SDAT Condo rows. */
     IsComplexAccount        BIT          NOT NULL CONSTRAINT DF_Stage_IsComplexAccount DEFAULT (0)
 );
 
 INSERT INTO #Stage (
     SourceSystem, SourceRecordID, MasterAddressID, KdatRecordID, AccountNumber, ParcelID,
     StreetNumber, StreetName, StreetType, City, [State], ZipCode,
-    UnitNumber, CondoUnit, PropertyType, OwnerName, YearBuilt, DwellingUnits,
+    UnitNumber, CondoUnit, PropertyType, RawPropertyType, OwnerName, YearBuilt, DwellingUnits,
     YCoordinate, XCoordinate, NormalizedStreetAddress, NormalizedFullAddress, HasRequiredAddress
 )
 /* LEFT() on every text column: the SDAT incoming table is NVARCHAR(MAX) in the
@@ -770,7 +778,7 @@ SELECT
     LEFT(AccountNumber, 50), LEFT(ParcelID, 50),
     LEFT(StreetNumber, 20), LEFT(StreetName, 200), LEFT(StreetType, 30),
     LEFT(City, 100), LEFT([State], 2), LEFT(ZipCode, 10),
-    LEFT(UnitNumber, 50), LEFT(CondoUnit, 50), LEFT(PropertyType, 6),
+    LEFT(UnitNumber, 50), LEFT(CondoUnit, 50), LEFT(PropertyType, 6), LEFT(PropertyTypeRaw, 128),
     LEFT(OwnerName, 200), YearBuilt, DwellingUnits,
     YCoordinate, XCoordinate,
     LEFT(NormalizedStreetAddress, 300), LEFT(NormalizedFullAddress, 300), HasRequiredAddress
@@ -781,13 +789,14 @@ SELECT
     LEFT(AccountNumber, 50), LEFT(ParcelID, 50),
     LEFT(StreetNumber, 20), LEFT(StreetName, 200), LEFT(StreetType, 30),
     LEFT(City, 100), LEFT([State], 2), LEFT(ZipCode, 10),
-    LEFT(UnitNumber, 50), LEFT(CondoUnit, 50), LEFT(PropertyType, 6),
+    LEFT(UnitNumber, 50), LEFT(CondoUnit, 50), LEFT(PropertyType, 6), LEFT(PropertyTypeRaw, 128),
     LEFT(OwnerName, 200), YearBuilt, DwellingUnits,
     YCoordinate, XCoordinate,
     LEFT(NormalizedStreetAddress, 300), LEFT(NormalizedFullAddress, 300), HasRequiredAddress
 FROM #SDAT;
 
 SET @StageRows = (SELECT COUNT(*) FROM #Stage);
+CREATE INDEX IX_Stage_Account_Source ON #Stage (AccountNumber, SourceSystem);
 
 /* Repair ANY leftover legacy generated UnitNumber (N'MA-<id>' / N'SD-<id>'),
    even when its exact source row is no longer in the current incoming batch -
@@ -824,29 +833,34 @@ WHERE ParcelID IS NOT NULL
      OR UPPER(LTRIM(RTRIM(ParcelID))) IN (N'NULL', N'N/A', N'NA', N'NONE')
   );
 
-/* Distinct building addresses per account.
+/* Distinct street addresses per account; City/ZIP variants are not buildings.
    Counted on MA rows only: the Complex rule is "MA MultiFamily + Account# +
    2+ distinct building addresses". Counting SDAT premises addresses too would
    create false Complexes when SDAT spells the same address differently. */
 IF OBJECT_ID('tempdb..#AcctAddrCnt') IS NOT NULL DROP TABLE #AcctAddrCnt;
 SELECT
     AccountNumber,
-    COUNT(DISTINCT NormalizedFullAddress) AS DistinctAddrCnt,
+    COUNT(*) AS MARowCount,
+    SUM(CASE WHEN HasRequiredAddress = 1 THEN 1 ELSE 0 END) AS ValidMARowCount,
+    COUNT(DISTINCT CASE WHEN HasRequiredAddress = 1 THEN NormalizedStreetAddress END) AS DistinctAddrCnt,
     /* Does the account carry at least one MA MultiFamily / Apartment row? */
-    MAX(CASE WHEN PropertyType IN (N'MULTI', N'APT') THEN 1 ELSE 0 END) AS HasMultiFamilyRow
+    MAX(CASE WHEN HasRequiredAddress = 1 AND PropertyType IN (N'MULTI', N'APT') THEN 1 ELSE 0 END) AS HasMultiFamilyRow,
+    COALESCE(MAX(CASE WHEN HasRequiredAddress = 1 AND PropertyType = N'MULTI' THEN PropertyType END),
+             MAX(CASE WHEN HasRequiredAddress = 1 AND PropertyType = N'APT' THEN PropertyType END)) AS ComplexPropertyType
 INTO #AcctAddrCnt
 FROM #Stage
 WHERE AccountNumber IS NOT NULL
   AND SourceSystem = N'ADDRESS_MASTER'
-  AND HasRequiredAddress = 1
-  AND NULLIF(LTRIM(RTRIM(NormalizedFullAddress)), N'') IS NOT NULL
 GROUP BY AccountNumber;
+CREATE UNIQUE INDEX IX_AcctAddrCnt_Account ON #AcctAddrCnt (AccountNumber);
 
 /* An account is a Complex (rule 2) when it has an MA MultiFamily/Apartment row
    and 2+ distinct MA building addresses. Flag every staged row on that account -
    MA and SDAT alike - so its condo-typed rows join the Complex, not a new Condo. */
 UPDATE s
-SET s.DistinctAddrOnAccount = a.DistinctAddrCnt,
+SET s.DistinctAddrOnAccount = a.DistinctAddrCnt, s.HasMAAccount = 1,
+    s.PropertyType = CASE WHEN a.HasMultiFamilyRow = 1 AND a.DistinctAddrCnt > 1
+                         THEN a.ComplexPropertyType ELSE s.PropertyType END,
     s.IsComplexAccount = CASE
         WHEN a.HasMultiFamilyRow = 1 AND a.DistinctAddrCnt > 1 THEN 1 ELSE 0 END
 FROM #Stage s
@@ -857,7 +871,7 @@ INNER JOIN #AcctAddrCnt a ON a.AccountNumber = s.AccountNumber;
      - AccountNumber required (client rule: no account -> reject to Review_Q, never in UPR)
      - required address present
      - City, ZIP and parcel may be missing; never fill them with guesses
-   Missing ParcelID does NOT block load (still flagged to Review_Q).
+   Missing ParcelID is accepted and never causes a Review_Q entry by itself.
 */
 UPDATE #Stage
 SET
@@ -869,7 +883,6 @@ SET
     ReviewReason = CASE
         WHEN AccountNumber IS NULL THEN N'INSUFFICIENT_DATA'
         WHEN HasRequiredAddress = 0 THEN N'NO_ADDRESS_MATCH'
-        WHEN ParcelID IS NULL THEN N'MISSING PARCELID'
         ELSE NULL
     END;
 
@@ -878,17 +891,15 @@ SET
 UPDATE s
 SET
     PathType = CASE
-        /* Complex account (rule 2): its condo-typed rows join the Complex. */
-        WHEN (s.PropertyType = N'CONDO' OR s.CondoUnit IS NOT NULL)
-         AND s.IsComplexAccount = 1 THEN N'COMPLEX'
+        /* MA's account decision owns EVERY row, including mixed MA types. */
+        WHEN s.IsComplexAccount = 1 THEN N'COMPLEX'
         WHEN s.PropertyType = N'CONDO' OR s.CondoUnit IS NOT NULL THEN N'CONDO'
         WHEN s.PropertyType IN (N'MULTI', N'APT')
          AND ISNULL(s.DistinctAddrOnAccount, 0) > 1 THEN N'COMPLEX'
         ELSE N'PROPERTY'
     END,
     GroupKey = CASE
-        WHEN (s.PropertyType = N'CONDO' OR s.CondoUnit IS NOT NULL)
-         AND s.IsComplexAccount = 1 THEN
+        WHEN s.IsComplexAccount = 1 THEN
             N'COMPLEX|' + s.AccountNumber
         WHEN s.PropertyType = N'CONDO' OR s.CondoUnit IS NOT NULL THEN
             N'CONDO|' + s.AccountNumber
@@ -899,7 +910,51 @@ SET
             N'PROPERTY|' + s.AccountNumber + N'|' + ISNULL(s.NormalizedFullAddress, N'')
     END
 FROM #Stage s
-WHERE s.IsValid = 1;
+WHERE s.IsValid = 1
+  AND (s.SourceSystem = N'ADDRESS_MASTER' OR s.HasMAAccount = 0 OR s.IsComplexAccount = 1);
+
+/* MA groups exist before shared SDAT accounts are considered. SDAT never
+   gets its default Condo classification when MA already owns the account.
+   Prefer an exact full-address match, then street address, then an existing
+   MA Condo group. Multiple equally plausible groups go to review. */
+IF OBJECT_ID('tempdb..#SDATMaMatch') IS NOT NULL DROP TABLE #SDATMaMatch;
+;WITH Candidates AS (
+    SELECT sd.StageKey, ma.GroupKey, ma.PathType, ma.PropertyType,
+        MatchRank = DENSE_RANK() OVER (PARTITION BY sd.StageKey ORDER BY CASE
+            WHEN ma.NormalizedFullAddress = sd.NormalizedFullAddress THEN 0
+            WHEN ma.NormalizedStreetAddress = sd.NormalizedStreetAddress THEN 1 ELSE 2 END)
+    FROM #Stage sd
+    INNER JOIN #Stage ma ON ma.AccountNumber = sd.AccountNumber
+        AND ma.SourceSystem = N'ADDRESS_MASTER' AND ma.IsValid = 1
+    WHERE sd.SourceSystem = N'KDAT' AND sd.IsValid = 1
+      AND sd.HasMAAccount = 1 AND sd.IsComplexAccount = 0
+      AND (ma.NormalizedStreetAddress = sd.NormalizedStreetAddress OR ma.PathType = N'CONDO')
+)
+SELECT StageKey, MatchingGroups = COUNT(DISTINCT GroupKey),
+    MatchingTypes = COUNT(DISTINCT PropertyType),
+    GroupKey = MAX(GroupKey), PathType = MAX(PathType), PropertyType = MAX(PropertyType)
+INTO #SDATMaMatch FROM Candidates WHERE MatchRank = 1 GROUP BY StageKey;
+CREATE UNIQUE INDEX IX_SDATMaMatch_StageKey ON #SDATMaMatch (StageKey);
+
+UPDATE sd SET GroupKey = m.GroupKey, PathType = m.PathType, PropertyType = m.PropertyType
+FROM #Stage sd INNER JOIN #SDATMaMatch m ON m.StageKey = sd.StageKey
+WHERE m.MatchingGroups = 1 AND m.MatchingTypes <= 1;
+
+UPDATE sd SET IsValid = 0,
+    ReviewReason = CASE WHEN m.StageKey IS NULL THEN N'NO_ADDRESS_MATCH' ELSE N'AMBIGUOUS_CANDIDATES' END
+FROM #Stage sd LEFT JOIN #SDATMaMatch m ON m.StageKey = sd.StageKey
+WHERE sd.IsValid = 1 AND sd.SourceSystem = N'KDAT' AND sd.HasMAAccount = 1
+  AND sd.IsComplexAccount = 0 AND sd.GroupKey IS NULL;
+
+UPDATE s SET ClassificationReason = CASE
+    WHEN IsValid = 0 AND SourceSystem = N'KDAT' AND HasMAAccount = 1 AND HasRequiredAddress = 1
+        THEN N'SDAT account exists in MA but has no single matching valid MA group; review required'
+    WHEN IsValid = 0 THEN N'Rejected: ' + COALESCE(ReviewReason, N'Invalid source row')
+    WHEN IsComplexAccount = 1 THEN N'MA multifamily/apartment account with multiple street addresses: Complex'
+    WHEN SourceSystem = N'ADDRESS_MASTER' THEN N'MA record type and address determine the parent'
+    WHEN HasMAAccount = 1 THEN N'SDAT matched the MA parent; MA classification takes precedence'
+    ELSE N'SDAT-only account: Condo' END
+FROM #Stage s;
 
 /* Working indexes - #Stage is joined on GroupKey many times below */
 CREATE INDEX IX_Stage_GroupKey ON #Stage (GroupKey) WHERE IsValid = 1;
@@ -912,9 +967,9 @@ PRINT N'Step 4 complete - Stage=' + CONVERT(NVARCHAR(20), @StageRows)
     + N'; Invalid=' + CONVERT(NVARCHAR(20), @InvalidRows);
 
 /* ============================================================================
-   5. Review_Q for invalid / missing parcel (mapped reasons only)
+   5. Review_Q for rejected records (mapped reasons only)
    ============================================================================ */
-PRINT N'Step 5: Write UPRMATCHREVIEW_Q for non-load / flagged rows...';
+PRINT N'Step 5: Write UPRMATCHREVIEW_Q for rejected rows...';
 
 IF OBJECT_ID('tempdb..#ReviewSrc') IS NOT NULL DROP TABLE #ReviewSrc;
 SELECT
@@ -930,15 +985,12 @@ SELECT
         WHEN AccountNumber IS NULL THEN N'INSUFFICIENT_DATA'
         WHEN HasRequiredAddress = 0 THEN N'NO_ADDRESS_MATCH'
         WHEN IsValid = 0 THEN ISNULL(ReviewReason, N'OTHER')
-        WHEN ParcelID IS NULL THEN N'MISSING PARCELID'
         ELSE ISNULL(ReviewReason, N'OTHER')
     END,
     IsValid
 INTO #ReviewSrc
 FROM #Stage
-WHERE IsValid = 0
-   OR ReviewReason IS NOT NULL
-   OR (IsValid = 1 AND ParcelID IS NULL);
+WHERE IsValid = 0;
 
 /* Re-run dedupe below scans UPRMATCHREVIEW_Q per row - index it or the load crawls */
 IF NOT EXISTS (
@@ -973,7 +1025,7 @@ SELECT
     CASE WHEN r.SourceSystem = N'ADDRESS_MASTER' THEN LEFT(r.AccountNumber, 30) ELSE NULL END,
     CASE
         WHEN r.ReviewReason IN (
-            N'MISSING PARCELID', N'NO_SDAT_MATCH', N'NO_ADDRESS_MATCH', N'INSUFFICIENT_DATA',
+            N'NO_SDAT_MATCH', N'NO_ADDRESS_MATCH', N'INSUFFICIENT_DATA',
             N'AMBIGUOUS_CANDIDATES', N'LOW_CONFIDENCE_ONLY', N'SOURCE_RECORD_ERROR', N'OTHER'
         ) THEN r.ReviewReason
         ELSE N'OTHER'
@@ -987,7 +1039,7 @@ WHERE NOT EXISTS (
     WHERE q.IncomingSourceSystem = r.SourceSystem
       AND q.ReasonForNoMatch = CASE
             WHEN r.ReviewReason IN (
-                N'MISSING PARCELID', N'NO_SDAT_MATCH', N'NO_ADDRESS_MATCH', N'INSUFFICIENT_DATA',
+                N'NO_SDAT_MATCH', N'NO_ADDRESS_MATCH', N'INSUFFICIENT_DATA',
                 N'AMBIGUOUS_CANDIDATES', N'LOW_CONFIDENCE_ONLY', N'SOURCE_RECORD_ERROR', N'OTHER'
             ) THEN r.ReviewReason
             ELSE N'OTHER'
@@ -1013,8 +1065,9 @@ SELECT
     s.PathType,
     AccountNumber = MAX(s.AccountNumber),
     PropertyType  = COALESCE(
-        MAX(CASE WHEN s.PropertyType = N'MULTI' THEN s.PropertyType END),
-        MAX(CASE WHEN s.PropertyType = N'CONDO' THEN s.PropertyType END),
+        MAX(CASE WHEN s.SourceSystem = N'ADDRESS_MASTER' AND s.PropertyType = N'MULTI' THEN s.PropertyType END),
+        MAX(CASE WHEN s.SourceSystem = N'ADDRESS_MASTER' AND s.PropertyType = N'APT' THEN s.PropertyType END),
+        MAX(CASE WHEN s.SourceSystem = N'ADDRESS_MASTER' THEN s.PropertyType END),
         MAX(s.PropertyType),
         /* Nothing usable in the incoming record type - never invent SF */
         CASE s.PathType WHEN N'CONDO' THEN N'CONDO' WHEN N'COMPLEX' THEN N'MULTI' ELSE N'UNKNWN' END
@@ -1033,6 +1086,66 @@ FROM #Stage s
 WHERE s.IsValid = 1
   AND s.GroupKey IS NOT NULL
 GROUP BY s.GroupKey, s.PathType;
+
+/* Repair a source-proven, single old Condo root in place when MA now proves
+   this account is a Complex. Preserve UPR/building/unit IDs and XREFs. Named
+   Condos, multiple existing roots, or incompatible Unit links need review. */
+IF OBJECT_ID('tempdb..#CondoToComplex') IS NOT NULL DROP TABLE #CondoToComplex;
+SELECT g.GroupKey, u.UPRID
+INTO #CondoToComplex
+FROM #ParentGroup g
+INNER JOIN dbo.UPR u ON u.AccountNumber = g.AccountNumber
+    AND u.ParentUPRID IS NULL AND u.EntityTypeID = @EtCondo
+INNER JOIN dbo.CONDO d ON d.UPRID = u.UPRID
+WHERE g.PathType = N'COMPLEX' AND d.CondoName IS NULL
+  AND (SELECT COUNT(*) FROM dbo.UPR other
+       WHERE other.AccountNumber = g.AccountNumber AND other.ParentUPRID IS NULL) = 1
+  AND EXISTS (SELECT 1 FROM dbo.EXTERNAL_IDENTIFIER_XREF x
+              WHERE x.UPRID = u.UPRID AND x.SourceSystem = N'KDAT'
+                AND x.IdentifierType = N'ACCOUNT_NUMBER' AND x.IdentifierValue = g.AccountNumber)
+  AND NOT EXISTS (
+      SELECT 1 FROM dbo.UPR child LEFT JOIN dbo.UNIT un ON un.UPRID = child.UPRID
+      LEFT JOIN dbo.BUILDING b ON b.BuildingID = un.BuildingID
+      LEFT JOIN dbo.UPR bu ON bu.UPRID = b.UPRID
+      WHERE child.ParentUPRID = u.UPRID AND child.EntityTypeID = @EtUnit
+        AND (bu.UPRID IS NULL OR bu.ParentUPRID IS NULL OR bu.ParentUPRID <> u.UPRID)
+  );
+UPDATE u SET EntityTypeID = @EtComplex, UpdatedBy = @RunUser, UpdatedDate = @Now
+FROM dbo.UPR u INNER JOIN #CondoToComplex r ON r.UPRID = u.UPRID;
+DELETE d FROM dbo.CONDO d INNER JOIN #CondoToComplex r ON r.UPRID = d.UPRID;
+UPDATE child SET ParentUPRID = b.UPRID, UpdatedBy = @RunUser, UpdatedDate = @Now
+FROM dbo.UPR child INNER JOIN #CondoToComplex r ON r.UPRID = child.ParentUPRID
+INNER JOIN dbo.UNIT un ON un.UPRID = child.UPRID
+INNER JOIN dbo.BUILDING b ON b.BuildingID = un.BuildingID;
+/* Step 7 fills COMPLEX for this reused UPR; Step 12 rebuilds closure/Level.
+   The old Condo subtype and entity/parent changes are retained by audit. */
+
+INSERT INTO dbo.UPRMATCHREVIEW_Q
+    (UPRID, IncomingSourceSystem, SDAT_NormalizedIncomingAddress, MA_NormalizedIncomingAddress,
+     SDAT_AccountNumber, MA_Account, ReasonForNoMatch, ProcessingTimestamp, ReviewStatus, Decision)
+SELECT u.UPRID, CASE WHEN u.EntityTypeID = @EtCondo THEN N'KDAT' ELSE N'ADDRESS_MASTER' END, N'', N'',
+    CASE WHEN u.EntityTypeID = @EtCondo THEN LEFT(g.AccountNumber, 30) END,
+    CASE WHEN u.EntityTypeID = @EtProperty THEN LEFT(g.AccountNumber, 30) END, N'AMBIGUOUS_CANDIDATES',
+    @Now, N'PENDING_REVIEW', N'MA requires Complex; existing parents need review before loading this account. Check roots and Unit BuildingID links.'
+FROM #ParentGroup g INNER JOIN dbo.UPR u ON u.AccountNumber = g.AccountNumber
+    AND u.ParentUPRID IS NULL AND u.EntityTypeID IN (@EtCondo, @EtProperty)
+WHERE g.PathType = N'COMPLEX'
+  AND NOT EXISTS (SELECT 1 FROM dbo.UPRMATCHREVIEW_Q q WHERE q.UPRID = u.UPRID
+                  AND q.Decision = N'MA requires Complex; existing parents need review before loading this account. Check roots and Unit BuildingID links.');
+SET @ReviewInserted = @ReviewInserted + @@ROWCOUNT;
+
+/* Do not build a second competing tree when existing data cannot be safely
+   reclassified. Keep its staged evidence and queue the existing root IDs. */
+UPDATE s SET IsValid = 0, ReviewReason = N'AMBIGUOUS_CANDIDATES',
+    ClassificationReason = N'MA requires Complex; existing parent records need review before this account can load'
+FROM #Stage s INNER JOIN #ParentGroup g ON g.GroupKey = s.GroupKey
+WHERE g.PathType = N'COMPLEX' AND EXISTS (
+    SELECT 1 FROM dbo.UPR u WHERE u.AccountNumber = g.AccountNumber AND u.ParentUPRID IS NULL
+      AND u.EntityTypeID IN (@EtCondo, @EtProperty));
+DELETE g FROM #ParentGroup g
+WHERE NOT EXISTS (SELECT 1 FROM #Stage s WHERE s.GroupKey = g.GroupKey AND s.IsValid = 1);
+SET @ValidRows = (SELECT COUNT(*) FROM #Stage WHERE IsValid = 1);
+SET @InvalidRows = (SELECT COUNT(*) FROM #Stage WHERE IsValid = 0);
 
 /* Skip parents already present (re-run guard): same Account + EntityType for COMPLEX/CONDO;
    PROPERTY: same Account + already linked source XREF for any stage row in group */
@@ -1191,8 +1304,10 @@ SELECT
     City         = MAX(s.City),
     [State]      = MAX(s.[State]),
     ZipCode      = MAX(s.ZipCode),
-    YCoordinate  = MAX(s.YCoordinate),
-    XCoordinate  = MAX(s.XCoordinate),
+    YCoordinate  = CAST(NULL AS INT),
+    XCoordinate  = CAST(NULL AS INT),
+    LegacyMaxY   = MAX(s.YCoordinate),
+    LegacyMaxX   = MAX(s.XCoordinate),
     /* CK_BUILDING_YearBuilt allows 1600..next year - sources carry 0 / 9999,
        so anything outside the range is stored as NULL instead of failing */
     YearBuilt    = MAX(CASE WHEN s.YearBuilt BETWEEN 1600 AND YEAR(DATEADD(YEAR, 1, SYSDATETIME()))
@@ -1203,6 +1318,21 @@ INNER JOIN #ParentMap pm ON pm.GroupKey = s.GroupKey
 WHERE s.IsValid = 1
   AND NULLIF(LTRIM(RTRIM(s.NormalizedFullAddress)), N'') IS NOT NULL
 GROUP BY s.GroupKey, pm.UPRID, pm.PathType, s.NormalizedFullAddress;
+
+/* A coordinate is a pair from ONE source row. Prefer a complete pair, then
+   an incomplete pair without filling its missing component from another row.
+   Use the lowest source ID for a stable representative of this address. */
+UPDATE b SET XCoordinate = chosen.XCoordinate, YCoordinate = chosen.YCoordinate
+FROM #BuildingSrc b
+OUTER APPLY (
+    SELECT TOP (1) s.XCoordinate, s.YCoordinate
+    FROM #Stage s
+    WHERE s.GroupKey = b.GroupKey AND s.NormalizedFullAddress = b.NormalizedFullAddress
+      AND s.IsValid = 1 AND (s.XCoordinate IS NOT NULL OR s.YCoordinate IS NOT NULL)
+    ORDER BY CASE WHEN s.XCoordinate IS NOT NULL AND s.YCoordinate IS NOT NULL THEN 0 ELSE 1 END,
+        CASE s.SourceSystem WHEN N'ADDRESS_MASTER' THEN 0 ELSE 1 END,
+        TRY_CONVERT(BIGINT, s.SourceRecordID), s.SourceRecordID, s.StageKey
+) chosen;
 
 IF OBJECT_ID('tempdb..#BuildingMap') IS NOT NULL DROP TABLE #BuildingMap;
 CREATE TABLE #BuildingMap (
@@ -1295,6 +1425,34 @@ WHERE target.CommunityName IN (N'BUILDING COMPLEX', pm.AccountNumber + N' BUILDI
                  AND target.CommunityName = s.City + N' BUILDING COMPLEX'));
 
 CREATE INDEX IX_BuildingMap_Lookup ON #BuildingMap (GroupKey, NormalizedFullAddress);
+
+/* Correct the old MAX(X)/MAX(Y) combination only when it is not a real
+   source pair, still equals the legacy result, and has source-linked ancestry.
+   Leave other existing coordinate values intact. A shared Address must have
+   a single agreed replacement pair; otherwise no automatic repair is made. */
+IF OBJECT_ID('tempdb..#CoordinateRepair') IS NOT NULL DROP TABLE #CoordinateRepair;
+SELECT DISTINCT a.AddressID, src.XCoordinate, src.YCoordinate
+INTO #CoordinateRepair
+FROM #BuildingSrc src
+INNER JOIN #BuildingMap bm ON bm.BuildingKey = src.BuildingKey
+INNER JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = bm.BuildingUPRID AND ua.IsPrimary = 1
+INNER JOIN dbo.ADDRESS a ON a.AddressID = ua.AddressID
+    AND a.NormalizedAddress = src.NormalizedFullAddress
+WHERE NOT EXISTS (SELECT a.XCoordinate, a.YCoordinate EXCEPT SELECT src.LegacyMaxX, src.LegacyMaxY)
+  AND EXISTS (SELECT a.XCoordinate, a.YCoordinate EXCEPT SELECT src.XCoordinate, src.YCoordinate)
+  AND NOT EXISTS (
+      SELECT 1 FROM #Stage s WHERE s.IsValid = 1 AND s.NormalizedFullAddress = src.NormalizedFullAddress
+        AND NOT EXISTS (SELECT a.XCoordinate, a.YCoordinate EXCEPT SELECT s.XCoordinate, s.YCoordinate))
+  AND EXISTS (
+      SELECT 1 FROM #Stage s
+      INNER JOIN dbo.EXTERNAL_IDENTIFIER_XREF x ON x.SourceSystem = s.SourceSystem
+          AND x.IdentifierType = N'SOURCE_RECORD_ID' AND x.IdentifierValue = s.SourceRecordID
+      INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = x.UPRID AND cl.AncestorUPRID = src.ParentUPRID
+      WHERE s.GroupKey = src.GroupKey AND s.NormalizedFullAddress = src.NormalizedFullAddress AND s.IsValid = 1);
+
+UPDATE a SET XCoordinate = r.XCoordinate, YCoordinate = r.YCoordinate
+FROM dbo.ADDRESS a INNER JOIN #CoordinateRepair r ON r.AddressID = a.AddressID
+WHERE (SELECT COUNT(*) FROM #CoordinateRepair other WHERE other.AddressID = r.AddressID) = 1;
 
 /* ADDRESS rows for building keys not yet linked */
 IF OBJECT_ID('tempdb..#AddressSrc') IS NOT NULL DROP TABLE #AddressSrc;
@@ -1498,6 +1656,19 @@ CREATE TABLE #UnitMap (
    Reuse that same structural Unit and attach its new source XREF to it.
    Never reuse on a placeholder UnitNumber (NULL or N'N/A') - those do not
    identify a physical unit, so each such row keeps its own separate Unit. */
+/* Reuse the exact source-linked Unit first, including NULL/N/A values and
+   Units reparented by a Condo-to-Complex repair above. */
+INSERT INTO #UnitMap (StageKey, UnitUPRID, GroupKey)
+SELECT src.StageKey, MIN(u.UPRID), MIN(src.GroupKey)
+FROM #UnitSrc src
+INNER JOIN #Stage st ON st.StageKey = src.StageKey
+INNER JOIN dbo.EXTERNAL_IDENTIFIER_XREF x ON x.SourceSystem = st.SourceSystem
+    AND x.IdentifierType = N'SOURCE_RECORD_ID' AND x.IdentifierValue = st.SourceRecordID
+INNER JOIN dbo.UPR u ON u.UPRID = x.UPRID AND u.ParentUPRID = src.ParentUPRID
+    AND u.EntityTypeID = @EtUnit
+INNER JOIN dbo.UNIT un ON un.UPRID = u.UPRID AND un.BuildingID = src.BuildingTableID
+GROUP BY src.StageKey;
+
 INSERT INTO #UnitMap (StageKey, UnitUPRID, GroupKey)
 SELECT src.StageKey, MIN(u.UPRID), MIN(src.GroupKey)
 FROM #UnitSrc src
@@ -1505,6 +1676,7 @@ INNER JOIN dbo.UNIT un ON un.BuildingID = src.BuildingTableID AND un.UnitNumber 
 INNER JOIN dbo.UPR u ON u.UPRID = un.UPRID
     AND u.ParentUPRID = src.ParentUPRID AND u.EntityTypeID = @EtUnit
 WHERE src.UnitNumber IS NOT NULL AND src.UnitNumber <> N'N/A'
+  AND NOT EXISTS (SELECT 1 FROM #UnitMap m WHERE m.StageKey = src.StageKey)
 GROUP BY src.StageKey;
 
 MERGE dbo.UPR AS t
@@ -1879,7 +2051,9 @@ VALUES
      + N'; Contact=' + CONVERT(NVARCHAR(20), @ContactInserted)
      + N'; XREF=' + CONVERT(NVARCHAR(20), @XrefInserted)
      + N'; ReviewQ=' + CONVERT(NVARCHAR(20), @ReviewInserted)
-     + N'; Closure=' + CONVERT(NVARCHAR(20), @ClosureRows), @AuditRunID, @@SPID);
+     + N'; Closure=' + CONVERT(NVARCHAR(20), @ClosureRows)
+     + N'; Classification=MA-FIRST-2026-09-15; Parcel=OPTIONAL-PARCEL-2026-09-16'
+     + N'; Coordinates=SOURCE-PAIR-2026-09-16', @AuditRunID, @@SPID);
 SET @AuditInserted = @@ROWCOUNT;
 
 UPDATE dbo.UPR_LOAD_RUN
@@ -1925,6 +2099,15 @@ PRINT N'================================================================';
 
 /* Show actual committed row events for this run, including their full values.
    list_upr_audit.sql also offers a field-by-field view and edits outside loads. */
+PRINT N'Staging classification - MA account decisions and source-row routing';
+SELECT RunID = @AuditRunID, s.SourceSystem, s.SourceRecordID, s.AccountNumber,
+    s.RawPropertyType, s.PropertyType AS EffectivePropertyType,
+    s.NormalizedFullAddress, s.UnitNumber, s.CondoUnit,
+    a.MARowCount, a.ValidMARowCount, s.DistinctAddrOnAccount AS MAStreetAddressCount,
+    s.PathType, s.GroupKey, s.IsValid, s.ReviewReason, s.ClassificationReason
+FROM #Stage s LEFT JOIN #AcctAddrCnt a ON a.AccountNumber = s.AccountNumber
+ORDER BY s.AccountNumber, s.SourceSystem, s.SourceRecordID;
+
 SELECT RunID = @AuditRunID, RunStatus = 'COMPLETED',
     RowsInserted = COALESCE(SUM(CASE WHEN OperationType = 'INSERT' THEN 1 ELSE 0 END), 0),
     RowsUpdated = COALESCE(SUM(CASE WHEN OperationType = 'UPDATE' THEN 1 ELSE 0 END), 0),

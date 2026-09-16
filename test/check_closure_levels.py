@@ -90,6 +90,56 @@ try:
     assert_quiet_rerun()
     print("PASS: new schema stores exact ancestor paths and root levels; unchanged rerun is quiet")
 
+    # Another_UPR_Illustration.docx: explicit Property > Buildings > Units/Condo.
+    # These parent relationships are supplied by the fixture, not inferred from
+    # MA/SDAT accounts. A child Condo keeps its own account and entity type.
+    sql("""
+DECLARE @Nodes TABLE (NodeID INT PRIMARY KEY, ParentID INT, Kind VARCHAR(20),
+    AccountNumber VARCHAR(50), UnitNumber VARCHAR(50), UPRID BIGINT);
+INSERT @Nodes (NodeID, ParentID, Kind, AccountNumber, UnitNumber) VALUES
+ (1, NULL, 'Property', '01231829', NULL), (2, 1, 'Building', NULL, NULL),
+ (3, 1, 'Building', NULL, NULL), (4, 2, 'Unit', NULL, 'Apt 101'),
+ (5, 2, 'Unit', NULL, 'Basement 2'), (6, 2, 'Unit', NULL, 'Loft 5'),
+ (7, 3, 'Unit', NULL, 'Building 5'), (8, 3, 'Unit', NULL, 'Apt 102'),
+ (9, 3, 'Condo', '08123748', NULL);
+DECLARE @NodeID INT = 1;
+WHILE @NodeID <= 9
+BEGIN
+    INSERT dbo.UPR (EntityTypeID, ParentUPRID, AccountNumber)
+    SELECT e.EntityTypeID, p.UPRID, n.AccountNumber FROM @Nodes n
+    INNER JOIN dbo.REF_ENTITYTYPE e ON e.Description = n.Kind
+    LEFT JOIN @Nodes p ON p.NodeID = n.ParentID WHERE n.NodeID = @NodeID;
+    UPDATE @Nodes SET UPRID = SCOPE_IDENTITY() WHERE NodeID = @NodeID;
+    SET @NodeID += 1;
+END;
+INSERT dbo.PROPERTY (UPRID, PropertyTypeID)
+SELECT n.UPRID, pt.PropertyTypeID FROM @Nodes n CROSS JOIN dbo.REF_PROPERTYTYPE pt
+WHERE n.NodeID = 1 AND pt.PropertyTypeCode = 'UNKNWN';
+INSERT dbo.BUILDING (UPRID, YearBuilt)
+SELECT UPRID, CASE NodeID WHEN 2 THEN 1968 ELSE 2025 END FROM @Nodes WHERE Kind = 'Building';
+INSERT dbo.UNIT (UPRID, BuildingID, UnitNumber)
+SELECT n.UPRID, b.BuildingID, n.UnitNumber FROM @Nodes n
+INNER JOIN @Nodes p ON p.NodeID = n.ParentID
+INNER JOIN dbo.BUILDING b ON b.UPRID = p.UPRID WHERE n.Kind = 'Unit';
+INSERT dbo.CONDO (UPRID) SELECT UPRID FROM @Nodes WHERE Kind = 'Condo';
+""")
+    load()
+    verify()
+    sql("""
+DECLARE @Root BIGINT = (SELECT UPRID FROM dbo.UPR WHERE AccountNumber = '01231829');
+DECLARE @Condo BIGINT = (SELECT UPRID FROM dbo.UPR WHERE AccountNumber = '08123748');
+IF (SELECT COUNT(*) FROM dbo.UPR_CLOSURE WHERE AncestorUPRID = @Root) <> 9
+   OR (SELECT COUNT(*) FROM dbo.UPR_CLOSURE WHERE DescendantUPRID = @Condo AND [Level] = 2) <> 3
+    THROW 51006, 'Illustrated Property tree or child Condo ancestor paths were lost.', 1;
+IF NOT EXISTS (SELECT 1 FROM dbo.CONDO c INNER JOIN dbo.UPR u ON u.UPRID = c.UPRID
+    INNER JOIN dbo.BUILDING b ON b.UPRID = u.ParentUPRID WHERE c.UPRID = @Condo)
+    THROW 51007, 'Illustrated Condo no longer belongs to its Building.', 1;
+""")
+    listing = run_file('scripts/list_upr_hierarchy.sql')
+    assert '01231829|08123748|Condo' in listing, 'Report lost the child Condo account or type'
+    assert_quiet_rerun()
+    print('PASS: illustrated nine-node tree retains child Condo account, parent, ancestor paths and report')
+
     # Reproduce an already populated two-column client closure table. Reinstall
     # auditing against that old shape to also test trigger behavior on upgrade.
     before = verify()

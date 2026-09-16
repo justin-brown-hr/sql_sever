@@ -47,7 +47,7 @@ check("Load Complex rule: MULTI + account + 2+ addresses",
       "DistinctAddrOnAccount" in load and "> 1" in load)
 check("Complex account keeps its condo rows in the Complex (no split Condo)",
       "IsComplexAccount" in load and "HasMultiFamilyRow" in load
-      and "AND s.IsComplexAccount = 1 THEN N'COMPLEX'" in load)
+      and "WHEN s.IsComplexAccount = 1 THEN N'COMPLEX'" in load)
 check("Load writes COMPLEX entity", "INSERT INTO dbo.COMPLEX" in load)
 check("Load writes PROPERTY entity", "INSERT INTO dbo.PROPERTY" in load)
 check("Load writes CONDO entity", "INSERT INTO dbo.CONDO" in load)
@@ -59,8 +59,8 @@ check("Load writes CONTACT + UPR_CONTACT",
       ("INSERT INTO dbo.CONTACT" in load or "MERGE dbo.CONTACT" in load)
       and "INSERT INTO dbo.UPR_CONTACT" in load)
 check("Load rebuilds UPR_CLOSURE", "INSERT INTO dbo.UPR_CLOSURE" in load)
-check("Load Review_Q uses new reason codes",
-      "MISSING PARCELID" in load and "NO_ADDRESS_MATCH" in load and "INSUFFICIENT_DATA" in load)
+check("Load Review_Q uses rejection reasons, without missing-parcel flags",
+      "MISSING PARCELID" not in load and "NO_ADDRESS_MATCH" in load and "INSUFFICIENT_DATA" in load)
 check("Load preflight requires COMPLEX", "COMPLEX" in load and "Preflight" in load)
 check("Load has TRY/CATCH", "BEGIN TRY" in load and "BEGIN CATCH" in load)
 check("Search procedure usp_UPR_Search", "usp_UPR_Search" in search)

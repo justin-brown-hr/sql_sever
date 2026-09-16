@@ -55,7 +55,7 @@ UPR hierarchical load COMPLETE
 The audit installer preserves existing records and starts auditing future writes.
 The load is safe to re-run: existing records are reused, not duplicated. Missing
 source UnitNumbers, names, State and ZIP values are not filled with guesses.
-For corrections to an existing load, follow `CLIENT_FIX_2026-09-10.md`.
+For corrections to an existing load, follow `CLIENT_FIX_2026-09-16.md`.
 
 ### Step 4 - Run the validation report
 

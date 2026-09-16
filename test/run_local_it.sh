@@ -73,3 +73,15 @@ CONTAINER="$CONTAINER" python3 "$ROOT/test/check_closure_levels.py"
 
 echo "### 15. audit run history, upgrade and readable row/field report"
 CONTAINER="$CONTAINER" python3 "$ROOT/test/check_audit_runs.py"
+
+echo "### 16. MA-first shared-account staging and existing Condo repair"
+CONTAINER="$CONTAINER" python3 "$ROOT/test/check_ma_precedence.py"
+
+echo "### 17. visible client spreadsheet rows for account 00255115"
+CONTAINER="$CONTAINER" python3 "$ROOT/test/check_client_00255115.py"
+
+echo "### 18. optional parcels and independent review reasons"
+CONTAINER="$CONTAINER" python3 "$ROOT/test/check_optional_parcel.py"
+
+echo "### 19. source coordinate pairs and legacy repair"
+CONTAINER="$CONTAINER" python3 "$ROOT/test/check_address_coordinates.py"
