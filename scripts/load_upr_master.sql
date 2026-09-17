@@ -300,6 +300,10 @@ GO
 SET NOCOUNT ON;
 SET XACT_ABORT ON;
 
+/* Results tab shows the statistical report. Set to 1 to also list every
+   staged source row and every audited row change (very large on full loads). */
+DECLARE @ShowDetailResults BIT = 0;
+
 DECLARE @RunUser     NVARCHAR(100) = SUSER_SNAME();
 DECLARE @AuditUser   NVARCHAR(128) = COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(128), SUSER_SNAME()))), N''), N'SYSTEM');
 /* Truncated to the second: assigning SYSDATETIME() to DATETIME2(0) ROUNDS,
@@ -2097,26 +2101,80 @@ PRINT N'Elapsed seconds              : '
 PRINT N'NOTE: Safe to re-run - existing UPRs are reused, not duplicated.';
 PRINT N'================================================================';
 
-/* Show actual committed row events for this run, including their full values.
-   list_upr_audit.sql also offers a field-by-field view and edits outside loads. */
-PRINT N'Staging classification - MA account decisions and source-row routing';
-SELECT RunID = @AuditRunID, s.SourceSystem, s.SourceRecordID, s.AccountNumber,
-    s.RawPropertyType, s.PropertyType AS EffectivePropertyType,
-    s.NormalizedFullAddress, s.UnitNumber, s.CondoUnit,
-    a.MARowCount, a.ValidMARowCount, s.DistinctAddrOnAccount AS MAStreetAddressCount,
-    s.PathType, s.GroupKey, s.IsValid, s.ReviewReason, s.ClassificationReason
-FROM #Stage s LEFT JOIN #AcctAddrCnt a ON a.AccountNumber = s.AccountNumber
-ORDER BY s.AccountNumber, s.SourceSystem, s.SourceRecordID;
+/* Results tab: statistical report first. Row-level detail grids can reach
+   millions of rows on a full load, so they appear only when requested. */
+SELECT [Order], Section, Metric, [Value]
+FROM (VALUES
+    ( 1, N'Run',     N'Audit RunID',                     CONVERT(NVARCHAR(36), @AuditRunID)),
+    ( 2, N'Run',     N'Status',                          N'COMPLETED'),
+    ( 3, N'Run',     N'Started',                         CONVERT(NVARCHAR(30), @BatchStart, 120)),
+    ( 4, N'Run',     N'Elapsed seconds',                 CONVERT(NVARCHAR(20), DATEDIFF(SECOND, @BatchStart, SYSDATETIME()))),
+    ( 5, N'Source',  N'MA rows read',                    CONVERT(NVARCHAR(20), @MARead)),
+    ( 6, N'Source',  N'SDAT rows read',                  CONVERT(NVARCHAR(20), @SDATRead)),
+    ( 7, N'Source',  N'Stage rows',                      CONVERT(NVARCHAR(20), @StageRows)),
+    ( 8, N'Source',  N'Valid loadable rows',             CONVERT(NVARCHAR(20), @ValidRows)),
+    ( 9, N'Source',  N'Invalid rows',                    CONVERT(NVARCHAR(20), @InvalidRows)),
+    (10, N'Source',  N'Review_Q inserted',               CONVERT(NVARCHAR(20), @ReviewInserted)),
+    (11, N'Groups',  N'COMPLEX groups',                  CONVERT(NVARCHAR(20), @ComplexGroups)),
+    (12, N'Groups',  N'PROPERTY groups',                 CONVERT(NVARCHAR(20), @PropertyGroups)),
+    (13, N'Groups',  N'CONDO groups',                    CONVERT(NVARCHAR(20), @CondoGroups)),
+    (14, N'Written', N'New parent UPRs',                 CONVERT(NVARCHAR(20), @ParentInserted)),
+    (15, N'Written', N'COMPLEX inserted',                CONVERT(NVARCHAR(20), @ComplexInserted)),
+    (16, N'Written', N'PROPERTY inserted',               CONVERT(NVARCHAR(20), @PropertyInserted)),
+    (17, N'Written', N'CONDO inserted',                  CONVERT(NVARCHAR(20), @CondoInserted)),
+    (18, N'Written', N'Building UPRs (new this run)',    CONVERT(NVARCHAR(20), @BuildingInserted)),
+    (19, N'Written', N'UNIT rows inserted',              CONVERT(NVARCHAR(20), @UnitInserted)),
+    (20, N'Written', N'ADDRESS rows inserted',           CONVERT(NVARCHAR(20), @AddressInserted)),
+    (21, N'Written', N'CONTACT rows inserted',           CONVERT(NVARCHAR(20), @ContactInserted)),
+    (22, N'Written', N'UPR_CONTACT rows inserted',       CONVERT(NVARCHAR(20), @UPRContactInserted)),
+    (23, N'Written', N'XREF inserted',                   CONVERT(NVARCHAR(20), @XrefInserted)),
+    (24, N'Written', N'UPR_CLOSURE rows (total)',        CONVERT(NVARCHAR(20), @ClosureRows)),
+    (25, N'Written', N'StatusHistory inserted',          CONVERT(NVARCHAR(20), @StatusHistInserted))
+) v([Order], Section, Metric, [Value])
+ORDER BY [Order];
 
-SELECT RunID = @AuditRunID, RunStatus = 'COMPLETED',
-    RowsInserted = COALESCE(SUM(CASE WHEN OperationType = 'INSERT' THEN 1 ELSE 0 END), 0),
-    RowsUpdated = COALESCE(SUM(CASE WHEN OperationType = 'UPDATE' THEN 1 ELSE 0 END), 0),
-    RowsDeleted = COALESCE(SUM(CASE WHEN OperationType = 'DELETE' THEN 1 ELSE 0 END), 0)
-FROM dbo.AuditLog WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD';
-SELECT AuditID, RunID, EntityName AS TableName, EntityKey AS RecordKey,
-    OperationType AS Action, ChangedDate, ChangedBy, OldValues, NewValues
-FROM dbo.AuditLog WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD'
-ORDER BY AuditID;
+/* Where the incoming rows went, and why rows were sent to review. */
+SELECT s.SourceSystem, s.PathType,
+    CASE WHEN s.IsValid = 1 THEN N'Loaded' ELSE N'Review' END AS Outcome,
+    COALESCE(s.ReviewReason, N'') AS ReviewReason, COUNT(*) AS SourceRows
+FROM #Stage s
+GROUP BY s.SourceSystem, s.PathType, s.IsValid, s.ReviewReason
+ORDER BY s.SourceSystem, Outcome, s.PathType, ReviewReason;
+
+/* Row changes this run, one line per table (details: list_upr_audit.sql). */
+SELECT TableName, RowsInserted, RowsUpdated, RowsDeleted
+FROM (
+    SELECT SortGroup = 0, TableName = EntityName,
+        RowsInserted = SUM(CASE WHEN OperationType = 'INSERT' THEN 1 ELSE 0 END),
+        RowsUpdated = SUM(CASE WHEN OperationType = 'UPDATE' THEN 1 ELSE 0 END),
+        RowsDeleted = SUM(CASE WHEN OperationType = 'DELETE' THEN 1 ELSE 0 END)
+    FROM dbo.AuditLog WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD'
+    GROUP BY EntityName
+    UNION ALL
+    SELECT 1, N'TOTAL',
+        COALESCE(SUM(CASE WHEN OperationType = 'INSERT' THEN 1 ELSE 0 END), 0),
+        COALESCE(SUM(CASE WHEN OperationType = 'UPDATE' THEN 1 ELSE 0 END), 0),
+        COALESCE(SUM(CASE WHEN OperationType = 'DELETE' THEN 1 ELSE 0 END), 0)
+    FROM dbo.AuditLog WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD'
+) t
+ORDER BY SortGroup, TableName;
+
+IF @ShowDetailResults = 1
+BEGIN
+    PRINT N'Staging classification - MA account decisions and source-row routing';
+    SELECT RunID = @AuditRunID, s.SourceSystem, s.SourceRecordID, s.AccountNumber,
+        s.RawPropertyType, s.PropertyType AS EffectivePropertyType,
+        s.NormalizedFullAddress, s.UnitNumber, s.CondoUnit,
+        a.MARowCount, a.ValidMARowCount, s.DistinctAddrOnAccount AS MAStreetAddressCount,
+        s.PathType, s.GroupKey, s.IsValid, s.ReviewReason, s.ClassificationReason
+    FROM #Stage s LEFT JOIN #AcctAddrCnt a ON a.AccountNumber = s.AccountNumber
+    ORDER BY s.AccountNumber, s.SourceSystem, s.SourceRecordID;
+
+    SELECT AuditID, RunID, EntityName AS TableName, EntityKey AS RecordKey,
+        OperationType AS Action, ChangedDate, ChangedBy, OldValues, NewValues
+    FROM dbo.AuditLog WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD'
+    ORDER BY AuditID;
+END;
 
 END TRY
 BEGIN CATCH

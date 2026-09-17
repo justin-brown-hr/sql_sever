@@ -5,6 +5,31 @@ with `CLIENT_FIX_2026-09-16.md` and `CLIENT_REVIEW_2026-09-16.md` before continu
 It summarizes the work; it is not a transcript or confirmation of production
 acceptance. Later instructions from the user take precedence.
 
+## Latest client clarification (September 16, after handover)
+
+The client clarified that SDAT record 22265 was a system-design example and is
+not in the current 50,000-row incoming file. Obtaining that record is no longer
+an acceptance prerequisite for this delivery. Verify generic account/address/
+Unit grouping against the actual incoming file; the earlier example fixtures
+remain regression evidence only. The loader contains no special-case branch
+for record 22265 or account 00255115.
+
+The client's screenshot reports missing AuditLog columns RunID, SessionID,
+OldValues and NewValues at lines matching the current loader. The current audit
+installer adds all four columns and must complete in the same target database
+before loading. The screenshot does not establish whether installation was
+omitted, failed or targeted another database. The loader's prerequisite check
+does not prevent these same-batch column compilation errors.
+
+The client also reports adding UPR_CLOSURE.LevelNO. The current loader maintains
+[Level], not LevelNO. Obtain the added column's type, nullability, default and
+intended meaning before changing its handling; a required column without a
+default could block closure inserts. This is separate from the shown audit
+errors. No SQL changes or new integration run were made for this diagnosis.
+
+The moved workspace currently lacks the reviewed ZIP and docs directory listed
+below. Do not assume those ignored artifacts were transferred.
+
 ## Moving the project
 
 1. Copy the entire SQL project folder to the new workspace, including hidden
