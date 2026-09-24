@@ -68,7 +68,7 @@ WHERE @NormAccount IS NULL
    OR EXISTS (
         SELECT 1
         FROM dbo.UPR_CLOSURE cl
-        INNER JOIN dbo.UPR root ON root.UPRID = cl.AncestorUPRID
+        INNER JOIN dbo.UPR root ON root.UPRID = cl.UPRAncestry
         WHERE cl.DescendantUPRID = u.UPRID
           AND root.ParentUPRID IS NULL
           AND root.AccountNumber = @NormAccount
@@ -175,7 +175,6 @@ SELECT
                 + COALESCE(
                       cx.CommunityName,
                       p.PropertyName,
-                      d.CondoName,
                       b.BuildingName,
                       un.UnitNumber,
                       ad.UnitNumber,
@@ -194,11 +193,13 @@ SELECT
     StatusCode    = t.StatusCode,
     CommunityName = cx.CommunityName,
     PropertyName  = p.PropertyName,
-    CondoName     = d.CondoName,
     BuildingName  = b.BuildingName,
     UnitNumber    = COALESCE(un.UnitNumber, ad.UnitNumber),
     PropertyType  = COALESCE(pt.PropertyTypeCode, cxt.PropertyTypeCode),
-    Parcel        = COALESCE(p.Parcel, d.Parcel),
+    Parcel        = COALESCE(p.Parcel, condoParcel.Parcel),
+    ParcelSource  = CASE WHEN p.Parcel IS NOT NULL THEN N'PROPERTY'
+                        WHEN condoLegacy.Parcel IS NOT NULL THEN N'Archived CONDO value'
+                        WHEN condoLegacy.CondoID IS NULL AND condoHistory.ParcelID IS NOT NULL THEN N'Load history' END,
     YearBuilt     = b.YearBuilt,
     Address       = a.NormalizedAddress,
     StreetNumber  = a.StreetNumber,
@@ -214,6 +215,15 @@ INNER JOIN dbo.REF_ENTITYTYPE e ON e.EntityTypeID = t.EntityTypeID
 LEFT JOIN dbo.COMPLEX  cx ON cx.UPRID = t.UPRID
 LEFT JOIN dbo.PROPERTY p  ON p.UPRID  = t.UPRID
 LEFT JOIN dbo.CONDO    d  ON d.UPRID  = t.UPRID
+LEFT JOIN dbo.UPR_CONDO_LEGACY condoLegacy ON condoLegacy.CondoID = d.CondoID AND condoLegacy.UPRID = t.UPRID
+OUTER APPLY (
+    SELECT TOP (1) h.ParcelID
+    FROM dbo.UPRSTATUSHISTORY h
+    WHERE d.CondoID IS NOT NULL AND h.UPRID = t.UPRID AND h.ChangeSource = N'HIER_LOAD'
+    ORDER BY h.ChangedDate DESC, h.UPRStatusHistoryID DESC
+) condoHistory
+CROSS APPLY (SELECT Parcel = CASE WHEN condoLegacy.CondoID IS NOT NULL
+    THEN CONVERT(NVARCHAR(50), condoLegacy.Parcel) ELSE condoHistory.ParcelID END) condoParcel
 LEFT JOIN dbo.BUILDING b  ON b.UPRID  = t.UPRID
 LEFT JOIN dbo.UNIT     un ON un.UPRID = t.UPRID
 LEFT JOIN dbo.ADU      ad ON ad.UPRID = t.UPRID
@@ -231,14 +241,14 @@ OUTER APPLY (
         SELECT ua.AddressID, ua.IsPrimary, ua.UPRAddressID, Pri = 1
         FROM dbo.UPR_CLOSURE cl
         INNER JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = cl.DescendantUPRID
-        WHERE cl.AncestorUPRID = t.UPRID
+        WHERE cl.UPRAncestry = t.UPRID
           AND cl.DescendantUPRID <> t.UPRID
         UNION ALL
         SELECT ua.AddressID, ua.IsPrimary, ua.UPRAddressID, Pri = 2
         FROM dbo.UPR_CLOSURE cl
-        INNER JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = cl.AncestorUPRID
+        INNER JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = cl.UPRAncestry
         WHERE cl.DescendantUPRID = t.UPRID
-          AND cl.AncestorUPRID <> t.UPRID
+          AND cl.UPRAncestry <> t.UPRID
     ) rel
     INNER JOIN dbo.ADDRESS addr ON addr.AddressID = rel.AddressID
     ORDER BY rel.Pri, rel.IsPrimary DESC, rel.UPRAddressID
@@ -299,7 +309,7 @@ FROM (
            OR u.AccountNumber = @NormAccount
            OR EXISTS (
                 SELECT 1 FROM dbo.UPR_CLOSURE cl
-                INNER JOIN dbo.UPR root ON root.UPRID = cl.AncestorUPRID
+                INNER JOIN dbo.UPR root ON root.UPRID = cl.UPRAncestry
                 WHERE cl.DescendantUPRID = u.UPRID
                   AND root.ParentUPRID IS NULL
                   AND root.AccountNumber = @NormAccount
@@ -354,7 +364,7 @@ FROM (
            OR u.AccountNumber = @NormAccount
            OR EXISTS (
                 SELECT 1 FROM dbo.UPR_CLOSURE cl
-                INNER JOIN dbo.UPR root ON root.UPRID = cl.AncestorUPRID
+                INNER JOIN dbo.UPR root ON root.UPRID = cl.UPRAncestry
                 WHERE cl.DescendantUPRID = u.UPRID
                   AND root.ParentUPRID IS NULL
                   AND root.AccountNumber = @NormAccount

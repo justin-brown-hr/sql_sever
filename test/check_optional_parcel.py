@@ -66,7 +66,6 @@ IF (SELECT COUNT(*) FROM #Stage WHERE IsValid = 1 AND ParcelID IS NULL AND Revie
 IF (SELECT COUNT(*) FROM dbo.UPR WHERE ParentUPRID IS NULL) <> 20
     THROW 51301, 'Optional-parcel records failed to load or created extra parents.', 1;
 IF EXISTS (SELECT 1 FROM dbo.PROPERTY WHERE Parcel IS NOT NULL)
-   OR EXISTS (SELECT 1 FROM dbo.CONDO WHERE Parcel IS NOT NULL)
     THROW 51302, 'A missing parcel was replaced with a fabricated value.', 1;
 IF (SELECT COUNT(*) FROM dbo.EXTERNAL_IDENTIFIER_XREF WHERE IdentifierType = 'SOURCE_RECORD_ID') <> 22
     THROW 51303, 'Accepted records lost source links.', 1;

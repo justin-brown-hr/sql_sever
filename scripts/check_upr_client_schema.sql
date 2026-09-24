@@ -8,13 +8,17 @@ SELECT @@SERVERNAME AS ServerName, DB_NAME() AS DatabaseName;
 WITH RequiredColumns AS (
     SELECT TableName, ColumnName
     FROM (VALUES
-        (N'UPR_CLOSURE', N'AncestorUPRID'),
+        (N'UPR_CLOSURE', N'UPRAncestry'),
         (N'UPR_CLOSURE', N'DescendantUPRID'),
         (N'UPR_CLOSURE', N'Level'),
-        (N'AuditLog', N'RunID'),
-        (N'AuditLog', N'SessionID'),
-        (N'AuditLog', N'OldValues'),
-        (N'AuditLog', N'NewValues'),
+        (N'AUDIT_LOG', N'UPRID'),
+        (N'AUDIT_LOG', N'EntityID'),
+        (N'AUDIT_LOG', N'EntityRecordID'),
+        (N'REF_ENTITY_IDENTIFICATION', N'EntityID'),
+        (N'AUDIT_LOG', N'RunID'),
+        (N'AUDIT_LOG', N'SessionID'),
+        (N'AUDIT_LOG', N'OldValues'),
+        (N'AUDIT_LOG', N'NewValues'),
         (N'UPR_LOAD_RUN', N'RunID'),
         (N'UPR_LOAD_RUN', N'RunStatus'),
         (N'UPR_LOAD_RUN', N'StartedAt'),

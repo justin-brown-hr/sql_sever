@@ -5,13 +5,16 @@ SQL Server integration that loads **AddressMaster** and **SDAT** into the **hier
 **Model:** `docs/NewUPRTABLEUSED.docx` + `docs/Response.docx` (COMPLEX).  
 **Old flat model** archived under `legacy/` for reference only - do not run it.
 
-Latest update: [optional parcels and supplied illustrations](CLIENT_FIX_2026-09-16.md).
-Use `UPR_Corrections_2026-09-16_Reviewed.zip`; it also corrects the coordinate
-pair defect found during the client-perspective review.
+Latest update: [September 17 review implementation](CLIENT_UPDATE_2026-09-23.md).
+Package: `UPR_Corrections_2026-09-23_Review_Update.zip`.
+See [review findings and corrections](CLIENT_REVIEW_FEEDBACK_2026-09-23.md).
+Includes MA/SDAT overlap matching, `BLV` normalization, guarded existing-duplicate
+repair, Condo column removal, `UPRAncestry`, and normalized auditing.
+**Static checks pass; the updated integration suite is pending a SQL Server runtime.**
 
 ## Requirements
 
-- SQL Server 2016 or later
+- SQL Server 2016 SP1 or later; database compatibility level 130+ for audit migration/JSON
 - Target test DB (edit `USE` in scripts): e.g. `UPRXDB_TEST`
 
 ## Project Structure
@@ -41,14 +44,15 @@ SQL/
 ```
 
 For the latest corrections on an existing database, follow
-[CLIENT_FIX_2026-09-16.md](CLIENT_FIX_2026-09-16.md),
+[CLIENT_UPDATE_2026-09-23.md](CLIENT_UPDATE_2026-09-23.md),
 including MA-first shared-account classification, guarded existing-Condo repair,
 per-run audit history and the automatic `UPR_CLOSURE.Level` upgrade. The client's source-only
 requirement supersedes the older generated-name conventions.
 
 ## Run Steps
 
-Everything at once (sample data by default; add `--real-data` to skip it):
+Everything at once (default upgrades an existing schema; `--sample-data` explicitly
+recreates a disposable schema and seeds test data):
 
 ```bash
 chmod +x scripts/run_all.sh
@@ -151,9 +155,9 @@ Each load step is commented in `scripts/load_upr_master.sql` (Steps 0-14).
 | Parcel number | Optional for both MA and SDAT. Missing, blank and recognized placeholder parcels stay NULL; they do not cause Review_Q before or after loading. Other rejection reasons still apply. Existing historical review entries are retained |
 | Complex rule | MA MultiFamily/Apartments + Account# + 2+ distinct MA street addresses -> COMPLEX. All valid rows on that account share its MA-derived type and Complex group, including mixed MA types and SDAT rows |
 | Shared MA/SDAT accounts | Classify MA first. Shared SDAT rows inherit a unique matching MA group; unmatched/ambiguous rows go to Review_Q. SDAT-only accounts retain their Condo path. No blanket deletion of SDAT source data |
-| Existing Condo correction | A single source-linked, unnamed Condo can be reclassified to Complex with UPR/Building/Unit IDs preserved. Competing or incompatible existing roots are queued for review without adding another hierarchy |
+| Existing Condo correction | A single source-linked Condo with no archived manually maintained name can be reclassified to Complex with UPR/Building/Unit IDs preserved. Competing or incompatible existing roots are queued for review without adding another hierarchy |
 | Condo rule | Condo parent (ParentUPRID NULL); Buildings and numbered Units are its children; Units link to their Building by BuildingID |
-| Unit numbers | Real incoming `CondoUnit` / MA `Unit` value when given. Every MULTI/APT/CONDO record still gets a Unit row even when blank: a Condo/SDAT record keeps `NULL` (the source column exists, just empty); an MA record with no unit-number field gets literal `N/A`. Never an invented `MA-<id>`/`SD-<id>` label - any leftover legacy one is repaired to the same convention |
+| Unit numbers | One unambiguous blank MA/SDAT pair at the same account/address shares one Unit (MA wins); both source links remain. Otherwise, real incoming `CondoUnit` / MA `Unit` value when given. Every MULTI/APT/CONDO record still gets a Unit row even when blank: a Condo/SDAT record keeps `NULL` (the source column exists, just empty); an MA record with no unit-number field gets literal `N/A`. Never an invented `MA-<id>`/`SD-<id>` label - any leftover legacy one is repaired to the same convention |
 | Record type | Blank `LUCategory` -> `UNKNWN` property type; never invented as SF |
 | Building names | NULL when the incoming tables supply no building name |
 | Complex name | NULL when the incoming tables supply no complex name |
@@ -161,7 +165,7 @@ Each load step is commented in `scripts/load_upr_master.sql` (Steps 0-14).
 | Addresses | Source street number/name create Building + Address regardless of record type; blank street type/city/ZIP do not block. Missing State/ZIP stay NULL. Direct Address links are added to parents and Units |
 | Closure Level | Descendant's depth from the root, matching report `LevelNo` (root 0, child 1, grandchild 2). All ancestor paths and self-links remain; the loader upgrades existing tables and repairs levels after reparenting |
 | Idempotency | Safe to re-run - existing UPR/XREF/contact rows are reused, not duplicated |
-| Audit | Run the updated `install_upr_audit.sql` first: row auditing on 22 UPR model/reference tables, full before/after values, RunID and session. `UPR_LOAD_RUN` retains completed/failed/empty runs; `list_upr_audit.sql` shows run history and row/field changes, including edits outside loads |
+| Audit | AUDIT_LOG stores numeric EntityID / EntityRecordID and live/original UPR IDs; REF_ENTITY_IDENTIFICATION stores entity names. AuditLog is a compatibility view. Run the updated `install_upr_audit.sql` first: row auditing on 23 UPR model/reference tables, full before/after values, RunID and session. `UPR_LOAD_RUN` retains completed/failed/empty runs; `list_upr_audit.sql` shows run history and row/field changes, including edits outside loads |
 
 ## Address Normalization
 
@@ -189,7 +193,7 @@ To reset data only, in dependency order:
 USE UPRXDB_TEST;
 DELETE FROM dbo.UPRMATCHREVIEW_Q;
 DELETE FROM dbo.UPRSTATUSHISTORY;
-DELETE FROM dbo.AuditLog;
+DELETE FROM dbo.AUDIT_LOG;
 DELETE FROM dbo.UPR_CLOSURE;
 DELETE FROM dbo.EXTERNAL_IDENTIFIER_XREF;
 DELETE FROM dbo.UPR_CONTACT;
@@ -228,5 +232,5 @@ The sample data (`test/local_it_setup.sql`) deliberately covers hostile cases:
 - Idempotent execution (re-run adds no rows)
 - Address normalization per client example
 - Statistics printed at end of load
-- INSERT/UPDATE/DELETE on the 22 UPR model/reference tables audited from installation onward; batch summaries and initial status history also retained
+- INSERT/UPDATE/DELETE on the 23 UPR model/reference tables audited from installation onward; batch summaries and initial status history also retained
 - Review queue for unmatched/insufficient records with mapped reasons

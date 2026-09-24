@@ -32,7 +32,13 @@ GO
    ============================================================================ */
 IF OBJECT_ID(N'dbo.UPRSTATUSHISTORY', N'U') IS NOT NULL DROP TABLE dbo.UPRSTATUSHISTORY;
 IF OBJECT_ID(N'dbo.UPRMATCHREVIEW_Q', N'U') IS NOT NULL DROP TABLE dbo.UPRMATCHREVIEW_Q;
+IF OBJECT_ID(N'dbo.AuditLog', N'V') IS NOT NULL DROP VIEW dbo.AuditLog;
 IF OBJECT_ID(N'dbo.AuditLog', N'U') IS NOT NULL DROP TABLE dbo.AuditLog;
+IF OBJECT_ID(N'dbo.AUDIT_LOG', N'U') IS NOT NULL DROP TABLE dbo.AUDIT_LOG;
+IF OBJECT_ID(N'dbo.AuditLog_PreSept17', N'U') IS NOT NULL DROP TABLE dbo.AuditLog_PreSept17;
+IF OBJECT_ID(N'dbo.AUDIT_ENTITY_RECORD', N'U') IS NOT NULL DROP TABLE dbo.AUDIT_ENTITY_RECORD;
+IF OBJECT_ID(N'dbo.REF_ENTITY_IDENTIFICATION', N'U') IS NOT NULL DROP TABLE dbo.REF_ENTITY_IDENTIFICATION;
+IF OBJECT_ID(N'dbo.UPR_CONDO_LEGACY', N'U') IS NOT NULL DROP TABLE dbo.UPR_CONDO_LEGACY;
 IF OBJECT_ID(N'dbo.UPR_LOAD_RUN', N'U') IS NOT NULL DROP TABLE dbo.UPR_LOAD_RUN;
 IF OBJECT_ID(N'dbo.UPR_CLOSURE', N'U') IS NOT NULL DROP TABLE dbo.UPR_CLOSURE;
 IF OBJECT_ID(N'dbo.UPR_CONTACT', N'U') IS NOT NULL DROP TABLE dbo.UPR_CONTACT;
@@ -294,9 +300,7 @@ CREATE TABLE dbo.CONDO
 (
     CondoID     BIGINT IDENTITY(1,1) NOT NULL,
     UPRID       BIGINT NOT NULL,
-    CondoName   VARCHAR(200) NULL,
     OwnerName   VARCHAR(200) NULL,
-    Parcel      VARCHAR(20) NULL,
     StatusCode  VARCHAR(20) NOT NULL CONSTRAINT DF_CONDO_StatusCode DEFAULT ('ACTIVE'),
     CreatedDate DATETIME2(0) NOT NULL CONSTRAINT DF_CONDO_CreatedDate DEFAULT (SYSUTCDATETIME()),
     UpdatedDate DATETIME2(0) NULL,
@@ -504,45 +508,86 @@ GO
    ============================================================================ */
 CREATE TABLE dbo.UPR_CLOSURE
 (
-    AncestorUPRID   BIGINT NOT NULL,
+    UPRAncestry   BIGINT NOT NULL,
     DescendantUPRID BIGINT NOT NULL,
     /* Descendant's depth from its root, matching the report's LevelNo. */
     [Level]        INT NOT NULL,
     CONSTRAINT CK_UPR_CLOSURE_Level CHECK ([Level] >= 0),
-    CONSTRAINT PK_UPR_CLOSURE PRIMARY KEY CLUSTERED (AncestorUPRID, DescendantUPRID),
-    CONSTRAINT FK_UPR_CLOSURE_Ancestor FOREIGN KEY (AncestorUPRID) REFERENCES dbo.UPR (UPRID),
+    CONSTRAINT PK_UPR_CLOSURE PRIMARY KEY CLUSTERED (UPRAncestry, DescendantUPRID),
+    CONSTRAINT FK_UPR_CLOSURE_Ancestor FOREIGN KEY (UPRAncestry) REFERENCES dbo.UPR (UPRID),
     CONSTRAINT FK_UPR_CLOSURE_Descendant FOREIGN KEY (DescendantUPRID) REFERENCES dbo.UPR (UPRID)
 );
 GO
 
-CREATE INDEX IX_UPR_CLOSURE_Descendant ON dbo.UPR_CLOSURE (DescendantUPRID, AncestorUPRID);
-CREATE INDEX IX_UPR_CLOSURE_Ancestor ON dbo.UPR_CLOSURE (AncestorUPRID) INCLUDE (DescendantUPRID);
+CREATE INDEX IX_UPR_CLOSURE_Descendant ON dbo.UPR_CLOSURE (DescendantUPRID, UPRAncestry);
+CREATE INDEX IX_UPR_CLOSURE_Ancestor ON dbo.UPR_CLOSURE (UPRAncestry) INCLUDE (DescendantUPRID);
 GO
 
 /* ============================================================================
    21. AuditLog
    ============================================================================ */
-CREATE TABLE dbo.AuditLog
+CREATE TABLE dbo.UPR_CONDO_LEGACY
 (
-    AuditID       INT IDENTITY(1,1) NOT NULL,
-    EntityName    NVARCHAR(100) NOT NULL,
-    EntityKey     NVARCHAR(200) NOT NULL,
-    OperationType NVARCHAR(20) NOT NULL,
-    ChangedBy     NVARCHAR(100) NOT NULL,
-    ChangedDate   DATETIME2(3) NOT NULL CONSTRAINT DF_AuditLog_ChangedDate DEFAULT (SYSDATETIME()),
-    ChangeSummary NVARCHAR(2000) NULL,
-    OldValues     NVARCHAR(MAX) NULL,
-    NewValues     NVARCHAR(MAX) NULL,
-    RunID         UNIQUEIDENTIFIER NULL,
-    SessionID     INT NULL,
-    CONSTRAINT PK_AuditLog PRIMARY KEY CLUSTERED (AuditID),
-    CONSTRAINT CK_AuditLog_OperationType CHECK (OperationType IN (
-        'INSERT', 'UPDATE', 'DELETE', 'MERGE', 'STATUS_CHANGE'
-    )),
-    /* 1-minute tolerance: DATETIME2(0) rounds up, so a value written as
-       SYSDATETIME() can land just after 'now' and fail a strict check */
-    CONSTRAINT CK_AuditLog_ChangedDate CHECK (ChangedDate <= DATEADD(MINUTE, 1, SYSDATETIME()))
+    CondoID BIGINT NOT NULL CONSTRAINT PK_UPR_CONDO_LEGACY PRIMARY KEY,
+    UPRID BIGINT NOT NULL,
+    CondoName VARCHAR(200) NULL,
+    Parcel VARCHAR(20) NULL,
+    ArchivedDate DATETIME2 NOT NULL DEFAULT (SYSUTCDATETIME())
 );
+GO
+CREATE TABLE dbo.REF_ENTITY_IDENTIFICATION
+(
+    EntityID INT IDENTITY(1,1) NOT NULL CONSTRAINT PK_REF_ENTITY_IDENTIFICATION PRIMARY KEY,
+    EntityName VARCHAR(100) NOT NULL CONSTRAINT UQ_REF_ENTITY_IDENTIFICATION_Name UNIQUE,
+    EntityDescription VARCHAR(250) NULL,
+    IsActive BIT NOT NULL DEFAULT (1),
+    CreatedDate DATETIME2 NOT NULL DEFAULT (SYSUTCDATETIME()),
+    CreatedBy VARCHAR(100) NOT NULL DEFAULT (ORIGINAL_LOGIN())
+);
+GO
+/* Negative IDs identify composite/text keys; nonnegative IDs are native row IDs.
+   The original key is always retained, including every closure-key component. */
+CREATE TABLE dbo.AUDIT_ENTITY_RECORD
+(
+    RecordID BIGINT IDENTITY(1,1) NOT NULL CONSTRAINT PK_AUDIT_ENTITY_RECORD PRIMARY KEY,
+    EntityID INT NOT NULL REFERENCES dbo.REF_ENTITY_IDENTIFICATION (EntityID),
+    EntityKey NVARCHAR(200) NOT NULL,
+    CONSTRAINT UQ_AUDIT_ENTITY_RECORD UNIQUE (EntityID, EntityKey)
+);
+GO
+CREATE TABLE dbo.AUDIT_LOG
+(
+    AuditLogID BIGINT IDENTITY(1,1) NOT NULL CONSTRAINT PK_AUDIT_LOG PRIMARY KEY,
+    UPRID BIGINT NULL,
+    OriginalUPRID BIGINT NULL,
+    EntityID INT NOT NULL REFERENCES dbo.REF_ENTITY_IDENTIFICATION (EntityID),
+    EntityRecordID BIGINT NOT NULL,
+    EntityKey NVARCHAR(200) NOT NULL,
+    ActionType VARCHAR(20) NOT NULL,
+    ChangedDate DATETIME2(3) NOT NULL DEFAULT (SYSDATETIME()),
+    ChangedBy NVARCHAR(100) NOT NULL,
+    OldValues NVARCHAR(MAX) NULL,
+    NewValues NVARCHAR(MAX) NULL,
+    RunID UNIQUEIDENTIFIER NULL,
+    SessionID INT NULL,
+    ChangeSummary NVARCHAR(2000) NULL,
+    /* Live FK clears on removal; OriginalUPRID and JSON retain event identity. */
+    CONSTRAINT FK_AUDIT_LOG_UPR FOREIGN KEY (UPRID) REFERENCES dbo.UPR (UPRID) ON DELETE SET NULL,
+    CONSTRAINT CK_AUDIT_LOG_Action CHECK (ActionType IN ('INSERT','UPDATE','DELETE','MERGE','STATUS_CHANGE'))
+);
+GO
+CREATE INDEX IX_AUDIT_LOG_RunID ON dbo.AUDIT_LOG (RunID, AuditLogID) INCLUDE (EntityID, ActionType);
+CREATE INDEX IX_AUDIT_LOG_Entity ON dbo.AUDIT_LOG (EntityID, EntityRecordID, AuditLogID);
+CREATE INDEX IX_AUDIT_LOG_UPRID ON dbo.AUDIT_LOG (UPRID, AuditLogID);
+CREATE INDEX IX_AUDIT_LOG_OriginalUPRID ON dbo.AUDIT_LOG (OriginalUPRID, AuditLogID);
+GO
+CREATE OR ALTER VIEW dbo.AuditLog AS
+SELECT a.AuditLogID AS AuditID, e.EntityName, a.EntityKey,
+    a.ActionType AS OperationType, a.ChangedBy, a.ChangedDate, a.ChangeSummary,
+    a.OldValues, a.NewValues, a.RunID, a.SessionID,
+    a.UPRID, a.OriginalUPRID, a.EntityID, a.EntityRecordID
+FROM dbo.AUDIT_LOG a
+JOIN dbo.REF_ENTITY_IDENTIFICATION e ON e.EntityID = a.EntityID;
 GO
 
 /* Load-run history is separate from row events, including empty/failed runs. */
@@ -559,8 +604,6 @@ CREATE TABLE dbo.UPR_LOAD_RUN
     ErrorMessage NVARCHAR(4000) NULL,
     CONSTRAINT CK_UPR_LOAD_RUN_Status CHECK (RunStatus IN ('RUNNING', 'COMPLETED', 'FAILED'))
 );
-GO
-CREATE INDEX IX_AuditLog_RunID ON dbo.AuditLog (RunID, AuditID) INCLUDE (EntityName, OperationType);
 GO
 
 /* ============================================================================
@@ -645,6 +688,8 @@ CREATE TABLE dbo.UPRSTATUSHISTORY
     ),
     CONSTRAINT CK_UPRStatusHistory_ChangedDate CHECK (ChangedDate <= DATEADD(MINUTE, 1, SYSDATETIME()))
 );
+GO
+CREATE INDEX IX_UPRSTATUSHISTORY_ParcelLookup ON dbo.UPRSTATUSHISTORY (UPRID, ChangeSource, ChangedDate DESC, UPRStatusHistoryID DESC) INCLUDE (ParcelID);
 GO
 
 /* ============================================================================

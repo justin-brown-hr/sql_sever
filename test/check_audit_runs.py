@@ -46,9 +46,15 @@ try:
     sql(script("ddl/03_new_upr_schema.sql"))
     # Reproduce the client's pre-upgrade AuditLog, with existing history.
     sql("""
-DROP INDEX IX_AuditLog_RunID ON dbo.AuditLog;
-ALTER TABLE dbo.AuditLog DROP COLUMN RunID, SessionID;
+DROP VIEW dbo.AuditLog;
+DROP TABLE dbo.AUDIT_LOG;
 DROP TABLE dbo.UPR_LOAD_RUN;
+CREATE TABLE dbo.AuditLog (
+    AuditID INT IDENTITY PRIMARY KEY, EntityName NVARCHAR(100) NOT NULL,
+    EntityKey NVARCHAR(200) NOT NULL, OperationType NVARCHAR(20) NOT NULL,
+    ChangedBy NVARCHAR(100) NOT NULL, ChangedDate DATETIME2 DEFAULT (SYSDATETIME()),
+    ChangeSummary NVARCHAR(2000) NULL, OldValues NVARCHAR(MAX) NULL, NewValues NVARCHAR(MAX) NULL
+);
 INSERT dbo.AuditLog (EntityName, EntityKey, OperationType, ChangedBy, ChangeSummary, OldValues, NewValues)
 VALUES ('UNIT', '{"UnitID":999}', 'UPDATE', 'legacy-test', 'KEEP HISTORY',
         '{"UnitNumber":"BEFORE"}', '{"UnitNumber":"AFTER"}');
@@ -61,7 +67,8 @@ IF (SELECT COUNT(*) FROM dbo.AuditLog) <> 1
     AND RunID IS NULL AND SessionID IS NULL AND JSON_VALUE(NewValues, '$.UnitNumber') = 'AFTER')
     THROW 51001, 'Upgrade lost or reattributed existing audit history.', 1;
 """)
-    output = sql(script("scripts/list_upr_audit.sql"))
+    sql(script("scripts/list_upr_audit.sql"))
+    output = sql("EXEC dbo.usp_UPR_AuditReport @TableName = N'UNIT';")
     assert "BEFORE|AFTER" in output, output[-4000:]
     print("PASS: existing audit history survives repeated installation and appears in the report", flush=True)
 
@@ -112,8 +119,9 @@ DELETE dbo.REF_ENTITYTYPE WHERE Description = 'Audit Delete';
 INSERT dbo.CONTACT (ContactTypeID, OrganizationName)
 SELECT TOP (1) ContactTypeID, 'AUDIT NULL TEST' FROM dbo.REF_CONTACTTYPE;
 UPDATE dbo.CONTACT SET OrganizationName = NULL WHERE OrganizationName = 'AUDIT NULL TEST';
-INSERT dbo.AuditLog (EntityName, EntityKey, OperationType, ChangedBy, OldValues, NewValues)
-VALUES ('REPORT_FIXTURE', '{}', 'UPDATE', 'test', '{"Text":null}',
+INSERT dbo.REF_ENTITY_IDENTIFICATION (EntityName) VALUES ('REPORT_FIXTURE');
+INSERT dbo.AUDIT_LOG (EntityID, EntityRecordID, EntityKey, ActionType, ChangedBy, OldValues, NewValues)
+VALUES ((SELECT EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName = 'REPORT_FIXTURE'), 1, '{"ID":1}', 'UPDATE', 'test', '{"Text":null}',
     N'{"Text":"' + REPLICATE(CONVERT(NVARCHAR(MAX), N'X'), 5000) + N'"}');
 """)
     output = sql("EXEC dbo.usp_UPR_AuditReport @TableName = N'CONTACT';")

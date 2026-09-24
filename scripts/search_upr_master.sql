@@ -76,7 +76,6 @@ BEGIN
             p.PropertyName,
             pt.PropertyTypeCode,
             p.OwnerName AS PropertyOwner,
-            c.CondoName,
             cx.CommunityName,
             b.BuildingName,
             b.YearBuilt,
@@ -95,6 +94,16 @@ BEGIN
         LEFT JOIN dbo.COMPLEX cx ON cx.UPRID = u.UPRID
         LEFT JOIN dbo.BUILDING b ON b.UPRID = u.UPRID
         LEFT JOIN dbo.UNIT un ON un.UPRID = u.UPRID
+        LEFT JOIN dbo.UPR_CONDO_LEGACY condoLegacy ON condoLegacy.CondoID = c.CondoID AND condoLegacy.UPRID = u.UPRID
+        OUTER APPLY (
+            SELECT TOP (1) h.ParcelID
+            FROM dbo.UPRSTATUSHISTORY h
+            WHERE c.CondoID IS NOT NULL AND h.UPRID = u.UPRID AND h.ChangeSource = N'HIER_LOAD'
+            ORDER BY h.ChangedDate DESC, h.UPRStatusHistoryID DESC
+        ) condoHistory
+        CROSS APPLY (SELECT Parcel = CASE WHEN condoLegacy.CondoID IS NOT NULL
+            THEN CONVERT(NVARCHAR(50), condoLegacy.Parcel) ELSE condoHistory.ParcelID END) condoParcel
+
         /* Addresses live on Building UPRs. Fall back through the hierarchy so
            parents (Complex/Property/Condo) show and match their first
            building's address, and units show their building's address. */
@@ -107,14 +116,14 @@ BEGIN
                        Pri = CASE WHEN ua.UPRID = u.UPRID THEN 0 ELSE 1 END
                 FROM dbo.UPR_CLOSURE cl
                 INNER JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = cl.DescendantUPRID
-                WHERE cl.AncestorUPRID = u.UPRID
+                WHERE cl.UPRAncestry = u.UPRID
                 UNION ALL
                 /* ancestor's address (units inherit from their building) */
                 SELECT ua.AddressID, ua.IsPrimary, ua.UPRAddressID, Pri = 2
                 FROM dbo.UPR_CLOSURE cl
-                INNER JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = cl.AncestorUPRID
+                INNER JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = cl.UPRAncestry
                 WHERE cl.DescendantUPRID = u.UPRID
-                  AND cl.AncestorUPRID <> u.UPRID
+                  AND cl.UPRAncestry <> u.UPRID
             ) rel
             INNER JOIN dbo.ADDRESS ad ON ad.AddressID = rel.AddressID
             ORDER BY rel.Pri, rel.IsPrimary DESC, rel.UPRAddressID
@@ -128,7 +137,7 @@ BEGIN
                     INNER JOIN dbo.REF_PROPERTYTYPE pt2 ON pt2.PropertyTypeID = cx2.PropertyTypeID
                     WHERE cx2.UPRID = u.UPRID AND pt2.PropertyTypeCode = @PropertyTypeCode
                ))
-          AND (@ParcelID IS NULL OR p.Parcel = @ParcelID OR c.Parcel = @ParcelID)
+          AND (@ParcelID IS NULL OR p.Parcel = @ParcelID OR condoParcel.Parcel = @ParcelID)
           AND (@OwnerName IS NULL
                OR p.OwnerName LIKE N'%' + @OwnerName + N'%'
                OR c.OwnerName LIKE N'%' + @OwnerName + N'%'
@@ -176,20 +185,20 @@ BEGIN
         PRINT N'--- Hierarchy (UPR_CLOSURE descendants for matching parents) ---';
 
         SELECT TOP (@Top)
-            c.AncestorUPRID,
+            c.UPRAncestry,
             aet.Description AS AncestorEntityType,
             c.DescendantUPRID,
             det.Description AS DescendantEntityType,
             d.AccountNumber AS DescendantAccount
         FROM dbo.UPR_CLOSURE c
-        INNER JOIN dbo.UPR a ON a.UPRID = c.AncestorUPRID
+        INNER JOIN dbo.UPR a ON a.UPRID = c.UPRAncestry
         INNER JOIN dbo.UPR d ON d.UPRID = c.DescendantUPRID
         INNER JOIN dbo.REF_ENTITYTYPE aet ON aet.EntityTypeID = a.EntityTypeID
         INNER JOIN dbo.REF_ENTITYTYPE det ON det.EntityTypeID = d.EntityTypeID
-        WHERE c.AncestorUPRID <> c.DescendantUPRID
+        WHERE c.UPRAncestry <> c.DescendantUPRID
           AND (@NormAccount IS NULL OR a.AccountNumber = @NormAccount OR d.AccountNumber = @NormAccount)
           AND (@EntityType IS NULL OR aet.Description = @EntityType)
-        ORDER BY c.AncestorUPRID, c.DescendantUPRID;
+        ORDER BY c.UPRAncestry, c.DescendantUPRID;
     END;
 
     PRINT N'';

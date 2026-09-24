@@ -8,9 +8,10 @@
 
   Steps for a real-data test:
     1. Load YOUR data into dbo.MAIncomingTableX1 and dbo.SDATIncomingTableX1
-    2. Run ddl/03_new_upr_schema.sql (first time only)
+    2. Run scripts/install_upr_audit.sql (migrate existing schema/install auditing)
     3. Run scripts/load_upr_master.sql
     4. Run THIS script to review results
+    For an empty disposable database only, create the DDL before step 2.
 
   EDIT the USE line if your database name differs.
 ================================================================================
@@ -193,11 +194,11 @@ INSERT #V VALUES (CASE WHEN @n = @m THEN 'PASS' ELSE 'FAIL' END,
 /* closure table complete */
 SELECT @n = COUNT(*) FROM dbo.UPR u
 WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_CLOSURE c
-                  WHERE c.AncestorUPRID = u.UPRID AND c.DescendantUPRID = u.UPRID);
+                  WHERE c.UPRAncestry = u.UPRID AND c.DescendantUPRID = u.UPRID);
 SELECT @m = COUNT(*) FROM dbo.UPR u
 WHERE u.ParentUPRID IS NOT NULL
   AND NOT EXISTS (SELECT 1 FROM dbo.UPR_CLOSURE c
-                  WHERE c.AncestorUPRID = u.ParentUPRID AND c.DescendantUPRID = u.UPRID);
+                  WHERE c.UPRAncestry = u.ParentUPRID AND c.DescendantUPRID = u.UPRID);
 INSERT #V VALUES (CASE WHEN @n + @m = 0 THEN 'PASS' ELSE 'FAIL' END,
     'Hierarchy closure table complete', CONVERT(VARCHAR(20), @n + @m) + ' missing rows');
 
@@ -222,8 +223,8 @@ WHERE tr.name = N'tr_UPR_Audit_' + OBJECT_NAME(tr.parent_id) AND tr.is_disabled 
   AND OBJECT_DEFINITION(tr.object_id) LIKE N'%UPR_AuditRunID%'
   AND (SELECT COUNT(*) FROM sys.trigger_events ev WHERE ev.object_id = tr.object_id
        AND ev.type_desc IN (N'INSERT', N'UPDATE', N'DELETE')) = 3;
-INSERT #V VALUES (CASE WHEN @n = 22 THEN 'PASS' ELSE 'FAIL' END,
-    'Persistent row audit triggers installed', CONVERT(VARCHAR(20), @n) + ' of 22 UPR model/reference tables');
+INSERT #V VALUES (CASE WHEN @n = 23 THEN 'PASS' ELSE 'FAIL' END,
+    'Persistent row audit triggers installed', CONVERT(VARCHAR(20), @n) + ' of 23 UPR model/reference tables');
 SELECT @n = COUNT(*) FROM dbo.AuditLog WHERE EntityName <> 'UPR_HIER_LOAD';
 INSERT #V VALUES (CASE WHEN @n > 0 THEN 'PASS' ELSE 'N/A' END,
     'Individual row audit events recorded', CONVERT(VARCHAR(20), @n) + ' events since audit installation');
@@ -255,7 +256,7 @@ BEGIN
         Address       = a.NormalizedAddress,
         OwnerContact  = ct.OrganizationName
     FROM dbo.UPR root
-    INNER JOIN dbo.UPR_CLOSURE cl ON cl.AncestorUPRID = root.UPRID
+    INNER JOIN dbo.UPR_CLOSURE cl ON cl.UPRAncestry = root.UPRID
     INNER JOIN dbo.UPR u ON u.UPRID = cl.DescendantUPRID
     INNER JOIN dbo.REF_ENTITYTYPE e ON e.EntityTypeID = u.EntityTypeID
     LEFT JOIN dbo.COMPLEX cx ON cx.UPRID = u.UPRID
@@ -267,7 +268,7 @@ BEGIN
     LEFT JOIN dbo.CONTACT ct ON ct.ContactID = uc.ContactID
     WHERE root.AccountNumber = @SampleAccount
       AND root.ParentUPRID IS NULL
-    ORDER BY cl.AncestorUPRID, u.ParentUPRID, u.UPRID;
+    ORDER BY cl.UPRAncestry, u.ParentUPRID, u.UPRID;
 END;
 
 PRINT N'';

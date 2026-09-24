@@ -1,3 +1,33 @@
+# Current continuation — September 23, 2026
+
+The September 17 review is implemented in the working tree. A subsequent client-eye
+review corrected runner reset defaults, Condo parcel lookup, closure audit identity,
+report output size, and blank-unit key collisions. Read
+`CLIENT_REVIEW_FEEDBACK_2026-09-23.md`; the ZIP was refreshed in place. Read
+`CLIENT_UPDATE_2026-09-23.md` for the current contract, migration order and limits.
+The dated handover below describes the prior version and its historical tests.
+
+- Review source: root `Reviewsin Sept17_Run.docx`, including eight screenshots.
+- Correct overlap inventories: 00050037 -> 3 Buildings/3 Units; 00261025 -> 3/3.
+  Preserve 00050048 -> 7/7 and 00272520 -> 4/4 in the document fixtures.
+- New installer migrates schema and audit history atomically; run it before the
+  new loader. Physical audit table is AUDIT_LOG, with EntityID FK to
+  REF_ENTITY_IDENTIFICATION, numeric record identity, live/original UPR IDs,
+  old/new JSON and retained run metadata. AuditLog is a compatibility read view.
+- Original audit data remains in AuditLog_PreSept17; removed Condo name/parcel
+  values are archived in UPR_CONDO_LEGACY. Closure uses UPRAncestry.
+- New duplicate repair retains MA IDs for unambiguous blank source pairs;
+  unsafe existing pairs remain with a review entry. Both source links remain.
+- Static checks pass. No SQL Server integration execution has occurred for this
+  update: this workspace has no Docker, sqlcmd or SQL Server runtime. A question
+  about a disposable test instance was sent to the user; no answer yet.
+- `test/check_sept17_review.py` runs the actual fdba4d0 baseline and the new
+  migration; it is phase 20 of `test/run_local_it.sh`.
+- Current candidate package: UPR_Corrections_2026-09-23_Review_Update.zip.
+  Do not call it database-validated until the updated integration suite passes.
+
+---
+
 # UPR session handover - September 16, 2026
 
 This file carries the project context into a new workspace. Read it together

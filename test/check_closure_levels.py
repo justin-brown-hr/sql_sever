@@ -34,7 +34,7 @@ def load():
 
 def closure():
     return {tuple(map(int, line.split("|"))) for line in sql(
-        "SELECT AncestorUPRID, DescendantUPRID, [Level] FROM dbo.UPR_CLOSURE;"
+        "SELECT UPRAncestry, DescendantUPRID, [Level] FROM dbo.UPR_CLOSURE;"
     ).splitlines() if line.strip()}
 
 
@@ -128,7 +128,7 @@ INSERT dbo.CONDO (UPRID) SELECT UPRID FROM @Nodes WHERE Kind = 'Condo';
     sql("""
 DECLARE @Root BIGINT = (SELECT UPRID FROM dbo.UPR WHERE AccountNumber = '01231829');
 DECLARE @Condo BIGINT = (SELECT UPRID FROM dbo.UPR WHERE AccountNumber = '08123748');
-IF (SELECT COUNT(*) FROM dbo.UPR_CLOSURE WHERE AncestorUPRID = @Root) <> 9
+IF (SELECT COUNT(*) FROM dbo.UPR_CLOSURE WHERE UPRAncestry = @Root) <> 9
    OR (SELECT COUNT(*) FROM dbo.UPR_CLOSURE WHERE DescendantUPRID = @Condo AND [Level] = 2) <> 3
     THROW 51006, 'Illustrated Property tree or child Condo ancestor paths were lost.', 1;
 IF NOT EXISTS (SELECT 1 FROM dbo.CONDO c INNER JOIN dbo.UPR u ON u.UPRID = c.UPRID

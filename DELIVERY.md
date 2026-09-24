@@ -1,3 +1,6 @@
+> Historical delivery notes. For the current schema, migration order and verification status,
+> see [September 23 update](CLIENT_UPDATE_2026-09-23.md). Earlier test passes do not validate this update.
+
 # UPR Master Load - Delivery Package (Hierarchical Model)
 
 **Project:** Unified Property Record (UPR) - Hierarchical Load

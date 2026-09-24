@@ -1,6 +1,7 @@
 /*
   Row-change report. Run after install_upr_audit.sql; safe on existing data.
-  Default: all retained load runs and row events, including edits outside loads.
+  Opening this file shows the latest run without field expansion.
+  The procedure supports retained history and edits outside loads with filters.
   Change the EXEC parameters at the bottom to select one run/table/date range.
   Result sets: load runs, changed rows, individual changed fields.
   Old audit rows retain their original values; unknown run/session stays NULL.
@@ -18,7 +19,9 @@ CREATE OR ALTER PROCEDURE dbo.usp_UPR_AuditReport
     @TableName NVARCHAR(100) = NULL,
     @Since DATETIME2(3) = NULL,
     @Until DATETIME2(3) = NULL, -- exclusive
-    @IncludeFieldDetails BIT = 1
+    @IncludeFieldDetails BIT = 1,
+    @UPRID BIGINT = NULL,
+    @EntityID INT = NULL
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -35,16 +38,28 @@ BEGIN
         END;
     END;
 
-    /* One snapshot of the selected events feeds all three result sets. */
-    SELECT AuditID, RunID, SessionID, EntityName, EntityKey, OperationType,
-        ChangedDate, ChangedBy, OldValues, NewValues
+    /* Resolve the entity name once; event filters use integer IDs. */
+    IF @TableName IS NOT NULL
+    BEGIN
+        DECLARE @NamedEntityID INT = (SELECT EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName = @TableName);
+        IF @NamedEntityID IS NULL OR (@EntityID IS NOT NULL AND @EntityID <> @NamedEntityID)
+            SET @EntityID = -1;
+        ELSE SET @EntityID = @NamedEntityID;
+    END;
+    DECLARE @SummaryEntityID INT = (SELECT EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName = 'UPR_HIER_LOAD');
+    SELECT a.AuditLogID AS AuditID, a.RunID, a.SessionID, e.EntityName, a.EntityKey,
+        a.ActionType AS OperationType, a.ChangedDate, a.ChangedBy, a.OldValues, a.NewValues,
+        a.UPRID, a.OriginalUPRID, a.EntityID, a.EntityRecordID
     INTO #AuditEvents
-    FROM dbo.AuditLog
-    WHERE EntityName <> N'UPR_HIER_LOAD'
-      AND (@RunID IS NULL OR RunID = @RunID)
-      AND (@TableName IS NULL OR EntityName = @TableName)
-      AND (@Since IS NULL OR ChangedDate >= @Since)
-      AND (@Until IS NULL OR ChangedDate < @Until);
+    FROM dbo.AUDIT_LOG a
+    JOIN dbo.REF_ENTITY_IDENTIFICATION e ON e.EntityID = a.EntityID
+    WHERE (@SummaryEntityID IS NULL OR a.EntityID <> @SummaryEntityID)
+      AND (@RunID IS NULL OR a.RunID = @RunID)
+      AND (@EntityID IS NULL OR a.EntityID = @EntityID)
+      AND (@UPRID IS NULL OR a.OriginalUPRID = @UPRID OR a.UPRID = @UPRID)
+      AND (@Since IS NULL OR a.ChangedDate >= @Since)
+      AND (@Until IS NULL OR a.ChangedDate < @Until)
+    OPTION (RECOMPILE);
 
     PRINT N'Load runs (row-change counts reflect the selected report filters)';
     SELECT r.RunID, r.StartedAt, r.FinishedAt, r.RunStatus, r.StartedBy,
@@ -61,13 +76,13 @@ BEGIN
         FROM #AuditEvents GROUP BY RunID
     ) a ON a.RunID = r.RunID
     WHERE (@RunID IS NULL OR r.RunID = @RunID)
-      AND (@TableName IS NULL OR a.RunID IS NOT NULL)
+      AND ((@EntityID IS NULL AND @UPRID IS NULL) OR a.RunID IS NOT NULL)
       AND (@Since IS NULL OR r.StartedAt >= @Since OR a.RunID IS NOT NULL)
       AND (@Until IS NULL OR r.StartedAt < @Until OR a.RunID IS NOT NULL)
     ORDER BY r.StartedAt DESC, r.RunID;
 
     PRINT N'Changed rows - one record per row event';
-    SELECT AuditID, RunID,
+    SELECT AuditID, RunID, UPRID, OriginalUPRID, EntityID, EntityRecordID,
         ChangeSource = CASE WHEN RunID IS NOT NULL THEN N'Load run'
             WHEN SessionID IS NOT NULL THEN N'Outside load'
             ELSE N'Earlier audit (run unknown)' END,
@@ -86,7 +101,7 @@ BEGIN
         /* Compile OPENJSON only when supported. Binary comparisons preserve
            changes in letter case and trailing spaces; type 0 represents NULL. */
         EXEC sys.sp_executesql N'
-            SELECT a.AuditID, a.RunID, a.EntityName AS TableName, a.EntityKey AS RecordKey,
+            SELECT a.AuditID, a.RunID, a.UPRID, a.OriginalUPRID, a.EntityID, a.EntityRecordID, a.EntityName AS TableName, a.EntityKey AS RecordKey,
                 a.OperationType AS Action, a.ChangedDate, a.ChangedBy,
                 f.FieldName, f.OldValue, f.NewValue,
                 f.OldValueState, f.NewValueState
@@ -110,8 +125,11 @@ BEGIN
 END;
 GO
 
-EXEC dbo.usp_UPR_AuditReport;
+EXEC dbo.usp_UPR_AuditReport @LatestRun = 1, @IncludeFieldDetails = 0;
+-- All history (can be large): EXEC dbo.usp_UPR_AuditReport;
 -- Most recent run: EXEC dbo.usp_UPR_AuditReport @LatestRun = 1;
 -- One table: EXEC dbo.usp_UPR_AuditReport @TableName = N'UNIT';
+-- One UPR (including deleted): EXEC dbo.usp_UPR_AuditReport @UPRID = 123;
+-- One entity: EXEC dbo.usp_UPR_AuditReport @EntityID = 4;
 -- One run: EXEC dbo.usp_UPR_AuditReport @RunID = 'paste-run-id-here';
 GO

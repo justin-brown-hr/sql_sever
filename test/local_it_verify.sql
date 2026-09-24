@@ -115,7 +115,7 @@ SELECT @n = COUNT(*)
 FROM dbo.UNIT n
 INNER JOIN dbo.UPR u ON u.UPRID = n.UPRID
 INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = u.UPRID
-INNER JOIN dbo.UPR anc ON anc.UPRID = cl.AncestorUPRID
+INNER JOIN dbo.UPR anc ON anc.UPRID = cl.UPRAncestry
 INNER JOIN dbo.COMPLEX c ON c.UPRID = anc.UPRID AND anc.AccountNumber = '00272531';
 INSERT #R VALUES (CASE WHEN @n = 5 THEN 'PASS' ELSE 'FAIL' END,
                   'Complex 00272531 has 5 units', CONVERT(VARCHAR(20), @n) + ' (expected 5)');
@@ -124,7 +124,7 @@ SELECT @n = COUNT(*)
 FROM dbo.UNIT n
 INNER JOIN dbo.UPR u ON u.UPRID = n.UPRID
 INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = u.UPRID
-INNER JOIN dbo.UPR anc ON anc.UPRID = cl.AncestorUPRID
+INNER JOIN dbo.UPR anc ON anc.UPRID = cl.UPRAncestry
 INNER JOIN dbo.COMPLEX c ON c.UPRID = anc.UPRID AND anc.AccountNumber = '00272531'
 WHERE n.UnitNumber = N'N/A';
 INSERT #R VALUES (CASE WHEN @n = 1 THEN 'PASS' ELSE 'FAIL' END,
@@ -134,7 +134,7 @@ INSERT #R VALUES (CASE WHEN @n = 1 THEN 'PASS' ELSE 'FAIL' END,
 SELECT @n = COUNT(*)
 FROM dbo.EXTERNAL_IDENTIFIER_XREF x
 INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = x.UPRID
-INNER JOIN dbo.UPR anc ON anc.UPRID = cl.AncestorUPRID
+INNER JOIN dbo.UPR anc ON anc.UPRID = cl.UPRAncestry
 INNER JOIN dbo.COMPLEX c ON c.UPRID = anc.UPRID AND anc.AccountNumber = '00272531'
 WHERE x.IdentifierType = 'SOURCE_RECORD_ID' AND x.SourceSystem = 'KDAT' AND x.IdentifierValue = '1012';
 INSERT #R VALUES (CASE WHEN @n >= 1 THEN 'PASS' ELSE 'FAIL' END,
@@ -157,7 +157,7 @@ SELECT @n = COUNT(*)
 FROM dbo.UNIT n
 INNER JOIN dbo.UPR u ON u.UPRID = n.UPRID
 INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = u.UPRID
-INNER JOIN dbo.UPR anc ON anc.UPRID = cl.AncestorUPRID AND anc.AccountNumber = '00100001'
+INNER JOIN dbo.UPR anc ON anc.UPRID = cl.UPRAncestry AND anc.AccountNumber = '00100001'
 WHERE n.UnitNumber = N'N/A';
 INSERT #R VALUES (CASE WHEN @n = 1 THEN 'PASS' ELSE 'FAIL' END,
                   'Single-address MULTI still gets a Unit (N/A, no source value)', CONVERT(VARCHAR(20), @n) + ' (expected 1)');
@@ -172,7 +172,7 @@ SELECT @n = COUNT(*)
 FROM dbo.UNIT n
 INNER JOIN dbo.UPR u ON u.UPRID = n.UPRID
 INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = u.UPRID
-INNER JOIN dbo.UPR anc ON anc.UPRID = cl.AncestorUPRID AND anc.AccountNumber = '00031023'
+INNER JOIN dbo.UPR anc ON anc.UPRID = cl.UPRAncestry AND anc.AccountNumber = '00031023'
 WHERE n.UnitNumber IN ('101', '102');
 INSERT #R VALUES (CASE WHEN @n = 2 THEN 'PASS' ELSE 'FAIL' END,
                   'Condo units 101/102 from CondoUnit', CONVERT(VARCHAR(20), @n) + ' (expected 2)');
@@ -183,7 +183,7 @@ SELECT @n = COUNT(*)
 FROM dbo.UNIT n
 INNER JOIN dbo.UPR u ON u.UPRID = n.UPRID
 INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = u.UPRID
-INNER JOIN dbo.UPR anc ON anc.UPRID = cl.AncestorUPRID AND anc.AccountNumber = '00044556'
+INNER JOIN dbo.UPR anc ON anc.UPRID = cl.UPRAncestry AND anc.AccountNumber = '00044556'
 WHERE n.UnitNumber IS NULL;
 INSERT #R VALUES (CASE WHEN @n = 1 THEN 'PASS' ELSE 'FAIL' END,
                   'Condo with no CondoUnit value still gets a Unit (NULL, not skipped)', CONVERT(VARCHAR(20), @n) + ' (expected 1)');
@@ -290,12 +290,12 @@ INSERT #R VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
 
 /* ---- 18. closure covers every ancestor path ------------------------------ */
 SELECT @n = COUNT(*) FROM dbo.UPR u
-WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_CLOSURE c WHERE c.AncestorUPRID = u.UPRID AND c.DescendantUPRID = u.UPRID);
+WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_CLOSURE c WHERE c.UPRAncestry = u.UPRID AND c.DescendantUPRID = u.UPRID);
 INSERT #R VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
                   'Closure has a self row per UPR', CONVERT(VARCHAR(20), @n));
 SELECT @n = COUNT(*) FROM dbo.UPR u
 WHERE u.ParentUPRID IS NOT NULL
-  AND NOT EXISTS (SELECT 1 FROM dbo.UPR_CLOSURE c WHERE c.AncestorUPRID = u.ParentUPRID AND c.DescendantUPRID = u.UPRID);
+  AND NOT EXISTS (SELECT 1 FROM dbo.UPR_CLOSURE c WHERE c.UPRAncestry = u.ParentUPRID AND c.DescendantUPRID = u.UPRID);
 INSERT #R VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
                   'Closure has parent-child rows', CONVERT(VARCHAR(20), @n));
 

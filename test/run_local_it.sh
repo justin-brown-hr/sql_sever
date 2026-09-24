@@ -9,6 +9,8 @@
 # Runs: seed -> DDL -> load -> verify -> load again -> verify (idempotency).
 set -euo pipefail
 
+python3 "$(dirname "$0")/check_runner_mode.py"
+
 CONTAINER="${CONTAINER:-uprtest}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST=/var/opt/mssql/data
@@ -85,3 +87,6 @@ CONTAINER="$CONTAINER" python3 "$ROOT/test/check_optional_parcel.py"
 
 echo "### 19. source coordinate pairs and legacy repair"
 CONTAINER="$CONTAINER" python3 "$ROOT/test/check_address_coordinates.py"
+
+echo "### 20. September 17 review, prior-loader reproduction and schema migration"
+CONTAINER="$CONTAINER" python3 "$ROOT/test/check_sept17_review.py"

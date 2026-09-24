@@ -30,7 +30,7 @@ def script(path):
 
 
 def load():
-    return sql(script(LOADER))
+    return sql(script(LOADER).replace("@ShowDetailResults BIT = 0", "@ShowDetailResults BIT = 1"))
 
 
 def roots(account):
@@ -91,7 +91,8 @@ VALUES
     old_unit = sql("SELECT UPRID FROM dbo.EXTERNAL_IDENTIFIER_XREF WHERE SourceSystem = 'KDAT' "
                    "AND IdentifierType = 'SOURCE_RECORD_ID' AND IdentifierValue = '9271';")
     sql("""
-UPDATE d SET CondoName = 'MANUALLY MAINTAINED CONDO'
+INSERT dbo.UPR_CONDO_LEGACY (CondoID, UPRID, CondoName)
+SELECT d.CondoID, d.UPRID, 'MANUALLY MAINTAINED CONDO'
 FROM dbo.CONDO d JOIN dbo.UPR u ON u.UPRID = d.UPRID WHERE u.AccountNumber = '00255125';
 INSERT dbo.MAIncomingTableX1
  (MasterAddressID, Account, StreetNumber, StreetName, StreetType, City, ZipCode, LUCategory, ParcelNumber)
@@ -122,11 +123,11 @@ IF (SELECT COUNT(*) FROM dbo.BUILDING b JOIN dbo.UPR u ON u.UPRID = b.UPRID
     JOIN dbo.UPR root ON root.UPRID = u.ParentUPRID WHERE root.AccountNumber = '00255115') <> 3
     THROW 51112, 'Complex lost or duplicated an MA building address.', 1;
 IF (SELECT COUNT(*) FROM dbo.UNIT un JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = un.UPRID
-    JOIN dbo.UPR root ON root.UPRID = cl.AncestorUPRID WHERE root.AccountNumber = '00255115') <> 4
+    JOIN dbo.UPR root ON root.UPRID = cl.UPRAncestry WHERE root.AccountNumber = '00255115') <> 3
     THROW 51113, 'Complex lost or duplicated source Unit rows.', 1;
 IF (SELECT COUNT(*) FROM dbo.EXTERNAL_IDENTIFIER_XREF x
     JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = x.UPRID
-    JOIN dbo.UPR root ON root.UPRID = cl.AncestorUPRID
+    JOIN dbo.UPR root ON root.UPRID = cl.UPRAncestry
     WHERE root.AccountNumber = '00255115' AND x.IdentifierType = 'SOURCE_RECORD_ID') <> 4
     THROW 51114, 'MA and SDAT source records did not all resolve into the Complex.', 1;
 IF NOT EXISTS (SELECT 1 FROM dbo.UPR WHERE AccountNumber = '00255122' AND UPRID = {old_root})
@@ -145,7 +146,7 @@ IF NOT EXISTS (SELECT 1 FROM dbo.UPR u JOIN dbo.COMPLEX c ON c.UPRID = u.UPRID
     JOIN dbo.REF_PROPERTYTYPE pt ON pt.PropertyTypeID = c.PropertyTypeID
     WHERE u.AccountNumber = '00255116' AND pt.PropertyTypeCode = 'APT')
     THROW 51105, 'SDAT Condo classification replaced MA Apartment type.', 1;
-IF EXISTS (SELECT 1 FROM dbo.UPR root JOIN dbo.UPR_CLOSURE cl ON cl.AncestorUPRID = root.UPRID
+IF EXISTS (SELECT 1 FROM dbo.UPR root JOIN dbo.UPR_CLOSURE cl ON cl.UPRAncestry = root.UPRID
     JOIN dbo.UNIT un ON un.UPRID = cl.DescendantUPRID WHERE root.AccountNumber = '00255118')
     THROW 51106, 'Blank SDAT CondoUnit manufactured a Unit for an MA office.', 1;
 IF NOT EXISTS (SELECT 1 FROM dbo.UPRMATCHREVIEW_Q WHERE SDAT_AccountNumber = '00255119'
@@ -157,7 +158,7 @@ IF EXISTS (SELECT 1 FROM dbo.EXTERNAL_IDENTIFIER_XREF WHERE SourceSystem = 'KDAT
 IF NOT EXISTS (SELECT 1 FROM dbo.UPRMATCHREVIEW_Q WHERE SDAT_AccountNumber = '00255121'
     AND ReasonForNoMatch = 'AMBIGUOUS_CANDIDATES')
     THROW 51115, 'Equally plausible MA address groups were resolved arbitrarily.', 1;
-IF NOT EXISTS (SELECT 1 FROM dbo.UPR_CLOSURE WHERE AncestorUPRID = {old_root}
+IF NOT EXISTS (SELECT 1 FROM dbo.UPR_CLOSURE WHERE UPRAncestry = {old_root}
     AND DescendantUPRID = {old_unit} AND [Level] = 2)
     THROW 51109, 'Reclassified Unit closure/Level is incorrect.', 1;
 IF NOT EXISTS (SELECT 1 FROM dbo.UPRMATCHREVIEW_Q WHERE SDAT_AccountNumber = '00255125'

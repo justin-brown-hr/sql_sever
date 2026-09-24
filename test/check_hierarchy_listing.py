@@ -89,13 +89,13 @@ INSERT dbo.UNIT (UPRID, BuildingID, UnitNumber) VALUES (SCOPE_IDENTITY(), @B2, '
 INSERT dbo.UPR (EntityTypeID, ParentUPRID) VALUES (@Unit, @Root1);
 INSERT dbo.UNIT (UPRID, BuildingID, UnitNumber) VALUES (SCOPE_IDENTITY(), @B2, 'WRONG_CONDO');
 ;WITH Closure AS (
-    SELECT AncestorUPRID = UPRID, DescendantUPRID = UPRID FROM dbo.UPR
+    SELECT UPRAncestry = UPRID, DescendantUPRID = UPRID FROM dbo.UPR
     UNION ALL
-    SELECT cl.AncestorUPRID, u.UPRID FROM Closure cl
+    SELECT cl.UPRAncestry, u.UPRID FROM Closure cl
     INNER JOIN dbo.UPR u ON u.ParentUPRID = cl.DescendantUPRID
 )
-INSERT dbo.UPR_CLOSURE (AncestorUPRID, DescendantUPRID, [Level])
-SELECT cl.AncestorUPRID, cl.DescendantUPRID,
+INSERT dbo.UPR_CLOSURE (UPRAncestry, DescendantUPRID, [Level])
+SELECT cl.UPRAncestry, cl.DescendantUPRID,
     (SELECT COUNT(*) - 1 FROM Closure path WHERE path.DescendantUPRID = cl.DescendantUPRID)
 FROM Closure cl;
 """)

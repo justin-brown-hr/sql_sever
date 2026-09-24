@@ -1,3 +1,6 @@
+> Historical delivery notes. For the current schema, migration order and verification status,
+> see [September 23 update](CLIENT_UPDATE_2026-09-23.md). Earlier test passes do not validate this update.
+
 # Optional parcels and supplied hierarchy examples
 
 Package: `UPR_Corrections_2026-09-16_Reviewed.zip`. Replaces the earlier September

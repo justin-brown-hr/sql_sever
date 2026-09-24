@@ -24,11 +24,10 @@
     8) AccountNumber required on every incoming record; no account -> reject to
        Review_Q (INSUFFICIENT_DATA), never written to UPR. Not unique on UPR
        (one account can span several UPR rows). CommunityName on COMPLEX only.
-    9) Every MULTI/APT/CONDO record that needs a Unit gets one - never silently
-       dropped. Real source value when given. A KDAT/Condo record with none
-       keeps NULL (the column exists, source left it blank). An MA record with
-       no UnitNumber field, counted as a unit in its building/Complex address,
-       gets literal N'N/A' - never an invented MA-<id>/SD-<id> label.
+    9) MULTI/APT/CONDO rows resolve to Units. Real source Unit numbers are
+       retained. An unambiguous blank MA/SDAT pair shares one Unit; other blank
+       rows retain independent Units (MA N/A, SDAT NULL on new inserts).
+       Never invent MA-<id>/SD-<id> unit labels.
    10) Missing/placeholder Parcel numbers stay NULL and do not cause Review_Q.
 
   Prerequisites: create the schema once, then run scripts/install_upr_audit.sql.
@@ -71,7 +70,7 @@ BEGIN
         WHEN N'LANE'   THEN N'LN'  WHEN N'LN'  THEN N'LN'
         WHEN N'COURT'  THEN N'CT'  WHEN N'CT'  THEN N'CT'
         WHEN N'DRIVE'  THEN N'DR'  WHEN N'DR'  THEN N'DR'
-        WHEN N'BOULEVARD' THEN N'BLVD' WHEN N'BLVD' THEN N'BLVD'
+        WHEN N'BOULEVARD' THEN N'BLVD' WHEN N'BLVD' THEN N'BLVD' WHEN N'BLV' THEN N'BLVD'
         WHEN N'PLACE'  THEN N'PL'  WHEN N'PL'  THEN N'PL'
         WHEN N'WAY' THEN N'WAY' WHEN N'CIRCLE' THEN N'CIR' WHEN N'CIR' THEN N'CIR'
         WHEN N'TERRACE' THEN N'TER' WHEN N'TER' THEN N'TER'
@@ -339,7 +338,8 @@ BEGIN TRY
    useful prerequisite error even when the run-history table is absent. */
 IF OBJECT_ID(N'dbo.UPR_LOAD_RUN', N'U') IS NULL
    OR COL_LENGTH(N'dbo.AuditLog', N'RunID') IS NULL
-   OR COL_LENGTH(N'dbo.AuditLog', N'SessionID') IS NULL
+   OR COL_LENGTH(N'dbo.AUDIT_LOG', N'EntityRecordID') IS NULL
+   OR COL_LENGTH(N'dbo.UPR_CLOSURE', N'UPRAncestry') IS NULL
     THROW 50004, 'Run the updated scripts/install_upr_audit.sql before loading data.', 1;
 EXEC sys.sp_executesql N'
     INSERT dbo.UPR_LOAD_RUN (RunID, StartedAt, RunStatus, StartedBy, SessionID)
@@ -353,6 +353,7 @@ PRINT N'UPR hierarchical load starting: ' + CONVERT(NVARCHAR(30), @BatchStart, 1
 PRINT N'Staging rules: MA-FIRST-2026-09-15';
 PRINT N'Parcel rules: OPTIONAL-PARCEL-2026-09-16';
 PRINT N'Coordinate rules: SOURCE-PAIR-2026-09-16';
+PRINT N'Duplicate rules: MA-SDAT-OVERLAP-2026-09-23';
 PRINT N'================================================================';
 
 /* ============================================================================
@@ -527,7 +528,7 @@ BEGIN TRY
             WHEN N'LANE'   THEN N'LN'  WHEN N'LN'  THEN N'LN'
             WHEN N'COURT'  THEN N'CT'  WHEN N'CT'  THEN N'CT'
             WHEN N'DRIVE'  THEN N'DR'  WHEN N'DR'  THEN N'DR'
-            WHEN N'BOULEVARD' THEN N'BLVD' WHEN N'BLVD' THEN N'BLVD'
+            WHEN N'BOULEVARD' THEN N'BLVD' WHEN N'BLVD' THEN N'BLVD' WHEN N'BLV' THEN N'BLVD'
             WHEN N'PLACE'  THEN N'PL'  WHEN N'PL'  THEN N'PL'
             WHEN N'WAY' THEN N'WAY' WHEN N'CIRCLE' THEN N'CIR' WHEN N'CIR' THEN N'CIR'
             WHEN N'TERRACE' THEN N'TER' WHEN N'TER' THEN N'TER'
@@ -665,7 +666,7 @@ BEGIN TRY
             WHEN N'LANE'   THEN N'LN'  WHEN N'LN'  THEN N'LN'
             WHEN N'COURT'  THEN N'CT'  WHEN N'CT'  THEN N'CT'
             WHEN N'DRIVE'  THEN N'DR'  WHEN N'DR'  THEN N'DR'
-            WHEN N'BOULEVARD' THEN N'BLVD' WHEN N'BLVD' THEN N'BLVD'
+            WHEN N'BOULEVARD' THEN N'BLVD' WHEN N'BLVD' THEN N'BLVD' WHEN N'BLV' THEN N'BLVD'
             WHEN N'PLACE'  THEN N'PL'  WHEN N'PL'  THEN N'PL'
             WHEN N'WAY' THEN N'WAY' WHEN N'CIRCLE' THEN N'CIR' WHEN N'CIR' THEN N'CIR'
             WHEN N'TERRACE' THEN N'TER' WHEN N'TER' THEN N'TER'
@@ -1101,7 +1102,9 @@ FROM #ParentGroup g
 INNER JOIN dbo.UPR u ON u.AccountNumber = g.AccountNumber
     AND u.ParentUPRID IS NULL AND u.EntityTypeID = @EtCondo
 INNER JOIN dbo.CONDO d ON d.UPRID = u.UPRID
-WHERE g.PathType = N'COMPLEX' AND d.CondoName IS NULL
+WHERE g.PathType = N'COMPLEX'
+  AND NOT EXISTS (SELECT 1 FROM dbo.UPR_CONDO_LEGACY old
+                  WHERE old.UPRID = u.UPRID AND old.CondoName IS NOT NULL)
   AND (SELECT COUNT(*) FROM dbo.UPR other
        WHERE other.AccountNumber = g.AccountNumber AND other.ParentUPRID IS NULL) = 1
   AND EXISTS (SELECT 1 FROM dbo.EXTERNAL_IDENTIFIER_XREF x
@@ -1178,7 +1181,7 @@ INNER JOIN dbo.EXTERNAL_IDENTIFIER_XREF x
    walk up the closure to the Property parent instead of matching x.UPRID.
    The closure contains self rows, which covers rows linked to the parent. */
 INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = x.UPRID
-INNER JOIN dbo.UPR anc ON anc.UPRID = cl.AncestorUPRID AND anc.EntityTypeID = g.EntityTypeID
+INNER JOIN dbo.UPR anc ON anc.UPRID = cl.UPRAncestry AND anc.EntityTypeID = g.EntityTypeID
 WHERE (g.PathType = N'PROPERTY' OR (g.PathType = N'CONDO' AND g.AccountNumber IS NULL))
   AND NOT EXISTS (SELECT 1 FROM #ParentSkip p WHERE p.GroupKey = g.GroupKey)
 GROUP BY g.GroupKey;
@@ -1269,12 +1272,10 @@ WHERE pm.PathType = N'PROPERTY'
   AND NOT EXISTS (SELECT 1 FROM dbo.PROPERTY p WHERE p.UPRID = pm.UPRID);
 SET @PropertyInserted = @@ROWCOUNT;
 
-INSERT INTO dbo.CONDO (UPRID, CondoName, OwnerName, Parcel, StatusCode)
+INSERT INTO dbo.CONDO (UPRID, OwnerName, StatusCode)
 SELECT
     pm.UPRID,
-    NULL,   /* SDAT carries no condo name */
     pm.OwnerName,
-    LEFT(pm.ParcelID, 20),
     N'ACTIVE'
 FROM #ParentMap pm
 WHERE pm.PathType = N'CONDO'
@@ -1290,6 +1291,139 @@ PRINT N'Step 7 complete - new parents=' + CONVERT(NVARCHAR(20), @ParentInserted)
    8. Buildings (distinct address per group) + ADDRESS + UPR_ADDRESS
    ============================================================================ */
 PRINT N'Step 8: Insert Building UPRs, BUILDING, ADDRESS, UPR_ADDRESS...';
+
+/* September 17 existing-data repair: only one blank MA + one blank SDAT
+   record at the same account/address, each source-linked to an otherwise
+   unmodified blank Unit. Preserve the MA Unit/Building and both source links.
+   Anything ambiguous or manually enriched remains untouched for review. */
+IF OBJECT_ID('tempdb..#OverlapPairs') IS NOT NULL DROP TABLE #OverlapPairs;
+SELECT GroupKey, NormalizedFullAddress,
+    MAStageKey = MAX(CASE WHEN SourceSystem = N'ADDRESS_MASTER' THEN StageKey END),
+    SDStageKey = MAX(CASE WHEN SourceSystem = N'KDAT' THEN StageKey END)
+INTO #OverlapPairs FROM #Stage
+WHERE IsValid = 1
+GROUP BY GroupKey, NormalizedFullAddress
+HAVING COUNT(*) = 2
+   AND SUM(CASE WHEN SourceSystem = N'ADDRESS_MASTER' THEN 1 ELSE 0 END) = 1
+   AND SUM(CASE WHEN SourceSystem = N'KDAT' THEN 1 ELSE 0 END) = 1
+   AND MAX(COALESCE(UnitNumber, CondoUnit)) IS NULL;
+
+IF OBJECT_ID('tempdb..#OverlapRepair') IS NOT NULL DROP TABLE #OverlapRepair;
+SELECT p.MAStageKey, p.SDStageKey, KeepUnit = mu.UPRID, DropUnit = su.UPRID,
+    KeepBuilding = mb.UPRID, DropBuilding = sb.UPRID,
+    KeepBuildingID = mb.BuildingID, DropBuildingID = sb.BuildingID
+INTO #OverlapRepair
+FROM #OverlapPairs p
+JOIN #Stage ma ON ma.StageKey = p.MAStageKey
+JOIN #Stage sd ON sd.StageKey = p.SDStageKey
+JOIN #ParentMap pm ON pm.GroupKey = p.GroupKey
+JOIN dbo.EXTERNAL_IDENTIFIER_XREF mx ON mx.SourceSystem = ma.SourceSystem
+    AND mx.IdentifierType = N'SOURCE_RECORD_ID' AND mx.IdentifierValue = ma.SourceRecordID
+JOIN dbo.EXTERNAL_IDENTIFIER_XREF sx ON sx.SourceSystem = sd.SourceSystem
+    AND sx.IdentifierType = N'SOURCE_RECORD_ID' AND sx.IdentifierValue = sd.SourceRecordID
+JOIN dbo.UNIT mu ON mu.UPRID = mx.UPRID
+JOIN dbo.UNIT su ON su.UPRID = sx.UPRID AND su.UPRID <> mu.UPRID
+JOIN dbo.UPR mup ON mup.UPRID = mu.UPRID
+JOIN dbo.UPR sup ON sup.UPRID = su.UPRID
+JOIN dbo.BUILDING mb ON mb.BuildingID = mu.BuildingID
+JOIN dbo.BUILDING sb ON sb.BuildingID = su.BuildingID
+JOIN dbo.UPR mbp ON mbp.UPRID = mb.UPRID AND mbp.ParentUPRID = pm.UPRID
+JOIN dbo.UPR sbp ON sbp.UPRID = sb.UPRID AND sbp.ParentUPRID = pm.UPRID
+WHERE (mu.UnitNumber IS NULL OR mu.UnitNumber = N'N/A')
+  AND (su.UnitNumber IS NULL OR su.UnitNumber = N'N/A')
+  AND sup.ParentUPRID = CASE WHEN pm.PathType = N'CONDO' THEN pm.UPRID ELSE sb.UPRID END
+  AND mup.ParentUPRID = CASE WHEN pm.PathType = N'CONDO' THEN pm.UPRID ELSE mb.UPRID END
+  AND sup.AccountNumber IS NULL AND sup.StatusCode = N'ACTIVE'
+  AND sup.EntityTypeID = @EtUnit AND mup.EntityTypeID = @EtUnit
+  AND sbp.EntityTypeID = @EtBuilding AND mbp.EntityTypeID = @EtBuilding
+  AND su.StatusCode = N'ACTIVE' AND su.UpdatedDate IS NULL
+  AND su.UnitTypeCode IS NULL AND su.FloorNumber IS NULL AND su.BedroomCount IS NULL
+  AND su.BathroomCount IS NULL AND su.HasLegalIdentity IS NULL
+  AND NOT EXISTS (SELECT 1 FROM dbo.UPR child WHERE child.ParentUPRID = su.UPRID)
+  AND NOT EXISTS (SELECT 1 FROM dbo.EXTERNAL_IDENTIFIER_XREF x WHERE x.UPRID = su.UPRID AND x.ExternalIdentifierID <> sx.ExternalIdentifierID)
+  AND NOT EXISTS (SELECT 1 FROM dbo.UPR_CONTACT d JOIN dbo.UPR_CONTACT k
+      ON k.UPRID = mu.UPRID AND k.ContactID = d.ContactID AND k.RoleTypeID = d.RoleTypeID
+      WHERE d.UPRID = su.UPRID AND EXISTS (SELECT d.EffectiveDate, d.EndDate EXCEPT SELECT k.EffectiveDate, k.EndDate))
+  AND EXISTS (SELECT 1 FROM dbo.UPR_ADDRESS ua JOIN dbo.ADDRESS a ON a.AddressID = ua.AddressID
+      WHERE ua.UPRID = mb.UPRID AND ua.IsPrimary = 1 AND a.NormalizedAddress = p.NormalizedFullAddress)
+  AND EXISTS (SELECT 1 FROM dbo.UPR_ADDRESS ua JOIN dbo.ADDRESS a ON a.AddressID = ua.AddressID
+      WHERE ua.UPRID = sb.UPRID AND ua.IsPrimary = 1
+        AND dbo.fn_UPR_NormalizeFullAddressLine(a.StreetNumber + N' ' + a.StreetName + N' ' + ISNULL(a.StreetType,N''), a.City, a.ZipCode) = p.NormalizedFullAddress)
+  AND (mb.UPRID = sb.UPRID OR (
+      sb.BuildingName IS NULL AND sb.UpdatedDate IS NULL AND sb.StatusCode = N'ACTIVE'
+      AND sbp.AccountNumber IS NULL AND sbp.StatusCode = N'ACTIVE'
+      AND (sb.YearBuilt IS NULL OR mb.YearBuilt IS NULL OR sb.YearBuilt = mb.YearBuilt)
+      AND NOT EXISTS (SELECT 1 FROM dbo.UNIT other WHERE other.BuildingID = sb.BuildingID AND other.UPRID <> su.UPRID)
+      AND NOT EXISTS (SELECT 1 FROM dbo.UPR child WHERE child.ParentUPRID = sb.UPRID AND child.UPRID <> su.UPRID)
+      AND NOT EXISTS (SELECT 1 FROM dbo.EXTERNAL_IDENTIFIER_XREF x WHERE x.UPRID = sb.UPRID)
+      AND NOT EXISTS (SELECT 1 FROM dbo.UPR_CONTACT d JOIN dbo.UPR_CONTACT k
+          ON k.UPRID = mb.UPRID AND k.ContactID = d.ContactID AND k.RoleTypeID = d.RoleTypeID
+          WHERE d.UPRID = sb.UPRID AND EXISTS (SELECT d.EffectiveDate, d.EndDate EXCEPT SELECT k.EffectiveDate, k.EndDate))
+  ));
+/* A source Unit shared with another candidate makes the entire match unsafe. */
+DELETE r FROM #OverlapRepair r WHERE EXISTS (SELECT 1 FROM #OverlapRepair other
+    WHERE other.MAStageKey <> r.MAStageKey
+      AND (other.DropUnit IN (r.DropUnit,r.KeepUnit) OR other.KeepUnit IN (r.DropUnit,r.KeepUnit)));
+
+IF OBJECT_ID('tempdb..#MergeUPR') IS NOT NULL DROP TABLE #MergeUPR;
+CREATE TABLE #MergeUPR (OldUPRID BIGINT NOT NULL PRIMARY KEY, NewUPRID BIGINT NOT NULL);
+INSERT INTO #MergeUPR (OldUPRID, NewUPRID) SELECT DropUnit, KeepUnit FROM #OverlapRepair;
+INSERT INTO #MergeUPR (OldUPRID, NewUPRID)
+SELECT DISTINCT DropBuilding, KeepBuilding FROM #OverlapRepair WHERE DropBuilding <> KeepBuilding;
+
+/* Move links before removing the redundant nodes. Old/new JSON audit events
+   retain every removed row, including the donor Unit and Building IDs. */
+UPDATE x SET UPRID = m.NewUPRID FROM dbo.EXTERNAL_IDENTIFIER_XREF x JOIN #MergeUPR m ON m.OldUPRID = x.UPRID;
+DELETE d FROM dbo.UPR_CONTACT d JOIN #MergeUPR m ON m.OldUPRID = d.UPRID
+WHERE EXISTS (SELECT 1 FROM dbo.UPR_CONTACT k WHERE k.UPRID = m.NewUPRID AND k.ContactID = d.ContactID AND k.RoleTypeID = d.RoleTypeID);
+UPDATE d SET UPRID = m.NewUPRID FROM dbo.UPR_CONTACT d JOIN #MergeUPR m ON m.OldUPRID = d.UPRID;
+/* Keep alternate source address links, but retain the survivor's primary. */
+UPDATE d SET IsPrimary = 0 FROM dbo.UPR_ADDRESS d JOIN #MergeUPR m ON m.OldUPRID = d.UPRID
+WHERE d.IsPrimary = 1 AND EXISTS (SELECT 1 FROM dbo.UPR_ADDRESS k WHERE k.UPRID = m.NewUPRID AND k.IsPrimary = 1);
+DELETE d FROM dbo.UPR_ADDRESS d JOIN #MergeUPR m ON m.OldUPRID = d.UPRID
+WHERE EXISTS (SELECT 1 FROM dbo.UPR_ADDRESS k WHERE k.UPRID = m.NewUPRID
+    AND k.AddressID = d.AddressID AND k.AddressRoleID = d.AddressRoleID
+    AND NOT EXISTS (SELECT d.EffectiveDate, d.EndDate EXCEPT SELECT k.EffectiveDate, k.EndDate));
+UPDATE d SET UPRID = m.NewUPRID FROM dbo.UPR_ADDRESS d JOIN #MergeUPR m ON m.OldUPRID = d.UPRID;
+UPDATE h SET UPRID = m.NewUPRID FROM dbo.UPRSTATUSHISTORY h JOIN #MergeUPR m ON m.OldUPRID = h.UPRID;
+UPDATE h SET BuildingID = r.KeepBuildingID FROM dbo.UPRSTATUSHISTORY h
+JOIN #OverlapRepair r ON r.DropBuildingID = h.BuildingID WHERE r.DropBuildingID <> r.KeepBuildingID;
+UPDATE q SET UPRID = m.NewUPRID FROM dbo.UPRMATCHREVIEW_Q q JOIN #MergeUPR m ON m.OldUPRID = q.UPRID;
+UPDATE b SET YearBuilt = donor.YearBuilt FROM dbo.BUILDING b
+JOIN #OverlapRepair r ON r.KeepBuildingID = b.BuildingID
+JOIN dbo.BUILDING donor ON donor.BuildingID = r.DropBuildingID
+WHERE b.YearBuilt IS NULL AND donor.YearBuilt IS NOT NULL;
+DELETE c FROM dbo.UPR_CLOSURE c WHERE EXISTS (SELECT 1 FROM #MergeUPR m WHERE m.OldUPRID IN (c.UPRAncestry,c.DescendantUPRID));
+DELETE u FROM dbo.UNIT u JOIN #OverlapRepair r ON r.DropUnit = u.UPRID;
+DELETE u FROM dbo.UPR u JOIN #OverlapRepair r ON r.DropUnit = u.UPRID;
+DELETE b FROM dbo.BUILDING b JOIN #OverlapRepair r ON r.DropBuilding = b.UPRID WHERE r.DropBuilding <> r.KeepBuilding;
+DELETE u FROM dbo.UPR u JOIN #MergeUPR m ON m.OldUPRID = u.UPRID;
+
+/* When a potential old pair cannot be repaired safely, do not silently remap
+   its source identifier. Retain both records and show a repeatable review. */
+INSERT INTO dbo.UPRMATCHREVIEW_Q
+    (UPRID, IncomingSourceSystem, SDAT_NormalizedIncomingAddress, MA_NormalizedIncomingAddress,
+     SDAT_AccountNumber, MA_Account, ReasonForNoMatch, ProcessingTimestamp, ReviewStatus, Decision)
+SELECT sx.UPRID, N'KDAT', sd.NormalizedFullAddress, ma.NormalizedFullAddress,
+    sd.AccountNumber, ma.AccountNumber, N'AMBIGUOUS_CANDIDATES', @Now, N'PENDING_REVIEW',
+    N'MA/SDAT blank-unit overlap has existing records that cannot be safely merged; inspect source links and manually maintained values.'
+FROM #OverlapPairs p JOIN #Stage ma ON ma.StageKey = p.MAStageKey JOIN #Stage sd ON sd.StageKey = p.SDStageKey
+JOIN dbo.EXTERNAL_IDENTIFIER_XREF mx ON mx.SourceSystem = ma.SourceSystem AND mx.IdentifierType = N'SOURCE_RECORD_ID' AND mx.IdentifierValue = ma.SourceRecordID
+JOIN dbo.EXTERNAL_IDENTIFIER_XREF sx ON sx.SourceSystem = sd.SourceSystem AND sx.IdentifierType = N'SOURCE_RECORD_ID' AND sx.IdentifierValue = sd.SourceRecordID
+WHERE mx.UPRID <> sx.UPRID AND NOT EXISTS (SELECT 1 FROM dbo.UPRMATCHREVIEW_Q q WHERE q.UPRID = sx.UPRID AND q.Decision LIKE N'MA/SDAT blank-unit overlap%');
+SET @ReviewInserted += @@ROWCOUNT;
+
+/* Normalize the known BLV alias on source-linked existing addresses too,
+   including an SDAT-only earlier load that is now joined by MA. */
+UPDATE a SET StreetType = N'BLVD', NormalizedAddress = n.FullAddress
+FROM dbo.ADDRESS a
+CROSS APPLY (SELECT FullAddress = dbo.fn_UPR_NormalizeFullAddressLine(
+    a.StreetNumber + N' ' + a.StreetName + N' BLVD', a.City, a.ZipCode)) n
+WHERE a.StreetType = N'BLV'
+  AND EXISTS (SELECT 1 FROM dbo.UPR_ADDRESS ua
+      JOIN dbo.EXTERNAL_IDENTIFIER_XREF x ON x.UPRID = ua.UPRID AND x.IdentifierType = N'SOURCE_RECORD_ID'
+      JOIN #Stage s ON s.SourceSystem = x.SourceSystem AND s.SourceRecordID = x.IdentifierValue
+      WHERE ua.AddressID = a.AddressID AND s.IsValid = 1 AND s.NormalizedFullAddress = n.FullAddress);
 
 IF OBJECT_ID('tempdb..#BuildingSrc') IS NOT NULL DROP TABLE #BuildingSrc;
 SELECT
@@ -1451,7 +1585,7 @@ WHERE NOT EXISTS (SELECT a.XCoordinate, a.YCoordinate EXCEPT SELECT src.LegacyMa
       SELECT 1 FROM #Stage s
       INNER JOIN dbo.EXTERNAL_IDENTIFIER_XREF x ON x.SourceSystem = s.SourceSystem
           AND x.IdentifierType = N'SOURCE_RECORD_ID' AND x.IdentifierValue = s.SourceRecordID
-      INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = x.UPRID AND cl.AncestorUPRID = src.ParentUPRID
+      INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = x.UPRID AND cl.UPRAncestry = src.ParentUPRID
       WHERE s.GroupKey = src.GroupKey AND s.NormalizedFullAddress = src.NormalizedFullAddress AND s.IsValid = 1);
 
 UPDATE a SET XCoordinate = r.XCoordinate, YCoordinate = r.YCoordinate
@@ -1573,17 +1707,24 @@ IF OBJECT_ID('tempdb..#UnitSrc') IS NOT NULL DROP TABLE #UnitSrc;
     FROM #Stage s
     WHERE s.IsValid = 1
 ),
+UnitCandidates AS (
+    SELECT ub.*,
+        BlankMA = SUM(CASE WHEN RealUnitNumber IS NULL AND SourceSystem = N'ADDRESS_MASTER' THEN 1 ELSE 0 END)
+            OVER (PARTITION BY GroupKey, NormalizedFullAddress),
+        BlankSDAT = SUM(CASE WHEN RealUnitNumber IS NULL AND SourceSystem = N'KDAT' THEN 1 ELSE 0 END)
+            OVER (PARTITION BY GroupKey, NormalizedFullAddress),
+        NumberedUnits = SUM(CASE WHEN RealUnitNumber IS NOT NULL THEN 1 ELSE 0 END)
+            OVER (PARTITION BY GroupKey, NormalizedFullAddress)
+    FROM UnitBase ub WHERE NeedsUnit = 1
+),
 UnitJoined AS (
     SELECT
         ub.StageKey,
         ub.GroupKey,
         ub.PathType,
         ub.NormalizedFullAddress,
-        /* Every record that needs a unit gets one - never silently dropped.
-           Real source value when given. A KDAT/Condo record with none keeps
-           NULL (the column exists, source just left it blank). An MA record
-           counted as a unit in a building/Complex address has no UnitNumber
-           column at all, so it gets literal N'N/A' - never an invented label. */
+        /* MA wins confirmed overlaps. Blank MA stays N/A; blank SDAT stays
+           NULL when independent. Both source identifiers remain linked. */
         UnitNumber = COALESCE(ub.RealUnitNumber,
             CASE WHEN ub.SourceSystem = N'KDAT' THEN NULL ELSE N'N/A' END),
         ParentUPRID = CASE
@@ -1592,15 +1733,17 @@ UnitJoined AS (
         END,
         BuildingUPRID = bm.BuildingUPRID,
         BuildingTableID = CAST(NULL AS BIGINT),
-        /* Only rows sharing a REAL source unit value are the same physical
-           unit and may collapse into one Unit row. A row with no real value
-           always keeps its own slot (keyed by StageKey) - it must never
-           silently merge with an unrelated blank/N'A' row at the same address. */
+        /* Named units match by real number. An unambiguous blank MA/SDAT
+           pair with no numbered units shares one slot (September 17 review).
+           Other blank rows retain their own slots; no arbitrary matching. */
         Rn = ROW_NUMBER() OVER (
             PARTITION BY ub.GroupKey, ub.NormalizedFullAddress,
-                COALESCE(ub.RealUnitNumber, N'#' + CONVERT(NVARCHAR(20), ub.StageKey))
+                CASE WHEN ub.RealUnitNumber IS NULL THEN 0 ELSE 1 END,
+                COALESCE(ub.RealUnitNumber, CASE WHEN ub.BlankMA = 1 AND ub.BlankSDAT = 1
+                    AND ub.NumberedUnits = 0 THEN N'#MA-SDAT-PAIR'
+                    ELSE N'#' + CONVERT(NVARCHAR(20), ub.StageKey) END)
             ORDER BY
-                CASE ub.SourceSystem WHEN N'KDAT' THEN 0 ELSE 1 END,
+                CASE ub.SourceSystem WHEN N'ADDRESS_MASTER' THEN 0 ELSE 1 END,
                 ub.StageKey
         ),
         /* Every stage row in the dedup group - including the ones collapsed
@@ -1608,13 +1751,16 @@ UnitJoined AS (
            linking. Carry that surviving row's own StageKey onto every row. */
         WinnerStageKey = FIRST_VALUE(ub.StageKey) OVER (
             PARTITION BY ub.GroupKey, ub.NormalizedFullAddress,
-                COALESCE(ub.RealUnitNumber, N'#' + CONVERT(NVARCHAR(20), ub.StageKey))
+                CASE WHEN ub.RealUnitNumber IS NULL THEN 0 ELSE 1 END,
+                COALESCE(ub.RealUnitNumber, CASE WHEN ub.BlankMA = 1 AND ub.BlankSDAT = 1
+                    AND ub.NumberedUnits = 0 THEN N'#MA-SDAT-PAIR'
+                    ELSE N'#' + CONVERT(NVARCHAR(20), ub.StageKey) END)
             ORDER BY
-                CASE ub.SourceSystem WHEN N'KDAT' THEN 0 ELSE 1 END,
+                CASE ub.SourceSystem WHEN N'ADDRESS_MASTER' THEN 0 ELSE 1 END,
                 ub.StageKey
             ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
         )
-    FROM UnitBase ub
+    FROM UnitCandidates ub
     INNER JOIN #ParentMap pm ON pm.GroupKey = ub.GroupKey
     INNER JOIN #BuildingMap bm
         ON bm.GroupKey = ub.GroupKey
@@ -1658,14 +1804,15 @@ CREATE TABLE #UnitMap (
 
 /* A newly arrived source row can describe an already loaded numbered Unit.
    Reuse that same structural Unit and attach its new source XREF to it.
-   Never reuse on a placeholder UnitNumber (NULL or N'N/A') - those do not
-   identify a physical unit, so each such row keeps its own separate Unit. */
+   Placeholder numbers alone do not identify a Unit. Only the confirmed
+   cross-source pairs in #UnitStageMap may reuse either member's existing Unit. */
 /* Reuse the exact source-linked Unit first, including NULL/N/A values and
    Units reparented by a Condo-to-Complex repair above. */
 INSERT INTO #UnitMap (StageKey, UnitUPRID, GroupKey)
 SELECT src.StageKey, MIN(u.UPRID), MIN(src.GroupKey)
 FROM #UnitSrc src
-INNER JOIN #Stage st ON st.StageKey = src.StageKey
+INNER JOIN #UnitStageMap sm ON sm.WinnerStageKey = src.StageKey
+INNER JOIN #Stage st ON st.StageKey = sm.StageKey
 INNER JOIN dbo.EXTERNAL_IDENTIFIER_XREF x ON x.SourceSystem = st.SourceSystem
     AND x.IdentifierType = N'SOURCE_RECORD_ID' AND x.IdentifierValue = st.SourceRecordID
 INNER JOIN dbo.UPR u ON u.UPRID = x.UPRID AND u.ParentUPRID = src.ParentUPRID
@@ -1909,37 +2056,37 @@ IF EXISTS (SELECT 1 FROM dbo.UPR u
    Unchanged loads must not produce thousands of delete/reinsert audit events. */
 IF OBJECT_ID('tempdb..#ExpectedClosure') IS NOT NULL DROP TABLE #ExpectedClosure;
 CREATE TABLE #ExpectedClosure (
-    AncestorUPRID BIGINT NOT NULL,
+    UPRAncestry BIGINT NOT NULL,
     DescendantUPRID BIGINT NOT NULL,
     [Level] INT NOT NULL,
-    PRIMARY KEY (AncestorUPRID, DescendantUPRID)
+    PRIMARY KEY (UPRAncestry, DescendantUPRID)
 );
-INSERT INTO #ExpectedClosure (AncestorUPRID, DescendantUPRID, [Level])
+INSERT INTO #ExpectedClosure (UPRAncestry, DescendantUPRID, [Level])
 SELECT UPRID, UPRID, [Level] FROM #UPRLevels;
 DECLARE @ClosureAdded INT = 1;
 WHILE @ClosureAdded > 0
 BEGIN
-    INSERT INTO #ExpectedClosure (AncestorUPRID, DescendantUPRID, [Level])
-    SELECT c.AncestorUPRID, child.UPRID, l.[Level]
+    INSERT INTO #ExpectedClosure (UPRAncestry, DescendantUPRID, [Level])
+    SELECT c.UPRAncestry, child.UPRID, l.[Level]
     FROM #ExpectedClosure c
     INNER JOIN dbo.UPR child ON child.ParentUPRID = c.DescendantUPRID
     INNER JOIN #UPRLevels l ON l.UPRID = child.UPRID
     WHERE NOT EXISTS (SELECT 1 FROM #ExpectedClosure x
-        WHERE x.AncestorUPRID = c.AncestorUPRID AND x.DescendantUPRID = child.UPRID);
+        WHERE x.UPRAncestry = c.UPRAncestry AND x.DescendantUPRID = child.UPRID);
     SET @ClosureAdded = @@ROWCOUNT;
 END;
 DELETE c FROM dbo.UPR_CLOSURE c
 WHERE NOT EXISTS (SELECT 1 FROM #ExpectedClosure e
-    WHERE e.AncestorUPRID = c.AncestorUPRID AND e.DescendantUPRID = c.DescendantUPRID);
+    WHERE e.UPRAncestry = c.UPRAncestry AND e.DescendantUPRID = c.DescendantUPRID);
 UPDATE c SET [Level] = e.[Level]
 FROM dbo.UPR_CLOSURE c
 INNER JOIN #ExpectedClosure e
-    ON e.AncestorUPRID = c.AncestorUPRID AND e.DescendantUPRID = c.DescendantUPRID
+    ON e.UPRAncestry = c.UPRAncestry AND e.DescendantUPRID = c.DescendantUPRID
 WHERE c.[Level] IS NULL OR c.[Level] <> e.[Level];
-INSERT INTO dbo.UPR_CLOSURE (AncestorUPRID, DescendantUPRID, [Level])
-SELECT e.AncestorUPRID, e.DescendantUPRID, e.[Level] FROM #ExpectedClosure e
+INSERT INTO dbo.UPR_CLOSURE (UPRAncestry, DescendantUPRID, [Level])
+SELECT e.UPRAncestry, e.DescendantUPRID, e.[Level] FROM #ExpectedClosure e
 WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_CLOSURE c
-    WHERE c.AncestorUPRID = e.AncestorUPRID AND c.DescendantUPRID = e.DescendantUPRID);
+    WHERE c.UPRAncestry = e.UPRAncestry AND c.DescendantUPRID = e.DescendantUPRID);
 
 IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.UPR_CLOSURE')
            AND name = N'Level' AND is_nullable = 1)
@@ -1996,7 +2143,7 @@ INSERT INTO dbo.UPR_CONTACT (UPRID, ContactID, RoleTypeID, EffectiveDate)
 SELECT DISTINCT cl.DescendantUPRID, uc.ContactID, uc.RoleTypeID, CONVERT(DATE, @Now)
 FROM #ParentMap pm
 INNER JOIN dbo.UPR_CONTACT uc ON uc.UPRID = pm.UPRID AND uc.RoleTypeID = @RoleOwner
-INNER JOIN dbo.UPR_CLOSURE cl ON cl.AncestorUPRID = pm.UPRID
+INNER JOIN dbo.UPR_CLOSURE cl ON cl.UPRAncestry = pm.UPRID
 WHERE cl.DescendantUPRID <> pm.UPRID
   AND NOT EXISTS (SELECT 1 FROM dbo.UPR_CONTACT existing
       WHERE existing.UPRID = cl.DescendantUPRID AND existing.ContactID = uc.ContactID
@@ -2042,9 +2189,9 @@ PRINT N'Step 13 complete - status history: ' + CONVERT(NVARCHAR(20), @StatusHist
    ============================================================================ */
 PRINT N'Step 14: AuditLog...';
 
-INSERT INTO dbo.AuditLog (EntityName, EntityKey, OperationType, ChangedBy, ChangedDate, ChangeSummary, RunID, SessionID)
+INSERT INTO dbo.AUDIT_LOG (EntityID, EntityRecordID, EntityKey, ActionType, ChangedBy, ChangedDate, ChangeSummary, RunID, SessionID)
 VALUES
-    (N'UPR_HIER_LOAD', N'BATCH', N'INSERT', @AuditUser, @Now,
+    ((SELECT EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName = N'UPR_HIER_LOAD'), 0, N'BATCH', N'INSERT', @AuditUser, @Now,
      N'Parents=' + CONVERT(NVARCHAR(20), @ParentInserted)
      + N'; Complex=' + CONVERT(NVARCHAR(20), @ComplexInserted)
      + N'; Property=' + CONVERT(NVARCHAR(20), @PropertyInserted)
@@ -2057,7 +2204,7 @@ VALUES
      + N'; ReviewQ=' + CONVERT(NVARCHAR(20), @ReviewInserted)
      + N'; Closure=' + CONVERT(NVARCHAR(20), @ClosureRows)
      + N'; Classification=MA-FIRST-2026-09-15; Parcel=OPTIONAL-PARCEL-2026-09-16'
-     + N'; Coordinates=SOURCE-PAIR-2026-09-16', @AuditRunID, @@SPID);
+     + N'; Coordinates=SOURCE-PAIR-2026-09-16; Duplicates=MA-SDAT-OVERLAP-2026-09-23', @AuditRunID, @@SPID);
 SET @AuditInserted = @@ROWCOUNT;
 
 UPDATE dbo.UPR_LOAD_RUN

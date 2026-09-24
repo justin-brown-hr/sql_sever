@@ -45,7 +45,7 @@ sql("""
 IF NOT EXISTS (
     SELECT 1 FROM dbo.UNIT un
     INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = un.UPRID
-    INNER JOIN dbo.UPR root ON root.UPRID = cl.AncestorUPRID
+    INNER JOIN dbo.UPR root ON root.UPRID = cl.UPRAncestry
     WHERE root.AccountNumber = '00089876' AND un.UnitNumber IS NULL
 ) THROW 51001, 'Condo record with an AccountNumber but no CondoUnit value must still get a Unit row (NULL, not skipped).', 1;
 IF NOT EXISTS (
@@ -143,8 +143,8 @@ IF (SELECT COUNT(*) FROM dbo.AuditLog WHERE AuditID > @Before AND EntityName = '
 ROLLBACK TRANSACTION;
 IF EXISTS (SELECT 1 FROM dbo.AuditLog WHERE AuditID > @Before)
     THROW 51016, 'Rolled-back changes left misleading committed audit records.', 1;
-IF (SELECT COUNT(*) FROM sys.triggers WHERE name LIKE 'tr_UPR_Audit[_]%' AND is_disabled = 0) <> 22
-    THROW 51017, 'Not all 22 model/reference tables are audited.', 1;
+IF (SELECT COUNT(*) FROM sys.triggers WHERE name LIKE 'tr_UPR_Audit[_]%' AND is_disabled = 0) <> 23
+    THROW 51017, 'Not all 23 model/reference tables are audited.', 1;
 BEGIN TRANSACTION;
 INSERT dbo.REF_ENTITYTYPE (Description) VALUES ('AUDIT MERGE A'), ('AUDIT MERGE B');
 SET @Before = (SELECT MAX(AuditID) FROM dbo.AuditLog);
@@ -158,12 +158,12 @@ IF (SELECT COUNT(DISTINCT OperationType) FROM dbo.AuditLog WHERE AuditID > @Befo
     THROW 51018, 'Mixed-action MERGE audit failed.', 1;
 ROLLBACK TRANSACTION;
 """)
-print("PASS: external multirow INSERT/UPDATE/DELETE, MERGE, rollback and 22-table audit coverage")
+print("PASS: external multirow INSERT/UPDATE/DELETE, MERGE, rollback and 23-table audit coverage")
 
 # Both key columns must be retained in every closure event, including same-ancestor rows.
 sql("""
 IF EXISTS (SELECT 1 FROM dbo.AuditLog WHERE EntityName = 'UPR_CLOSURE'
-    AND (JSON_VALUE(EntityKey, '$.AncestorUPRID') IS NULL
+    AND (JSON_VALUE(EntityKey, '$.UPRAncestry') IS NULL
       OR JSON_VALUE(EntityKey, '$.DescendantUPRID') IS NULL))
     THROW 51019, 'Composite audit key is incomplete.', 1;
 """)
