@@ -1,0 +1,19 @@
+Hello. I should have explained the EntityKey field when I introduced it in the previous delivery.
+
+1. EntityKey explanation and report update
+
+EntityKey identifies the exact table row that changed. For example, {"UnitID":123} means Unit table row 123. For UPR_CLOSURE, the key contains both UPRAncestry and DescendantUPRID because both values are needed to identify that relationship. I used JSON to retain the column names and all key values consistently across the audited tables.
+
+I have updated the audit report to display readable values such as [UnitID] = 123, or [UPRAncestry] = 10025; [DescendantUPRID] = 10026. The stored keys and audit history remain unchanged. The new @RawRecordKey option allows the original JSON display when needed.
+
+If you see a negative EntityRecordID, that is an internal audit reference used for composite/text keys. It is not a negative property UPRID or an error.
+
+2. New search work for your review
+
+Separately, I have updated the existing search script against your new specification. The SQL changes add UPRID, external-ID and contextual Unit searches, improve address/owner matching, and provide ranked address candidates and paginated results. A new Property360 procedure retrieves the selected UPR and its requested hierarchy/context.
+
+Supporting changes preserve longer account numbers and add source-qualified parcel identifiers. The existing report mode remains available. Housing Portal API integration and permission mapping are still required.
+
+The accompanying change notes explain each new procedure, helper and parameter, its purpose, and the installation order. I will include this explanation with future script changes as well.
+
+Local static and syntax checks have passed. Both updates still require SQL Server testing on a restored test database before acceptance.

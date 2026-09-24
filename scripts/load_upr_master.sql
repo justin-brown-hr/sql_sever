@@ -158,15 +158,19 @@ BEGIN
 END;
 GO
 
-/* Numeric SDAT accounts - zero-pad to 8 so 31023 and 00031023 dedupe/MERGE consistently */
+/* Preserve long identifiers; pad short numeric MA/SDAT accounts to eight digits. */
 CREATE OR ALTER FUNCTION dbo.fn_UPR_NormalizeSDATAccount (@acct NVARCHAR(50))
 RETURNS NVARCHAR(50)
 AS
 BEGIN
     DECLARE @s NVARCHAR(50) = NULLIF(LTRIM(RTRIM(ISNULL(@acct, N''))), N'');
     IF @s IS NULL RETURN NULL;
-    IF @s NOT LIKE N'%[^0-9]%' AND LEN(@s) BETWEEN 1 AND 12
-        RETURN RIGHT(REPLICATE(N'0', 8) + @s, 8);
+    DECLARE @digits NVARCHAR(50) = REPLACE(REPLACE(@s, N'-', N''), N' ', N'');
+    IF @digits <> N'' AND @digits NOT LIKE N'%[^0-9]%'
+    BEGIN
+        IF LEN(@digits) < 8 RETURN REPLICATE(N'0', 8 - LEN(@digits)) + @digits;
+        RETURN @digits;
+    END;
     RETURN @s;
 END;
 GO
@@ -802,6 +806,22 @@ FROM #SDAT;
 
 SET @StageRows = (SELECT COUNT(*) FROM #Stage);
 CREATE INDEX IX_Stage_Account_Source ON #Stage (AccountNumber, SourceSystem);
+
+/* SEARCH-002: do not silently split an existing hierarchy whose old normalizer
+   discarded account digits. Reconcile affected source links/accounts first. */
+IF EXISTS (
+    SELECT 1 FROM #Stage s
+    JOIN dbo.EXTERNAL_IDENTIFIER_XREF x ON x.SourceSystem = s.SourceSystem
+        AND x.IdentifierType = N'SOURCE_RECORD_ID' AND x.IdentifierValue = s.SourceRecordID
+    JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = x.UPRID
+    JOIN dbo.UPR u ON u.UPRID = cl.UPRAncestry
+    WHERE (LEN(s.AccountNumber) BETWEEN 9 AND 12
+      AND s.AccountNumber NOT LIKE N'%[^0-9]%'
+      AND u.AccountNumber = RIGHT(s.AccountNumber, 8))
+       OR (u.AccountNumber <> s.AccountNumber
+           AND dbo.fn_UPR_NormalizeSDATAccount(u.AccountNumber) = s.AccountNumber)
+)
+    THROW 50002, 'Existing source links use a truncated account or newly normalized formatted account. Reconcile UPR accounts and source mappings before loading.', 1;
 
 /* Repair ANY leftover legacy generated UnitNumber (N'MA-<id>' / N'SD-<id>'),
    even when its exact source row is no longer in the current incoming batch -
@@ -2021,6 +2041,27 @@ WHERE s.IsValid = 1
         AND e.IdentifierType = N'ACCOUNT_NUMBER'
         AND e.IdentifierValue = s.AccountNumber
   );
+SET @XrefInserted = @XrefInserted + @@ROWCOUNT;
+
+/* SEARCH-002: retain source-qualified parcels on the source target and root.
+   Do not infer global uniqueness or reject an otherwise valid missing parcel.
+   Existing identifiers are retained as provenance; source-change retirement is
+   a separate policy, as with the existing account identifiers. */
+;WITH ParcelLinks AS (
+    SELECT x.TargetUPRID AS UPRID, s.SourceSystem, s.ParcelID
+    FROM #XrefSrc x JOIN #Stage s ON s.StageKey = x.StageKey
+    WHERE s.IsValid = 1 AND s.ParcelID IS NOT NULL
+    UNION
+    SELECT pm.UPRID, s.SourceSystem, s.ParcelID
+    FROM #Stage s JOIN #ParentMap pm ON pm.GroupKey = s.GroupKey
+    WHERE s.IsValid = 1 AND s.ParcelID IS NOT NULL
+)
+INSERT INTO dbo.EXTERNAL_IDENTIFIER_XREF (UPRID, SourceSystem, IdentifierType, IdentifierValue)
+SELECT p.UPRID, p.SourceSystem, N'PARCEL_ID', p.ParcelID
+FROM ParcelLinks p
+WHERE NOT EXISTS (SELECT 1 FROM dbo.EXTERNAL_IDENTIFIER_XREF x
+    WHERE x.UPRID = p.UPRID AND x.SourceSystem = p.SourceSystem
+      AND x.IdentifierType = N'PARCEL_ID' AND x.IdentifierValue = p.ParcelID);
 SET @XrefInserted = @XrefInserted + @@ROWCOUNT;
 
 PRINT N'Step 11 complete - XREF inserted: ' + CONVERT(NVARCHAR(20), @XrefInserted);

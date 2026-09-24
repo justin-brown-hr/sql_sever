@@ -5,6 +5,10 @@
   Change the EXEC parameters at the bottom to select one run/table/date range.
   Result sets: load runs, changed rows, individual changed fields.
   Old audit rows retain their original values; unknown run/session stays NULL.
+  RecordKey displays the stored key as labelled values by default.
+  @RawRecordKey = 1 restores the previous JSON display. No stored key is changed.
+  EntityID identifies the table; EntityRecordID identifies its audited record.
+  Composite/text keys use an internal negative registry ID, not a negative UPRID.
   Field details require database compatibility level 130 or later (OPENJSON).
 */
 USE UPRXDB_TEST;
@@ -21,7 +25,8 @@ CREATE OR ALTER PROCEDURE dbo.usp_UPR_AuditReport
     @Until DATETIME2(3) = NULL, -- exclusive
     @IncludeFieldDetails BIT = 1,
     @UPRID BIGINT = NULL,
-    @EntityID INT = NULL
+    @EntityID INT = NULL,
+    @RawRecordKey BIT = 0 -- append-only option: 1 preserves the previous key display
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -49,7 +54,8 @@ BEGIN
     DECLARE @SummaryEntityID INT = (SELECT EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName = 'UPR_HIER_LOAD');
     SELECT a.AuditLogID AS AuditID, a.RunID, a.SessionID, e.EntityName, a.EntityKey,
         a.ActionType AS OperationType, a.ChangedDate, a.ChangedBy, a.OldValues, a.NewValues,
-        a.UPRID, a.OriginalUPRID, a.EntityID, a.EntityRecordID
+        a.UPRID, a.OriginalUPRID, a.EntityID, a.EntityRecordID,
+        DisplayRecordKey = CONVERT(NVARCHAR(MAX), a.EntityKey)
     INTO #AuditEvents
     FROM dbo.AUDIT_LOG a
     JOIN dbo.REF_ENTITY_IDENTIFICATION e ON e.EntityID = a.EntityID
@@ -60,6 +66,43 @@ BEGIN
       AND (@Since IS NULL OR a.ChangedDate >= @Since)
       AND (@Until IS NULL OR a.ChangedDate < @Until)
     OPTION (RECOMPILE);
+
+    /* Display only: never reserialize/update historical EntityKey or record IDs.
+       Unknown legacy text, empty objects and nested keys retain the raw value.
+       Keep OPENJSON dynamic for databases below compatibility level 130. */
+    IF ISNULL(@RawRecordKey, 0) = 0
+    BEGIN
+        IF (SELECT compatibility_level FROM sys.databases WHERE database_id = DB_ID()) >= 130
+            EXEC sys.sp_executesql N'
+            UPDATE a SET DisplayRecordKey = labels.RecordKey
+            FROM #AuditEvents a
+            CROSS APPLY (
+                SELECT STUFF((
+                    SELECT N''; ['' + REPLACE(STRING_ESCAPE(j.[key], ''json''), N'']'', N'']]'') + N''] = ''
+                        + CASE WHEN j.[type] = 0 THEN N''NULL''
+                               WHEN j.[type] = 1 THEN N''"'' + STRING_ESCAPE(j.value, ''json'') + N''"''
+                               ELSE j.value END
+                    FROM OPENJSON(CASE WHEN ISJSON(a.EntityKey) = 1
+                        AND LEFT(LTRIM(a.EntityKey), 1) = N''{'' THEN a.EntityKey ELSE N''{}'' END) j
+                    ORDER BY CASE WHEN j.[key] IN (N''UPRAncestry'', N''AncestorUPRID'') THEN 0
+                                  WHEN j.[key] = N''DescendantUPRID'' THEN 1 ELSE 2 END,
+                             j.[key] COLLATE Latin1_General_100_BIN2
+                    FOR XML PATH(''''), TYPE
+                ).value(''.'', ''NVARCHAR(MAX)''), 1, 2, N'''') AS RecordKey
+            ) labels
+            WHERE NULLIF(labels.RecordKey, N'''') IS NOT NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM OPENJSON(CASE WHEN ISJSON(a.EntityKey) = 1
+                      THEN a.EntityKey ELSE N''{}'' END) j WHERE j.[type] IN (4, 5)
+              );';
+        ELSE PRINT N'Readable record keys require compatibility level 130+. Showing stored keys.';
+    END;
+    PRINT N'Key guide: EntityID identifies the table. EntityRecordID identifies the record within that table.';
+    PRINT N'Composite/text keys use an internal negative EntityRecordID; it is not a UPRID or an error.';
+    IF @RawRecordKey = 1
+        PRINT N'RecordKey shows stored EntityKey JSON (or retained legacy text).';
+    ELSE
+        PRINT N'RecordKey shows the identifying column(s) and value(s). Stored EntityKey and audit history are unchanged.';
 
     PRINT N'Load runs (row-change counts reflect the selected report filters)';
     SELECT r.RunID, r.StartedAt, r.FinishedAt, r.RunStatus, r.StartedBy,
@@ -86,7 +129,7 @@ BEGIN
         ChangeSource = CASE WHEN RunID IS NOT NULL THEN N'Load run'
             WHEN SessionID IS NOT NULL THEN N'Outside load'
             ELSE N'Earlier audit (run unknown)' END,
-        SessionID, EntityName AS TableName, EntityKey AS RecordKey,
+        SessionID, EntityName AS TableName, DisplayRecordKey AS RecordKey,
         OperationType AS Action, ChangedDate, ChangedBy, OldValues, NewValues
     FROM #AuditEvents ORDER BY AuditID;
 
@@ -101,7 +144,7 @@ BEGIN
         /* Compile OPENJSON only when supported. Binary comparisons preserve
            changes in letter case and trailing spaces; type 0 represents NULL. */
         EXEC sys.sp_executesql N'
-            SELECT a.AuditID, a.RunID, a.UPRID, a.OriginalUPRID, a.EntityID, a.EntityRecordID, a.EntityName AS TableName, a.EntityKey AS RecordKey,
+            SELECT a.AuditID, a.RunID, a.UPRID, a.OriginalUPRID, a.EntityID, a.EntityRecordID, a.EntityName AS TableName, a.DisplayRecordKey AS RecordKey,
                 a.OperationType AS Action, a.ChangedDate, a.ChangedBy,
                 f.FieldName, f.OldValue, f.NewValue,
                 f.OldValueState, f.NewValueState
@@ -131,5 +174,6 @@ EXEC dbo.usp_UPR_AuditReport @LatestRun = 1, @IncludeFieldDetails = 0;
 -- One table: EXEC dbo.usp_UPR_AuditReport @TableName = N'UNIT';
 -- One UPR (including deleted): EXEC dbo.usp_UPR_AuditReport @UPRID = 123;
 -- One entity: EXEC dbo.usp_UPR_AuditReport @EntityID = 4;
+-- Original JSON keys: EXEC dbo.usp_UPR_AuditReport @LatestRun = 1, @RawRecordKey = 1;
 -- One run: EXEC dbo.usp_UPR_AuditReport @RunID = 'paste-run-id-here';
 GO

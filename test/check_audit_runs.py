@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Audit migration, load attribution, failure history and client report checks."""
 import os
+import json
 import re
 from pathlib import Path
 import subprocess
@@ -70,6 +71,14 @@ IF (SELECT COUNT(*) FROM dbo.AuditLog) <> 1
     sql(script("scripts/list_upr_audit.sql"))
     output = sql("EXEC dbo.usp_UPR_AuditReport @TableName = N'UNIT';")
     assert "BEFORE|AFTER" in output, output[-4000:]
+    assert output.count('|[UnitID] = 999|') == 2, output[-4000:]
+    raw = sql("EXEC dbo.usp_UPR_AuditReport @TableName = N'UNIT', @RawRecordKey = 1;")
+    assert raw.count('|{"UnitID":999}|') == 2, raw[-4000:]
+    sql("""
+IF NOT EXISTS (SELECT 1 FROM dbo.AUDIT_LOG a JOIN dbo.REF_ENTITY_IDENTIFICATION e ON e.EntityID=a.EntityID
+    WHERE e.EntityName='UNIT' AND a.EntityKey=N'{"UnitID":999}' AND a.EntityRecordID=999)
+    THROW 51011, 'Readable report changed the stored key/record ID.', 1;
+""")
     print("PASS: existing audit history survives repeated installation and appears in the report", flush=True)
 
     # Same SQL connection: restore a caller context and then audit a manual edit.
@@ -131,6 +140,46 @@ VALUES ((SELECT EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName = '
     output = sql("EXEC dbo.usp_UPR_AuditReport @Since = '9999-01-01';")
     assert "|INSERT|" not in output and "|UPDATE|" not in output
     print("PASS: report filters and field values preserve case, trailing spaces, NULL and long text", flush=True)
+
+    # RecordKey is a display projection only. Exercise composite keys, text
+    # escaping, original column names and legacy fallbacks in both report sets.
+    key_examples = [
+        ('{"UPRAncestry":10025,"DescendantUPRID":10026}', '[UPRAncestry] = 10025; [DescendantUPRID] = 10026'),
+        ('{"AncestorUPRID":10025,"DescendantUPRID":10027}', '[AncestorUPRID] = 10025; [DescendantUPRID] = 10027'),
+        (json.dumps({'Code': 'A & <B>; "quoted"'}, separators=(',', ':')),
+         '[Code] = ' + json.dumps('A & <B>; "quoted"')),
+        ('LegacyRow:ABC&<>', 'LegacyRow:ABC&<>'),
+        ('{"Pair":{"Left":1,"Right":2}}', '{"Pair":{"Left":1,"Right":2}}'),
+        ('[1,2]', '[1,2]'),
+        ('{}', '{}'),
+        ('{"Missing":null}', '[Missing] = NULL'),
+    ]
+    sql("INSERT dbo.REF_ENTITY_IDENTIFICATION (EntityName) VALUES ('AUDIT_KEY_FIXTURE');")
+    for key, _ in key_examples:
+        escaped_key = key.replace("'", "''")
+        sql(f"""
+DECLARE @E INT=(SELECT EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName='AUDIT_KEY_FIXTURE');
+INSERT dbo.AUDIT_ENTITY_RECORD(EntityID,EntityKey) VALUES(@E,N'{escaped_key}');
+DECLARE @Record BIGINT=-CONVERT(BIGINT,SCOPE_IDENTITY());
+INSERT dbo.AUDIT_LOG(EntityID,EntityRecordID,EntityKey,ActionType,ChangedBy,OldValues,NewValues)
+VALUES(@E,@Record,N'{escaped_key}','UPDATE','key-display-test',N'{{"Flag":0}}',N'{{"Flag":1}}');
+""")
+    stored_query = """
+SELECT a.AuditLogID,a.EntityRecordID,a.EntityKey,a.OldValues,a.NewValues
+FROM dbo.AUDIT_LOG a JOIN dbo.REF_ENTITY_IDENTIFICATION e ON e.EntityID=a.EntityID
+WHERE e.EntityName='AUDIT_KEY_FIXTURE' ORDER BY a.AuditLogID;
+"""
+    before_keys = sql(stored_query, full_values=True)
+    readable = sql("EXEC dbo.usp_UPR_AuditReport @TableName=N'AUDIT_KEY_FIXTURE';", full_values=True)
+    raw = sql("EXEC dbo.usp_UPR_AuditReport @TableName=N'AUDIT_KEY_FIXTURE',@RawRecordKey=1;", full_values=True)
+    # Full-width sqlcmd pads fields. Normalize only delimiter-adjacent padding.
+    readable = re.sub(r' +(?=\|)', '', readable)
+    raw = re.sub(r' +(?=\|)', '', raw)
+    for key, label in key_examples:
+        assert readable.count('|' + label + '|') == 2, (label, readable[-6000:])
+        assert raw.count('|' + key + '|') == 2, (key, raw[-6000:])
+    assert sql(stored_query, full_values=True) == before_keys, 'Report mutated retained audit keys/IDs/values'
+    print('PASS: readable and raw key modes, composite/text keys, escaping, legacy fallbacks and unchanged history', flush=True)
 
     # A new source row causes real writes before a disconnected cycle fails
     # Step 12. Neither the new property nor its row events may survive.

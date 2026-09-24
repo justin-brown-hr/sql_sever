@@ -21,7 +21,7 @@ run_sql() {
 }
 
 for f in test/local_it_setup.sql test/local_it_verify.sql test/local_it_counts.sql \
-         test/local_it_search.sql test/run_test_and_results.sql \
+         test/local_it_search.sql test/local_it_search_v2.sql test/run_test_and_results.sql \
          ddl/03_new_upr_schema.sql scripts/load_upr_master.sql scripts/search_upr_master.sql scripts/install_upr_audit.sql; do
     docker cp "$ROOT/$f" "$CONTAINER:$DEST/"
 done
@@ -60,6 +60,7 @@ fi
 echo "### 10. create + exercise search procedure"
 run_sql search_upr_master.sql | tail -3
 run_sql local_it_search.sql | tail -25
+run_sql local_it_search_v2.sql | tail -5
 
 echo "### 11. hierarchy listing regression checks (separate disposable database)"
 CONTAINER="$CONTAINER" python3 "$ROOT/test/check_hierarchy_listing.py"
@@ -90,3 +91,6 @@ CONTAINER="$CONTAINER" python3 "$ROOT/test/check_address_coordinates.py"
 
 echo "### 20. September 17 review, prior-loader reproduction and schema migration"
 CONTAINER="$CONTAINER" python3 "$ROOT/test/check_sept17_review.py"
+
+echo "### 21. Search specification loader support and long-account migration guard"
+CONTAINER="$CONTAINER" python3 "$ROOT/test/check_search_load.py"

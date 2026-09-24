@@ -5,7 +5,12 @@ SQL Server integration that loads **AddressMaster** and **SDAT** into the **hier
 **Model:** `docs/NewUPRTABLEUSED.docx` + `docs/Response.docx` (COMPLEX).  
 **Old flat model** archived under `legacy/` for reference only - do not run it.
 
-Latest update: [September 17 review implementation](CLIENT_UPDATE_2026-09-23.md).
+Latest updates: [UPR search implementation](CLIENT_SEARCH_UPDATE_2026-09-24.md) and
+[EntityKey explanation/readable audit report](CLIENT_AUDIT_KEY_UPDATE_2026-09-24.md).
+Extends the existing search script with Portal modes and Property 360; SQL Server
+integration execution remains pending.
+
+Previous update: [September 17 review implementation](CLIENT_UPDATE_2026-09-23.md).
 Package: `UPR_Corrections_2026-09-23_Review_Update.zip`.
 See [review findings and corrections](CLIENT_REVIEW_FEEDBACK_2026-09-23.md).
 Includes MA/SDAT overlap matching, `BLV` normalization, guarded existing-duplicate

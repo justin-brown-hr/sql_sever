@@ -1,3 +1,6 @@
+> Search and loader normalization were subsequently updated on September 24.
+> Read [the search update](CLIENT_SEARCH_UPDATE_2026-09-24.md) before using the refreshed package.
+
 # September 17 review update — September 23 implementation
 
 Package: `UPR_Corrections_2026-09-23_Review_Update.zip`.

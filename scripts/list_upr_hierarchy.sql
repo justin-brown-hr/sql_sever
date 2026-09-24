@@ -34,13 +34,13 @@ IF @MaxRows IS NOT NULL AND @MaxRows <= 0
 /* Normalize filter locally - do not call load-script functions.
    (SSMS / SQL Server still bind those names at compile time even
    inside OBJECT_ID checks, which causes "Cannot find object".)
-   Match the loader exactly: numeric accounts of 1-12 digits are padded
-   or reduced to their rightmost 8 digits; longer values are unchanged. */
+   Match the loader: remove spaces/hyphens from numeric accounts, pad
+   short values to eight digits and preserve every digit of longer values. */
 DECLARE @NormAccount NVARCHAR(50) = NULLIF(LTRIM(RTRIM(@FilterAccount)), N'');
-IF @NormAccount IS NOT NULL
-   AND @NormAccount NOT LIKE N'%[^0-9]%'
-   AND LEN(@NormAccount) BETWEEN 1 AND 12
-    SET @NormAccount = RIGHT(REPLICATE(N'0', 8) + @NormAccount, 8);
+DECLARE @AccountDigits NVARCHAR(50) = REPLACE(REPLACE(@NormAccount, N'-', N''), N' ', N'');
+IF @AccountDigits <> N'' AND @AccountDigits NOT LIKE N'%[^0-9]%'
+    SET @NormAccount = CASE WHEN LEN(@AccountDigits) < 8
+        THEN REPLICATE(N'0', 8 - LEN(@AccountDigits)) + @AccountDigits ELSE @AccountDigits END;
 
 PRINT N'============================================================';
 PRINT N'  UPR HIERARCHY LISTING';

@@ -1,3 +1,50 @@
+# Latest follow-up — previous-delivery EntityKey feedback
+
+The client asked why EntityKey appeared in the previous delivery and requested
+an explanation of new script additions. They have not seen the new search work.
+Updated `scripts/list_upr_audit.sql`: existing RecordKey columns show labelled
+key values by default; appended `@RawRecordKey=1` restores raw JSON. Stored audit
+keys, registry IDs, schema and history are unchanged. Added meaning/why/design
+notes in `CLIENT_AUDIT_KEY_UPDATE_2026-09-24.md`, including an explicit inventory
+of new search objects and parameters. `CLIENT_MESSAGE_2026-09-24.txt` is the
+prepared combined client message; it has not been sent externally.
+
+The quoted feedback contained no actual displayed value. Asked whether the
+client meant JSON EntityKey or negative EntityRecordID; the prepared explanation
+covers both. Added audit-report regressions to `test/check_audit_runs.py`.
+Database execution remains pending; retain that limit in client communications.
+The current ZIP is refreshed in place to include both guides and the new report.
+
+---
+
+# Current continuation — September 24, 2026
+
+User supplied UPR_SearchSpecificationv2.docx, requested a comparison with the
+current project/previous session, then authorized updating the existing search
+script. See `UPR_SEARCH_GAP_ANALYSIS_2026-09-24.md` for the baseline review and
+`CLIENT_SEARCH_UPDATE_2026-09-24.md` for the implemented SQL contract and limits.
+
+- Updated `scripts/search_upr_master.sql` in place: same search procedure and
+  default REPORT interface, new GRID/JSON modes and `usp_UPR_Property360`.
+- Added missing lookups, all-linked-address matching, bounded fuzzy candidates,
+  role-aware owner matching, pagination, and explicit authorized UPR scope for
+  Portal modes. The API must derive permissions; no API app exists in this repo.
+- Loader/listing preserve long numeric accounts. Loader stops for reconciliation
+  when current source-linked accounts show the old truncation or a changed
+  formatting normalization; it does not repair those persisted mappings blindly.
+- Loader adds source-qualified PARCEL_ID links, preserving missing-parcel rules.
+- Current ZIP refreshed in place under its existing September 23 filename,
+  including the new guide, search assertions and updated SHA-256 manifest.
+- Static/schema/runner checks and T-SQL parsing pass. New behavioral integration
+  assertions are prepared, not executed: no Docker/sqlcmd/SQL Server is available.
+  Asked user for a disposable instance or confirmation they will run SSMS tests;
+  no connection has been provided in this session.
+- SQLFluff was installed only under /tmp for parsing; do not assume it persists.
+- SQL changes remain a test candidate. Existing September 23 checks and the new
+  search suite need actual SQL Server execution before database acceptance.
+
+---
+
 # Current continuation — September 23, 2026
 
 The September 17 review is implemented in the working tree. A subsequent client-eye

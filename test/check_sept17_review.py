@@ -185,8 +185,22 @@ IF (SELECT COUNT(DISTINCT x.UPRID) FROM dbo.EXTERNAL_IDENTIFIER_XREF x
           OR (x.SourceSystem = 'KDAT' AND x.IdentifierValue = '9902'))) <> 3
     THROW 51715, 'Ambiguous blank rows were arbitrarily paired.', 1;
 """)
-    result = query("EXEC dbo.usp_UPR_Search @AccountNumber = N'00999998', @ParcelID = N'FRESH-PARCEL';")
-    assert '00999998' in result, 'Fresh Condo parcel is no longer searchable'
+    result = search_parcel('00999998', 'FRESH-PARCEL')
+    assert result['totalResults'] > 0, 'Fresh Condo parcel is no longer searchable'
+    assert search_parcel('00999998', 'WRONG-PARCEL')['totalResults'] == 0
+
+
+def search_parcel(account, parcel):
+    """Assert only the Portal candidate result, not unrelated report outputs."""
+    result = query(f"""
+DECLARE @Allowed NVARCHAR(MAX)=N'['+ISNULL(STUFF((SELECT N','+CONVERT(NVARCHAR(20),UPRID)
+    FROM dbo.UPR WHERE AccountNumber=N'{account}' ORDER BY UPRID FOR XML PATH('')),1,1,N''),N'')+N']';
+DECLARE @Json NVARCHAR(MAX);
+EXEC dbo.usp_UPR_Search @AccountNumber=N'{account}',@ParcelID=N'{parcel}',
+    @ResultMode='JSON',@IncludeIdentifiers=1,@AuthorizedUPRIDs=@Allowed,@ResponseJson=@Json OUTPUT,@EmitResult=0;
+SELECT CONVERT(INT,JSON_VALUE(@Json,'$.totalResults')) AS totalResults FOR JSON PATH,WITHOUT_ARRAY_WRAPPER;
+""")
+    return json.loads(result)
 
 
 def test_blank_key_collision():
@@ -264,8 +278,9 @@ IF NOT EXISTS (SELECT 1 FROM dbo.UPR_CONDO_LEGACY WHERE CondoName = 'KEEP MANUAL
         assert acceptance.count('SHARED UNIT') == (1 if guarded else 2), acceptance
         if baseline:
             test_closure_audit_identity()
-            result = query("EXEC dbo.usp_UPR_Search @AccountNumber = N'00999999', @ParcelID = N'KEEP-PARCEL';")
-            assert '00999999' in result, 'Archived Condo parcel is no longer searchable'
+            result = search_parcel('00999999', 'KEEP-PARCEL')
+            assert result['totalResults'] > 0, 'Archived Condo parcel is no longer searchable'
+            assert search_parcel('00999999', 'WRONG-PARCEL')['totalResults'] == 0
         test_delete_audit()
         if not baseline:
             test_boundaries()

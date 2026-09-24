@@ -1,3 +1,6 @@
+> This review describes the September 23 baseline. The refreshed package also
+> includes [September 24 search changes](CLIENT_SEARCH_UPDATE_2026-09-24.md), pending SQL Server execution.
+
 # Client-perspective review and correction guide — September 23
 
 **Verdict: revised test candidate, not yet approved for production.**

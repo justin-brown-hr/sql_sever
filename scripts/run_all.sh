@@ -45,5 +45,5 @@ run "scripts/install_upr_audit.sql"      # row auditing for UPR model writes
 run "scripts/load_upr_master.sql"        # the load
 run "scripts/list_upr_audit.sql"         # load history and row/field changes
 run "test/run_test_and_results.sql"      # validation report
-run "scripts/search_upr_master.sql"      # create dbo.usp_UPR_Search
+run "scripts/search_upr_master.sql"      # install search and Property360 procedures
 echo "Pipeline complete."

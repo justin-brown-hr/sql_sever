@@ -1,3 +1,8 @@
+> The package also includes the [EntityKey explanation and readable audit report](CLIENT_AUDIT_KEY_UPDATE_2026-09-24.md).
+
+> Current search behavior and installation notes: [September 24 search update](CLIENT_SEARCH_UPDATE_2026-09-24.md).
+> The refreshed SQL candidate still requires SQL Server integration execution.
+
 > Historical delivery notes. For the current schema, migration order and verification status,
 > see [September 23 update](CLIENT_UPDATE_2026-09-23.md). Earlier test passes do not validate this update.
 

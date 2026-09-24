@@ -65,11 +65,11 @@ DECLARE @Unit INT = (SELECT EntityTypeID FROM dbo.REF_ENTITYTYPE WHERE Descripti
 )
 INSERT dbo.UPR (EntityTypeID, AccountNumber)
 SELECT @Condo, CASE n
-    WHEN 1 THEN '23456789' WHEN 2 THEN 'OTHER'
-    WHEN 3 THEN '1234567890123' WHEN 4 THEN 'ABC-123'
+    WHEN 1 THEN '123456789' WHEN 2 THEN 'OTHER'
+    WHEN 6 THEN '23456789' WHEN 3 THEN '1234567890123' WHEN 4 THEN 'ABC-123'
     ELSE RIGHT('00000000' + CONVERT(VARCHAR(8), n), 8) END
 FROM Numbers;
-DECLARE @Root1 BIGINT = (SELECT UPRID FROM dbo.UPR WHERE AccountNumber = '23456789');
+DECLARE @Root1 BIGINT = (SELECT UPRID FROM dbo.UPR WHERE AccountNumber = '123456789');
 DECLARE @Root2 BIGINT = (SELECT UPRID FROM dbo.UPR WHERE AccountNumber = 'OTHER');
 INSERT dbo.CONDO (UPRID) SELECT UPRID FROM dbo.UPR;
 INSERT dbo.UPR (EntityTypeID, ParentUPRID) VALUES (@Building, @Root1);
@@ -106,8 +106,8 @@ FROM Closure cl;
     print("PASS: default includes 50,001 roots and every child without loader functions")
 
     for account, expected in [
-        ("123456789", "23456789"), ("00023456789", "23456789"),
-        ("000023456789", "23456789"), ("23456789", "23456789"),
+        ("123456789", "123456789"), ("123-456-789", "123456789"),
+        ("23456789", "23456789"),
         (" 5 ", "00000005"), ("1234567890123", "1234567890123"),
         ("ABC-123", "ABC-123"),
     ]:
@@ -116,6 +116,8 @@ FROM Closure cl;
         assert len(roots) == 1 and roots[0][5] == expected, account
     assert len(tree(report("   "))) == 50007
     assert not tree(report("NO_SUCH_ACCOUNT"))
+    assert not tree(report("00023456789"))
+    assert not tree(report("000023456789"))
     print("PASS: numeric boundaries, whitespace, alphanumeric and absent account filters")
 
     capped = report(limit=1)
