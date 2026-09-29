@@ -1,3 +1,53 @@
+# Latest continuation — descendant level-0 query, September 28, 2026
+
+Client screenshot filters DescendantUPRID=207075 and sees repeated Level 2,
+while a root-ancestor filter includes Level 0. Stored Level is explicitly the
+descendant's root depth under prior requirements; root ancestry can be present
+while its row still shows the selected descendant's depth. Preserve that contract.
+Asked optional clarification whether zero means root or selected record; no reply
+received while implementing the root-level interpretation supported by prior work.
+
+Added scripts/list_upr_ancestor_path.sql: read-only, selected database, @UPRID=207075,
+uses ancestor self-row levels, supports both AncestorUPRID and UPRAncestry. Root
+and selected self-link included; output describes each ancestor's own depth.
+The raw SELECT * retains stored descendant levels. No database migration, new
+persistent object or change to stored Level semantics. Loader edit is a comment.
+
+Added integration assertions to check_closure_levels.py; actual SQL Server runs
+remain pending. Extracted query/guard expressions passed 14 SQLite fixture checks;
+static/schema checks and Python syntax passed. Prior unrelated working-tree changes
+were retained. Existing delivery ZIP refreshed with new query, guide and draft.
+See CLIENT_CLOSURE_LEVEL_2026-09-28.md and CLIENT_MESSAGE_2026-09-28.txt (unsent).
+
+---
+
+# Latest continuation — three-work delivery, September 24, 2026
+
+User supplied the actual nine-column AuditLog screenshot and requested combining
+this third change with the unsent search/key-display work. See
+CLIENT_AUDIT_LAYOUT_2026-09-24.md and WORK_RESULTS_2026-09-24.md; these supersede
+physical-layout statements in the older handovers below.
+
+- Main physical dbo.AuditLog: AuditID INT identity, UPRID, EntityNameID,
+  EntityRecordID, OperationType, ChangedBy, ChangedDate DATETIME2(3), OldValues,
+  NewValues. Low-resolution screenshot; requested actual DDL text, not received.
+- Explicitly disclosed new AUDIT_LOG_CONTEXT stores key/run/session/summary;
+  AUDIT_LOG is now a read compatibility view with prior normalized fields/aliases.
+- Installer handles legacy, normalized prior, and existing client layouts;
+  archives old tables, preserves IDs/context, and rolls back unsafe conversions
+  or unmapped entity IDs. Generated triggers/loader write main and context together.
+- Updated diagnostic/report/test consumers. Existing client rows with unrecorded
+  keys report that fact; metadata is not guessed. Diagnostic account matching now
+  follows the nontruncating normalization used by the search work.
+- Added check_audit_layout.py regression and runner phase 22; depends on prior
+  repository revision fce184f. Tests are prepared, not executed against SQL Server.
+- Current ZIP is refreshed in place with all three guides and combined results.
+  CLIENT_MESSAGE_2026-09-24.txt is one unsent client draft explaining all three.
+- No database runtime/connection has been supplied; no deployment or runtime
+  acceptance claims. Continue from latest scripts, not the historical notes below.
+
+---
+
 # Latest follow-up — previous-delivery EntityKey feedback
 
 The client asked why EntityKey appeared in the previous delivery and requested

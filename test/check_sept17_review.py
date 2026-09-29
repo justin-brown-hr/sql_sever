@@ -256,7 +256,7 @@ INSERT dbo.CONDO (UPRID, CondoName, Parcel) VALUES (@NamedCondo, 'KEEP MANUAL NA
             query(f'''IF (SELECT COUNT(*) FROM dbo.AUDIT_LOG) <> {history_count}
     THROW 51710, 'Repeated migration changed historical event count.', 1;
 IF EXISTS (SELECT AuditID, EntityName, EntityKey, OperationType, OldValues, NewValues FROM dbo.AuditLog_PreSept17
-    EXCEPT SELECT AuditID, EntityName, EntityKey, OperationType, OldValues, NewValues FROM dbo.AuditLog)
+    EXCEPT SELECT AuditID, EntityName, EntityKey, OperationType, OldValues, NewValues FROM dbo.AUDIT_LOG)
     THROW 51711, 'Migration changed retained history.', 1;
 IF NOT EXISTS (SELECT 1 FROM dbo.UPR_CONDO_LEGACY WHERE CondoName = 'KEEP MANUAL NAME' AND Parcel = 'KEEP-PARCEL')
     THROW 51716, 'Removed Condo values were not archived.', 1;''')

@@ -5,8 +5,14 @@ SQL Server integration that loads **AddressMaster** and **SDAT** into the **hier
 **Model:** `docs/NewUPRTABLEUSED.docx` + `docs/Response.docx` (COMPLEX).  
 **Old flat model** archived under `legacy/` for reference only - do not run it.
 
+Latest client follow-up: [descendant lookup including root level 0](CLIENT_CLOSURE_LEVEL_2026-09-28.md).
+Use [list_upr_ancestor_path.sql](scripts/list_upr_ancestor_path.sql) to display each
+ancestor's own level when selecting a descendant.
+
 Latest updates: [UPR search implementation](CLIENT_SEARCH_UPDATE_2026-09-24.md) and
-[EntityKey explanation/readable audit report](CLIENT_AUDIT_KEY_UPDATE_2026-09-24.md).
+[EntityKey explanation/readable audit report](CLIENT_AUDIT_KEY_UPDATE_2026-09-24.md), plus
+[the supplied AuditLog layout](CLIENT_AUDIT_LAYOUT_2026-09-24.md).
+See [combined results and validation limits](WORK_RESULTS_2026-09-24.md).
 Extends the existing search script with Portal modes and Property 360; SQL Server
 integration execution remains pending.
 
@@ -50,6 +56,7 @@ SQL/
 
 For the latest corrections on an existing database, follow
 [CLIENT_UPDATE_2026-09-23.md](CLIENT_UPDATE_2026-09-23.md),
+then [the latest AuditLog migration order](CLIENT_AUDIT_LAYOUT_2026-09-24.md),
 including MA-first shared-account classification, guarded existing-Condo repair,
 per-run audit history and the automatic `UPR_CLOSURE.Level` upgrade. The client's source-only
 requirement supersedes the older generated-name conventions.
@@ -170,7 +177,7 @@ Each load step is commented in `scripts/load_upr_master.sql` (Steps 0-14).
 | Addresses | Source street number/name create Building + Address regardless of record type; blank street type/city/ZIP do not block. Missing State/ZIP stay NULL. Direct Address links are added to parents and Units |
 | Closure Level | Descendant's depth from the root, matching report `LevelNo` (root 0, child 1, grandchild 2). All ancestor paths and self-links remain; the loader upgrades existing tables and repairs levels after reparenting |
 | Idempotency | Safe to re-run - existing UPR/XREF/contact rows are reused, not duplicated |
-| Audit | AUDIT_LOG stores numeric EntityID / EntityRecordID and live/original UPR IDs; REF_ENTITY_IDENTIFICATION stores entity names. AuditLog is a compatibility view. Run the updated `install_upr_audit.sql` first: row auditing on 23 UPR model/reference tables, full before/after values, RunID and session. `UPR_LOAD_RUN` retains completed/failed/empty runs; `list_upr_audit.sql` shows run history and row/field changes, including edits outside loads |
+| Audit | AuditLog is the client's nine-column physical table with EntityNameID / EntityRecordID. AUDIT_LOG_CONTEXT retains raw keys and run/session details; AUDIT_LOG is the read compatibility view. REF_ENTITY_IDENTIFICATION stores entity names. Run the updated `install_upr_audit.sql` first: row auditing on 23 UPR model/reference tables, full before/after values, RunID and session. `UPR_LOAD_RUN` retains completed/failed/empty runs; `list_upr_audit.sql` shows run history and row/field changes, including edits outside loads |
 
 ## Address Normalization
 
@@ -198,7 +205,6 @@ To reset data only, in dependency order:
 USE UPRXDB_TEST;
 DELETE FROM dbo.UPRMATCHREVIEW_Q;
 DELETE FROM dbo.UPRSTATUSHISTORY;
-DELETE FROM dbo.AUDIT_LOG;
 DELETE FROM dbo.UPR_CLOSURE;
 DELETE FROM dbo.EXTERNAL_IDENTIFIER_XREF;
 DELETE FROM dbo.UPR_CONTACT;
@@ -212,6 +218,9 @@ DELETE FROM dbo.PROPERTY;
 DELETE FROM dbo.COMPLEX;
 DELETE FROM dbo.ADU;
 DELETE FROM dbo.UPR;
+-- Disposable reset only: deleting main events cascades to their context.
+DELETE FROM dbo.AuditLog;
+DELETE FROM dbo.UPR_LOAD_RUN;
 ```
 
 Then re-run the load script.

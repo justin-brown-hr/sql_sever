@@ -58,8 +58,25 @@ def verify():
     return actual
 
 
+def verify_ancestor_report(descendant):
+    # Independent expected path: read ParentUPRID, never infer it from closure.
+    chain = [descendant]
+    while True:
+        parent = int(sql(f"SELECT COALESCE(ParentUPRID,0) FROM dbo.UPR WHERE UPRID={chain[-1]};").strip())
+        if not parent:
+            break
+        assert parent not in chain, "Unexpected fixture cycle"
+        chain.append(parent)
+    expected = [(level, ancestor, descendant) for level, ancestor in enumerate(reversed(chain))]
+    text = (ROOT / "scripts/list_upr_ancestor_path.sql").read_text().replace(
+        "DECLARE @UPRID BIGINT = 207075;", f"DECLARE @UPRID BIGINT = {descendant};")
+    output = sql(text)
+    actual = [tuple(map(int, line.split("|"))) for line in output.splitlines() if "|" in line]
+    assert actual == expected, (expected, actual)
+
+
 def audit_id():
-    return int(sql("SELECT COALESCE(MAX(AuditID), 0) FROM dbo.AuditLog;").strip())
+    return int(sql("SELECT COALESCE(MAX(AuditID), 0) FROM dbo.AUDIT_LOG;").strip())
 
 
 def assert_quiet_rerun():
@@ -68,7 +85,7 @@ def assert_quiet_rerun():
     load()
     assert verify() == before
     sql(f"""
-IF EXISTS (SELECT 1 FROM dbo.AuditLog WHERE AuditID > {last}
+IF EXISTS (SELECT 1 FROM dbo.AUDIT_LOG WHERE AuditID > {last}
            AND EntityName <> 'UPR_HIER_LOAD')
     THROW 51001, 'Unchanged rerun wrote business audit events.', 1;
 """)
@@ -139,6 +156,22 @@ IF NOT EXISTS (SELECT 1 FROM dbo.CONDO c INNER JOIN dbo.UPR u ON u.UPRID = c.UPR
     assert '01231829|08123748|Condo' in listing, 'Report lost the child Condo account or type'
     assert_quiet_rerun()
     print('PASS: illustrated nine-node tree retains child Condo account, parent, ancestor paths and report')
+    # Client's descendant query must display ancestor levels 0, 1, 2, not 2, 2, 2.
+    root = int(sql("SELECT UPRID FROM dbo.UPR WHERE AccountNumber='01231829';").strip())
+    child = int(sql("SELECT UPRID FROM dbo.UPR WHERE AccountNumber='08123748';").strip())
+    before_report = closure()
+    last_report_event = audit_id()
+    verify_ancestor_report(root)
+    verify_ancestor_report(child)
+    assert closure() == before_report and audit_id() == last_report_event, "Read-only report changed data"
+    # The screenshot uses the old spelling; both layouts must work unchanged.
+    sql("EXEC sys.sp_rename N'dbo.UPR_CLOSURE.UPRAncestry',N'AncestorUPRID',N'COLUMN';")
+    try:
+        verify_ancestor_report(child)
+    finally:
+        sql("EXEC sys.sp_rename N'dbo.UPR_CLOSURE.AncestorUPRID',N'UPRAncestry',N'COLUMN';")
+    print('PASS: ancestor report includes root 0, preserves self/path rows and supports both column spellings')
+
 
     # Reproduce an already populated two-column client closure table. Reinstall
     # auditing against that old shape to also test trigger behavior on upgrade.
@@ -155,10 +188,10 @@ ALTER TABLE dbo.UPR_CLOSURE DROP COLUMN [Level];
 IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.UPR_CLOSURE')
            AND name = 'Level' AND (is_nullable = 1 OR TYPE_NAME(user_type_id) <> 'int'))
     THROW 51002, 'Upgrade did not enforce Level INT NOT NULL.', 1;
-IF (SELECT COUNT(*) FROM dbo.AuditLog WHERE AuditID > {last}
+IF (SELECT COUNT(*) FROM dbo.AUDIT_LOG WHERE AuditID > {last}
     AND EntityName = 'UPR_CLOSURE' AND OperationType = 'UPDATE') <> {len(before)}
     THROW 51003, 'Existing closure level backfill was not fully audited.', 1;
-IF EXISTS (SELECT 1 FROM dbo.AuditLog WHERE AuditID > {last}
+IF EXISTS (SELECT 1 FROM dbo.AUDIT_LOG WHERE AuditID > {last}
     AND EntityName = 'UPR_CLOSURE' AND JSON_VALUE(NewValues, '$.Level') IS NULL)
     THROW 51004, 'Audit trigger omitted the added Level column.', 1;
 """)
@@ -191,13 +224,16 @@ UPDATE dbo.UPR SET ParentUPRID = @NewParent WHERE ParentUPRID = @Root;
     assert max(level for _, _, level in after) == 3
     assert before != after
     sql(f"""
-IF NOT EXISTS (SELECT 1 FROM dbo.AuditLog WHERE AuditID > {last}
+IF NOT EXISTS (SELECT 1 FROM dbo.AUDIT_LOG WHERE AuditID > {last}
     AND EntityName = 'UPR_CLOSURE' AND OperationType = 'UPDATE'
     AND JSON_VALUE(OldValues, '$.Level') <> JSON_VALUE(NewValues, '$.Level'))
     THROW 51005, 'Surviving subtree closure rows did not audit their changed level.', 1;
 """)
     assert_quiet_rerun()
     print("PASS: reparenting repairs paths and surviving rows' levels, including depth 3")
+    deepest = next(descendant for ancestor, descendant, level in after if level == 3)
+    verify_ancestor_report(deepest)
+
 
     sql("UPDATE dbo.UPR_CLOSURE SET [Level] = 99;")
     load()

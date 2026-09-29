@@ -64,20 +64,20 @@ UPDATE dbo.ADDRESS SET XCoordinate = 20, YCoordinate = 90 WHERE StreetName = 'PA
 UPDATE dbo.ADDRESS SET XCoordinate = 10, YCoordinate = 20 WHERE StreetName = 'PARTIAL';
 SELECT 'LEGACY';
 """)
-    audit_id = int(query('SELECT MAX(AuditID) FROM dbo.AuditLog;'))
+    audit_id = int(query('SELECT MAX(AuditID) FROM dbo.AUDIT_LOG;'))
     sql(loader)
     query(verify)
     assert query(identities) == before, 'Legacy repair replaced IDs or address links'
     query(f"""
-IF (SELECT COUNT(*) FROM dbo.AuditLog WHERE AuditID > {audit_id} AND EntityName = 'ADDRESS'
+IF (SELECT COUNT(*) FROM dbo.AUDIT_LOG WHERE AuditID > {audit_id} AND EntityName = 'ADDRESS'
     AND OperationType = 'UPDATE' AND RunID IS NOT NULL) <> 2
     THROW 51402, 'Legacy coordinate repairs did not record both before/after events.', 1;
 SELECT 'PASS';
 """)
     print('PASS: complete, partial and missing pairs stay source-backed; legacy combinations repaired with IDs and audit preserved')
-    audit_id = int(query('SELECT MAX(AuditID) FROM dbo.AuditLog;'))
+    audit_id = int(query('SELECT MAX(AuditID) FROM dbo.AUDIT_LOG;'))
     sql(loader)
-    query(f"IF EXISTS (SELECT 1 FROM dbo.AuditLog WHERE AuditID > {audit_id} AND EntityName <> 'UPR_HIER_LOAD') "
+    query(f"IF EXISTS (SELECT 1 FROM dbo.AUDIT_LOG WHERE AuditID > {audit_id} AND EntityName <> 'UPR_HIER_LOAD') "
           "THROW 51403, 'Coordinate selection changed on an unchanged rerun.', 1; SELECT 'PASS';")
     # Preserve a different real source pair and a manually maintained pair.
     query("""

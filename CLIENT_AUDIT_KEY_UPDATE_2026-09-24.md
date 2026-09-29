@@ -8,7 +8,7 @@ and the related numeric audit record identifier.
 
 ## What EntityKey means and why it was written this way
 
-`AUDIT_LOG.EntityKey` records the primary-key column names and values identifying
+`AUDIT_LOG_CONTEXT.EntityKey` (also exposed by the `AUDIT_LOG` read view) records the primary-key column names and values identifying
 which table row changed. It was introduced as audit support so one event table
 could describe changes across tables with different keys.
 
@@ -26,11 +26,11 @@ These fields have different purposes:
 
 | Field | Meaning |
 |---|---|
-| AuditLogID / report AuditID | One audit event; the same row can have many events. |
-| EntityID | Identifies the table/entity in REF_ENTITY_IDENTIFICATION. |
+| Main AuditID / compatibility AuditLogID | One audit event; the same row can have many events. |
+| Main EntityNameID / compatibility EntityID | Identifies the table/entity in REF_ENTITY_IDENTIFICATION. |
 | EntityRecordID | Native integer row key where available; otherwise a stable internal registry reference for the full composite/text key. Read it together with EntityID. |
 | EntityKey / report RecordKey | The complete identifying key, including its column names. |
-| UPRID | Associated live master UPR, when a single association can be established. |
+| Main UPRID | Retained event association when known. The compatibility view exposes a live-only UPRID. |
 | OriginalUPRID | Retains the event's original UPR association, including after deletion. |
 
 For composite or text keys, the previous implementation uses the negative of an
@@ -43,8 +43,10 @@ delivery. It is not a field added by the new search work.
 
 ## What this update changes
 
-Only the report procedure in `scripts/list_upr_audit.sql` changes audit behavior.
-Its existing RecordKey output is readable by default in both changed-row and
+The readability change is in `scripts/list_upr_audit.sql`. The separate third
+work aligns physical storage with the newly supplied client layout; see
+[AuditLog layout and migration](CLIENT_AUDIT_LAYOUT_2026-09-24.md).
+The report's existing RecordKey output is readable by default in both changed-row and
 field-detail results:
 
 | Stored EntityKey / previous display | New default RecordKey display |
@@ -53,11 +55,13 @@ field-detail results:
 | `{"UPRAncestry":10025,"DescendantUPRID":10026}` | `[UPRAncestry] = 10025; [DescendantUPRID] = 10026` |
 | `{"Code":"OWNER"}` | `[Code] = "OWNER"` |
 
-No persistent table or column is added for this change. Stored EntityKey JSON,
-EntityRecordID values, UPR IDs, before/after values and retained audit history
-remain unchanged. A direct query of AUDIT_LOG.EntityKey or the AuditLog
-compatibility view will therefore still show the stored JSON. Use the audit
-report for the readable presentation.
+The readable display itself adds no stored display column. The combined layout
+update moves raw keys and run/session details into the explicitly documented
+`AUDIT_LOG_CONTEXT` companion table. Main `dbo.AuditLog` has only the client's
+nine columns, including EntityNameID and EntityRecordID. Raw keys remain available
+through `AUDIT_LOG.EntityKey`; use the report for their readable presentation.
+History from a client table that never recorded a raw key is labelled
+`[EntityRecordID] = N (original key not recorded)`; raw mode returns NULL.
 
 The one new report parameter is `@RawRecordKey BIT = 0`, appended after the
 existing parameters. Set it to 1 for the previous raw key presentation. Report
@@ -73,10 +77,10 @@ requires compatibility 130+ for the current audit migration.
 
 ## Apply and inspect
 
-For an already installed September 23 audit schema, set the database name and
-run the updated `scripts/list_upr_audit.sql`. This replaces the report procedure
-and opens the latest-run report. It does not rerun the loader or audit migration.
-If auditing is not yet installed, follow the existing installation guide first.
+Apply the latest `scripts/install_upr_audit.sql` first, including databases that
+already received the September 23 version. Then install the loader and reports
+from the same package, following [the combined installation order](CLIENT_AUDIT_LAYOUT_2026-09-24.md).
+Do not mix the old loader with the new physical AuditLog layout.
 
 ```sql
 -- Readable record keys; default latest-run summary has no field expansion.
@@ -126,7 +130,7 @@ IncludeContacts, IncludeIdentifiers, MaxNodes, ResponseJson OUTPUT and EmitResul
 These authorization parameters must be derived by trusted API code, not accepted
 as user-granted access. SQL helpers do not implement the Housing Portal itself.
 
-The existing delivery ZIP contains both updates and their guides. Its filename
+The existing delivery ZIP contains all three updates and their guides. Its filename
 remains `UPR_Corrections_2026-09-23_Review_Update.zip`; the refreshed manifest
-identifies this September 24 revision. Both updates remain candidates for a
+identifies this September 24 revision. All three updates remain candidates for a
 restored test database, pending actual SQL Server integration execution.

@@ -112,49 +112,49 @@ IF (SELECT COUNT(*) FROM dbo.ADDRESS WHERE StreetName = 'SYNTHETIC SF TEST') <> 
     THROW 51009, 'Missing address link repair duplicated the Address.', 1;
 IF EXISTS (SELECT 1 FROM dbo.CONTACT WHERE OrganizationName = '00089876')
     THROW 51010, 'Legacy account-as-owner fallback remains.', 1;
-IF NOT EXISTS (SELECT 1 FROM dbo.AuditLog WHERE EntityName = 'UNIT' AND OperationType = 'UPDATE'
+IF NOT EXISTS (SELECT 1 FROM dbo.AUDIT_LOG WHERE EntityName = 'UNIT' AND OperationType = 'UPDATE'
     AND JSON_VALUE(OldValues, '$.UnitNumber') = 'SD-7352'
     AND JSON_VALUE(NewValues, '$.UnitNumber') IS NULL)
     THROW 51011, 'Legacy repair has no before/after audit.', 1;
 """)
 print("PASS: source-proven legacy repair preserves IDs; missing Address link repaired without duplicates")
 
-baseline = int(sql("SELECT MAX(AuditID) FROM dbo.AuditLog;").splitlines()[-1])
+baseline = int(sql("SELECT MAX(AuditID) FROM dbo.AUDIT_LOG;").splitlines()[-1])
 load()
-sql(f"IF EXISTS (SELECT 1 FROM dbo.AuditLog WHERE AuditID > {baseline} "
+sql(f"IF EXISTS (SELECT 1 FROM dbo.AUDIT_LOG WHERE AuditID > {baseline} "
     "AND EntityName <> 'UPR_HIER_LOAD') THROW 51012, 'Unchanged rerun mutated business rows.', 1;")
 print("PASS: unchanged rerun produces only the batch summary, no business changes")
 
 sql("""
-DECLARE @Before INT = (SELECT MAX(AuditID) FROM dbo.AuditLog);
+DECLARE @Before INT = (SELECT MAX(AuditID) FROM dbo.AUDIT_LOG);
 BEGIN TRANSACTION;
 INSERT dbo.REF_ENTITYTYPE (Description) VALUES ('AUDIT TEST A'), ('AUDIT TEST B');
 UPDATE dbo.REF_ENTITYTYPE SET Description = Description + ' UPDATED' WHERE Description LIKE 'AUDIT TEST%';
 DELETE dbo.REF_ENTITYTYPE WHERE Description LIKE 'AUDIT TEST%';
-IF (SELECT COUNT(*) FROM dbo.AuditLog WHERE AuditID > @Before AND EntityName = 'REF_ENTITYTYPE'
+IF (SELECT COUNT(*) FROM dbo.AUDIT_LOG WHERE AuditID > @Before AND EntityName = 'REF_ENTITYTYPE'
     AND OperationType = 'INSERT' AND OldValues IS NULL AND ISJSON(NewValues) = 1) <> 2
     THROW 51013, 'Multirow INSERT audit failed.', 1;
-IF (SELECT COUNT(*) FROM dbo.AuditLog WHERE AuditID > @Before AND EntityName = 'REF_ENTITYTYPE'
+IF (SELECT COUNT(*) FROM dbo.AUDIT_LOG WHERE AuditID > @Before AND EntityName = 'REF_ENTITYTYPE'
     AND OperationType = 'UPDATE' AND ISJSON(OldValues) = 1 AND ISJSON(NewValues) = 1) <> 2
     THROW 51014, 'Multirow UPDATE audit failed.', 1;
-IF (SELECT COUNT(*) FROM dbo.AuditLog WHERE AuditID > @Before AND EntityName = 'REF_ENTITYTYPE'
+IF (SELECT COUNT(*) FROM dbo.AUDIT_LOG WHERE AuditID > @Before AND EntityName = 'REF_ENTITYTYPE'
     AND OperationType = 'DELETE' AND ISJSON(OldValues) = 1 AND NewValues IS NULL) <> 2
     THROW 51015, 'Multirow DELETE audit failed.', 1;
 ROLLBACK TRANSACTION;
-IF EXISTS (SELECT 1 FROM dbo.AuditLog WHERE AuditID > @Before)
+IF EXISTS (SELECT 1 FROM dbo.AUDIT_LOG WHERE AuditID > @Before)
     THROW 51016, 'Rolled-back changes left misleading committed audit records.', 1;
 IF (SELECT COUNT(*) FROM sys.triggers WHERE name LIKE 'tr_UPR_Audit[_]%' AND is_disabled = 0) <> 23
     THROW 51017, 'Not all 23 model/reference tables are audited.', 1;
 BEGIN TRANSACTION;
 INSERT dbo.REF_ENTITYTYPE (Description) VALUES ('AUDIT MERGE A'), ('AUDIT MERGE B');
-SET @Before = (SELECT MAX(AuditID) FROM dbo.AuditLog);
+SET @Before = (SELECT MAX(AuditID) FROM dbo.AUDIT_LOG);
 MERGE dbo.REF_ENTITYTYPE AS t
 USING (VALUES ('AUDIT MERGE A'), ('AUDIT MERGE C')) AS s(Description)
 ON t.Description = s.Description
 WHEN MATCHED THEN UPDATE SET Description = s.Description + ' UPDATED'
 WHEN NOT MATCHED THEN INSERT (Description) VALUES (s.Description)
 WHEN NOT MATCHED BY SOURCE AND t.Description = 'AUDIT MERGE B' THEN DELETE;
-IF (SELECT COUNT(DISTINCT OperationType) FROM dbo.AuditLog WHERE AuditID > @Before) <> 3
+IF (SELECT COUNT(DISTINCT OperationType) FROM dbo.AUDIT_LOG WHERE AuditID > @Before) <> 3
     THROW 51018, 'Mixed-action MERGE audit failed.', 1;
 ROLLBACK TRANSACTION;
 """)
@@ -162,7 +162,7 @@ print("PASS: external multirow INSERT/UPDATE/DELETE, MERGE, rollback and 23-tabl
 
 # Both key columns must be retained in every closure event, including same-ancestor rows.
 sql("""
-IF EXISTS (SELECT 1 FROM dbo.AuditLog WHERE EntityName = 'UPR_CLOSURE'
+IF EXISTS (SELECT 1 FROM dbo.AUDIT_LOG WHERE EntityName = 'UPR_CLOSURE'
     AND (JSON_VALUE(EntityKey, '$.UPRAncestry') IS NULL
       OR JSON_VALUE(EntityKey, '$.DescendantUPRID') IS NULL))
     THROW 51019, 'Composite audit key is incomplete.', 1;

@@ -1,11 +1,11 @@
 # UPR search update — September 24, 2026
 
-The same package also includes the [EntityKey explanation and audit report update](CLIENT_AUDIT_KEY_UPDATE_2026-09-24.md), which addresses feedback on the previous delivery.
+The same package also includes the [EntityKey explanation and audit report update](CLIENT_AUDIT_KEY_UPDATE_2026-09-24.md), which addresses feedback on the previous delivery, and the [client AuditLog layout](CLIENT_AUDIT_LAYOUT_2026-09-24.md).
 
 The existing `scripts/search_upr_master.sql` now installs the updated
 `dbo.usp_UPR_Search` and a new `dbo.usp_UPR_Property360` detail procedure. The
-September 23 hierarchy, closure column names, Condo migration and audit contract
-remain in place. This is a **SQL test candidate**, not a deployed Housing Portal
+September 23 hierarchy, closure column names and Condo migration remain in place.
+The audit storage now follows the separately documented client layout. This is a **SQL test candidate**, not a deployed Housing Portal
 API or a database-validated release.
 
 ## What changed
@@ -46,14 +46,15 @@ report. Portal callers should explicitly choose JSON or GRID.
 Use a restored test database first and select its name in each script's `USE`
 statement. The files in this update do not reset tables.
 
-1. Run the current `scripts/install_upr_audit.sql` if the September 23 schema/audit
-   update has not already been installed successfully.
+1. Run the latest `scripts/install_upr_audit.sql`, **even if the September 23
+   version was already installed**. It applies the newly supplied AuditLog layout
+   and preserves technical audit context separately.
 2. Run the updated `scripts/load_upr_master.sql`. This installs the corrected
    normalization function and populates parcel links for the incoming rows.
 3. Run `scripts/search_upr_master.sql` to install both query procedures and their
    comparison helpers. Reinstalling this script does not load or modify UPR data.
 4. Use the updated `scripts/list_upr_hierarchy.sql` for consistent account filters.
-5. Run the normal validation/audit reports and the new search tests in a
+5. Install the updated `scripts/list_upr_audit.sql`. Run the normal validation/audit reports and the new search tests in a
    disposable database. Save first-load and unchanged-rerun results.
 
 If existing source-linked ancestors contain a formerly truncated or newly

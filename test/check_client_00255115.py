@@ -117,11 +117,11 @@ IF NOT EXISTS (SELECT 1 FROM dbo.UPRMATCHREVIEW_Q WHERE SDAT_AccountNumber = '00
 """)
     assert query(source_rows) == source_before, 'MA incoming rows were changed'
     before_ids = query(identities)
-    before_audit = query('SELECT MAX(AuditID) FROM dbo.AuditLog;')
+    before_audit = query('SELECT MAX(AuditID) FROM dbo.AUDIT_LOG;')
     sql(loader)
     assert json.loads(query(counts)) == expected
     assert query(identities) == before_ids
-    query(f"IF EXISTS (SELECT 1 FROM dbo.AuditLog WHERE AuditID > {before_audit} AND EntityName <> 'UPR_HIER_LOAD') "
+    query(f"IF EXISTS (SELECT 1 FROM dbo.AUDIT_LOG WHERE AuditID > {before_audit} AND EntityName <> 'UPR_HIER_LOAD') "
           "THROW 51210, 'Unchanged client subset produced business changes.', 1; SELECT 'PASS';")
     print('PASS: visible MA subset forms one Complex, two Buildings and 13 real-numbered Units', flush=True)
     print('PASS: account padding, repeated unit numbers across buildings, IDs and unchanged rerun', flush=True)

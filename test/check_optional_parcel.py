@@ -92,14 +92,14 @@ SELECT CONVERT(VARCHAR(64), HASHBYTES('SHA2_256', (
     SELECT UPRID, ParentUPRID, AccountNumber FROM dbo.UPR ORDER BY UPRID FOR JSON PATH)), 2);
 """
     before = query(snapshot_query)
-    audit_id = int(query('SELECT MAX(AuditID) FROM dbo.AuditLog;').splitlines()[-1])
+    audit_id = int(query('SELECT MAX(AuditID) FROM dbo.AUDIT_LOG;').splitlines()[-1])
     sql(loader)
     assert query(snapshot_query) == before, 'Rerun changed the hierarchy or identities'
     query(f"""
 IF (SELECT COUNT(*) FROM dbo.UPRMATCHREVIEW_Q) <> 6
    OR (SELECT COUNT(*) FROM dbo.UPRMATCHREVIEW_Q WHERE ReasonForNoMatch = 'MISSING PARCELID') <> 1
     THROW 51306, 'Rerun duplicated reviews or removed a historical entry.', 1;
-IF EXISTS (SELECT 1 FROM dbo.AuditLog WHERE AuditID > {audit_id} AND EntityName <> 'UPR_HIER_LOAD')
+IF EXISTS (SELECT 1 FROM dbo.AUDIT_LOG WHERE AuditID > {audit_id} AND EntityName <> 'UPR_HIER_LOAD')
     THROW 51307, 'Unchanged rerun wrote business audit events.', 1;
 """)
     print('PASS: existing review history retained; rerun adds no reviews or business changes')

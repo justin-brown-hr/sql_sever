@@ -139,7 +139,7 @@ IF NOT EXISTS (SELECT 1 FROM dbo.UNIT un JOIN dbo.BUILDING b ON b.BuildingID = u
     JOIN dbo.UPR bu ON bu.UPRID = b.UPRID JOIN dbo.UPR u ON u.UPRID = un.UPRID
     WHERE un.UPRID = {old_unit} AND u.ParentUPRID = b.UPRID AND bu.ParentUPRID = {old_root})
     THROW 51103, 'Existing Unit was not moved under its Building.', 1;
-IF NOT EXISTS (SELECT 1 FROM dbo.AuditLog WHERE EntityName = 'CONDO' AND OperationType = 'DELETE'
+IF NOT EXISTS (SELECT 1 FROM dbo.AUDIT_LOG WHERE EntityName = 'CONDO' AND OperationType = 'DELETE'
     AND JSON_VALUE(OldValues, '$.UPRID') = '{old_root}')
     THROW 51104, 'Old Condo subtype was removed without a full audit record.', 1;
 IF NOT EXISTS (SELECT 1 FROM dbo.UPR u JOIN dbo.COMPLEX c ON c.UPRID = u.UPRID
@@ -170,9 +170,9 @@ IF NOT EXISTS (SELECT 1 FROM dbo.UPRMATCHREVIEW_Q WHERE SDAT_AccountNumber = '00
         print("PASS: ambiguous/unmatched overlaps go to review; postal variations do not invent a Complex", flush=True)
         print("PASS: source-proven Condo reclassified with root/Unit IDs, XREFs, audit and Level preserved", flush=True)
         print("PASS: ambiguous existing parent is queued without creating another tree", flush=True)
-        before = sql("SELECT MAX(AuditID) FROM dbo.AuditLog;")
+        before = sql("SELECT MAX(AuditID) FROM dbo.AUDIT_LOG;")
         load()
-        sql(f"IF EXISTS (SELECT 1 FROM dbo.AuditLog WHERE AuditID > {before} AND EntityName <> 'UPR_HIER_LOAD') "
+        sql(f"IF EXISTS (SELECT 1 FROM dbo.AUDIT_LOG WHERE AuditID > {before} AND EntityName <> 'UPR_HIER_LOAD') "
             "THROW 51110, 'Unchanged rerun mutated business data after MA precedence repair.', 1;")
         print("PASS: unchanged rerun produces no additional business events", flush=True)
 finally:

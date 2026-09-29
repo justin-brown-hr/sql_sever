@@ -32,6 +32,9 @@ GO
    ============================================================================ */
 IF OBJECT_ID(N'dbo.UPRSTATUSHISTORY', N'U') IS NOT NULL DROP TABLE dbo.UPRSTATUSHISTORY;
 IF OBJECT_ID(N'dbo.UPRMATCHREVIEW_Q', N'U') IS NOT NULL DROP TABLE dbo.UPRMATCHREVIEW_Q;
+IF OBJECT_ID(N'dbo.AUDIT_LOG', N'V') IS NOT NULL DROP VIEW dbo.AUDIT_LOG;
+IF OBJECT_ID(N'dbo.AUDIT_LOG_CONTEXT', N'U') IS NOT NULL DROP TABLE dbo.AUDIT_LOG_CONTEXT;
+IF OBJECT_ID(N'dbo.AUDIT_LOG_PreClientLayout', N'U') IS NOT NULL DROP TABLE dbo.AUDIT_LOG_PreClientLayout;
 IF OBJECT_ID(N'dbo.AuditLog', N'V') IS NOT NULL DROP VIEW dbo.AuditLog;
 IF OBJECT_ID(N'dbo.AuditLog', N'U') IS NOT NULL DROP TABLE dbo.AuditLog;
 IF OBJECT_ID(N'dbo.AUDIT_LOG', N'U') IS NOT NULL DROP TABLE dbo.AUDIT_LOG;
@@ -555,39 +558,54 @@ CREATE TABLE dbo.AUDIT_ENTITY_RECORD
     CONSTRAINT UQ_AUDIT_ENTITY_RECORD UNIQUE (EntityID, EntityKey)
 );
 GO
-CREATE TABLE dbo.AUDIT_LOG
+CREATE TABLE dbo.AuditLog
 (
-    AuditLogID BIGINT IDENTITY(1,1) NOT NULL CONSTRAINT PK_AUDIT_LOG PRIMARY KEY,
+    AuditID INT IDENTITY(1,1) NOT NULL,
     UPRID BIGINT NULL,
-    OriginalUPRID BIGINT NULL,
-    EntityID INT NOT NULL REFERENCES dbo.REF_ENTITY_IDENTIFICATION (EntityID),
+    EntityNameID INT NOT NULL,
     EntityRecordID BIGINT NOT NULL,
-    EntityKey NVARCHAR(200) NOT NULL,
-    ActionType VARCHAR(20) NOT NULL,
-    ChangedDate DATETIME2(3) NOT NULL DEFAULT (SYSDATETIME()),
+    OperationType NVARCHAR(20) NOT NULL,
     ChangedBy NVARCHAR(100) NOT NULL,
+    ChangedDate DATETIME2(3) NOT NULL CONSTRAINT DF_AuditLog_Client_ChangedDate DEFAULT (SYSDATETIME()),
     OldValues NVARCHAR(MAX) NULL,
     NewValues NVARCHAR(MAX) NULL,
+    CONSTRAINT PK_AuditLog_Client PRIMARY KEY CLUSTERED (AuditID),
+    CONSTRAINT CK_AuditLog_Client_OperationType CHECK (OperationType IN
+        ('INSERT','UPDATE','DELETE','MERGE','STATUS_CHANGE')),
+    CONSTRAINT CK_AuditLog_Client_ChangedDate CHECK (ChangedDate <= DATEADD(MINUTE,1,SYSDATETIME()))
+);
+GO
+/* Technical event context stays outside the client's nine-column AuditLog.
+   EntityKey is nullable: historical client-layout rows did not record it. */
+CREATE TABLE dbo.AUDIT_LOG_CONTEXT
+(
+    AuditID INT NOT NULL CONSTRAINT PK_AUDIT_LOG_CONTEXT PRIMARY KEY,
+    OriginalUPRID BIGINT NULL,
+    EntityKey NVARCHAR(200) NULL,
     RunID UNIQUEIDENTIFIER NULL,
     SessionID INT NULL,
     ChangeSummary NVARCHAR(2000) NULL,
-    /* Live FK clears on removal; OriginalUPRID and JSON retain event identity. */
-    CONSTRAINT FK_AUDIT_LOG_UPR FOREIGN KEY (UPRID) REFERENCES dbo.UPR (UPRID) ON DELETE SET NULL,
-    CONSTRAINT CK_AUDIT_LOG_Action CHECK (ActionType IN ('INSERT','UPDATE','DELETE','MERGE','STATUS_CHANGE'))
+    CONSTRAINT FK_AUDIT_LOG_CONTEXT_Event FOREIGN KEY (AuditID) REFERENCES dbo.AuditLog(AuditID) ON DELETE CASCADE
 );
 GO
-CREATE INDEX IX_AUDIT_LOG_RunID ON dbo.AUDIT_LOG (RunID, AuditLogID) INCLUDE (EntityID, ActionType);
-CREATE INDEX IX_AUDIT_LOG_Entity ON dbo.AUDIT_LOG (EntityID, EntityRecordID, AuditLogID);
-CREATE INDEX IX_AUDIT_LOG_UPRID ON dbo.AUDIT_LOG (UPRID, AuditLogID);
-CREATE INDEX IX_AUDIT_LOG_OriginalUPRID ON dbo.AUDIT_LOG (OriginalUPRID, AuditLogID);
+CREATE INDEX IX_AuditLog_Entity ON dbo.AuditLog(EntityNameID,EntityRecordID,AuditID);
+CREATE INDEX IX_AuditLog_UPRID ON dbo.AuditLog(UPRID,AuditID);
+CREATE INDEX IX_AUDIT_LOG_CONTEXT_Run ON dbo.AUDIT_LOG_CONTEXT(RunID,AuditID);
+CREATE INDEX IX_AUDIT_LOG_CONTEXT_OriginalUPRID ON dbo.AUDIT_LOG_CONTEXT(OriginalUPRID,AuditID);
 GO
-CREATE OR ALTER VIEW dbo.AuditLog AS
-SELECT a.AuditLogID AS AuditID, e.EntityName, a.EntityKey,
-    a.ActionType AS OperationType, a.ChangedBy, a.ChangedDate, a.ChangeSummary,
-    a.OldValues, a.NewValues, a.RunID, a.SessionID,
-    a.UPRID, a.OriginalUPRID, a.EntityID, a.EntityRecordID
-FROM dbo.AUDIT_LOG a
-JOIN dbo.REF_ENTITY_IDENTIFICATION e ON e.EntityID = a.EntityID;
+CREATE OR ALTER VIEW dbo.AUDIT_LOG AS
+SELECT a.AuditID AS AuditLogID,
+    /* Compatibility UPRID remains a live link. The main table retains the
+       event's original association even after deletion of that UPR. */
+    live.UPRID, COALESCE(c.OriginalUPRID,a.UPRID) AS OriginalUPRID,
+    a.EntityNameID AS EntityID, a.EntityRecordID, c.EntityKey,
+    a.OperationType AS ActionType, a.ChangedDate, a.ChangedBy, a.OldValues, a.NewValues,
+    c.RunID, c.SessionID, c.ChangeSummary,
+    a.AuditID, e.EntityName, a.OperationType
+FROM dbo.AuditLog a
+LEFT JOIN dbo.AUDIT_LOG_CONTEXT c ON c.AuditID=a.AuditID
+LEFT JOIN dbo.UPR live ON live.UPRID=a.UPRID
+LEFT JOIN dbo.REF_ENTITY_IDENTIFICATION e ON e.EntityID=a.EntityNameID;
 GO
 
 /* Load-run history is separate from row events, including empty/failed runs. */

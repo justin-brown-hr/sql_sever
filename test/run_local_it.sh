@@ -94,3 +94,6 @@ CONTAINER="$CONTAINER" python3 "$ROOT/test/check_sept17_review.py"
 
 echo "### 21. Search specification loader support and long-account migration guard"
 CONTAINER="$CONTAINER" python3 "$ROOT/test/check_search_load.py"
+
+echo "### 22. Client AuditLog layout and normalized-history migration"
+CONTAINER="$CONTAINER" python3 "$ROOT/test/check_audit_layout.py"

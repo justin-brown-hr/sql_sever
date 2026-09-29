@@ -51,7 +51,7 @@ SELECT
     XREF_Links     = (SELECT COUNT(*) FROM dbo.EXTERNAL_IDENTIFIER_XREF),
     Review_Queue   = (SELECT COUNT(*) FROM dbo.UPRMATCHREVIEW_Q),
     StatusHistory  = (SELECT COUNT(*) FROM dbo.UPRSTATUSHISTORY),
-    AuditLog_Rows  = (SELECT COUNT(*) FROM dbo.AuditLog);
+    AuditLog_Rows  = (SELECT COUNT(*) FROM dbo.AUDIT_LOG);
 
 /* ============================================================
    SECTION 2 - RECORDS BY ENTITY AND PROPERTY TYPE
@@ -217,6 +217,22 @@ INSERT #V VALUES (CASE WHEN @n > 0 THEN 'PASS' ELSE 'N/A' END,
     'Review queue populated', CONVERT(VARCHAR(20), @n)
     + ' rows (N/A = nothing needed review)');
 
+/* The main client layout and support objects must match this delivered revision. */
+SELECT @n=COUNT(*) FROM sys.columns WHERE object_id=OBJECT_ID(N'dbo.AuditLog',N'U');
+INSERT #V VALUES (CASE WHEN @n=9 AND COL_LENGTH(N'dbo.AuditLog',N'AuditID')=4
+    AND COL_LENGTH(N'dbo.AuditLog',N'EntityNameID')=4
+    AND COL_LENGTH(N'dbo.AuditLog',N'EntityRecordID')=8
+    AND COLUMNPROPERTY(OBJECT_ID(N'dbo.AuditLog'),N'AuditID','IsIdentity')=1
+    THEN 'PASS' ELSE 'FAIL' END,
+    'Client AuditLog physical layout', CONVERT(VARCHAR(20),@n)+' of 9 columns; INT identity AuditID');
+INSERT #V VALUES (CASE WHEN OBJECT_ID(N'dbo.AUDIT_LOG',N'V') IS NOT NULL
+    AND OBJECT_ID(N'dbo.AUDIT_LOG_CONTEXT',N'U') IS NOT NULL THEN 'PASS' ELSE 'FAIL' END,
+    'Audit context and read compatibility view', 'Technical metadata is separate from main AuditLog');
+SELECT @n=COUNT(*) FROM dbo.AuditLog a WHERE NOT EXISTS(
+    SELECT 1 FROM dbo.REF_ENTITY_IDENTIFICATION e WHERE e.EntityID=a.EntityNameID);
+INSERT #V VALUES (CASE WHEN @n=0 THEN 'PASS' ELSE 'FAIL' END,
+    'Audit entity IDs have name mappings', CONVERT(VARCHAR(20),@n)+' unmapped entity IDs');
+
 /* Auditing must cover writes outside the loader as well as batch summaries. */
 SELECT @n = COUNT(*) FROM sys.triggers tr
 WHERE tr.name = N'tr_UPR_Audit_' + OBJECT_NAME(tr.parent_id) AND tr.is_disabled = 0
@@ -225,7 +241,7 @@ WHERE tr.name = N'tr_UPR_Audit_' + OBJECT_NAME(tr.parent_id) AND tr.is_disabled 
        AND ev.type_desc IN (N'INSERT', N'UPDATE', N'DELETE')) = 3;
 INSERT #V VALUES (CASE WHEN @n = 23 THEN 'PASS' ELSE 'FAIL' END,
     'Persistent row audit triggers installed', CONVERT(VARCHAR(20), @n) + ' of 23 UPR model/reference tables');
-SELECT @n = COUNT(*) FROM dbo.AuditLog WHERE EntityName <> 'UPR_HIER_LOAD';
+SELECT @n = COUNT(*) FROM dbo.AUDIT_LOG WHERE EntityName <> 'UPR_HIER_LOAD';
 INSERT #V VALUES (CASE WHEN @n > 0 THEN 'PASS' ELSE 'N/A' END,
     'Individual row audit events recorded', CONVERT(VARCHAR(20), @n) + ' events since audit installation');
 

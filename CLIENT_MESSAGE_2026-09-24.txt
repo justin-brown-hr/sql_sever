@@ -1,19 +1,9 @@
-Hello. I should have explained the EntityKey field when I introduced it in the previous delivery.
+Hello. I have prepared one updated script package covering all three items:
 
-1. EntityKey explanation and report update
+1. Search: Updated the existing search script against UPR_SearchSpecificationv2, including UPRID/external-ID and contextual Unit searches, address/owner matching, ranked candidates, pagination and Property360. Housing Portal API integration and permission mapping still need to be completed.
 
-EntityKey identifies the exact table row that changed. For example, {"UnitID":123} means Unit table row 123. For UPR_CLOSURE, the key contains both UPRAncestry and DescendantUPRID because both values are needed to identify that relationship. I used JSON to retain the column names and all key values consistently across the audited tables.
+2. EntityKey explanation and display: I should have explained this field in the previous delivery. It identifies the exact row that changed. For example, {"UnitID":123} means Unit row 123. A closure relationship needs both UPRAncestry and DescendantUPRID, so JSON retained both key names and values. The audit report now displays readable labels such as [UnitID] = 123, with a raw-key option for technical use. Negative EntityRecordID values are internal references for composite/text keys, not negative property IDs.
 
-I have updated the audit report to display readable values such as [UnitID] = 123, or [UPRAncestry] = 10025; [DescendantUPRID] = 10026. The stored keys and audit history remain unchanged. The new @RawRecordKey option allows the original JSON display when needed.
+3. Your actual AuditLog layout: Updated the scripts so dbo.AuditLog is a physical table with the nine columns shown in your screenshot, including EntityNameID and EntityRecordID. EntityKey and run/session details are kept in a separate AUDIT_LOG_CONTEXT table so they do not add columns to your main layout. The existing AUDIT_LOG name becomes a read compatibility view. The migration preserves available history and stops if IDs or entity mappings cannot be migrated safely.
 
-If you see a negative EntityRecordID, that is an internal audit reference used for composite/text keys. It is not a negative property UPRID or an error.
-
-2. New search work for your review
-
-Separately, I have updated the existing search script against your new specification. The SQL changes add UPRID, external-ID and contextual Unit searches, improve address/owner matching, and provide ranked address candidates and paginated results. A new Property360 procedure retrieves the selected UPR and its requested hierarchy/context.
-
-Supporting changes preserve longer account numbers and add source-qualified parcel identifiers. The existing report mode remains available. Housing Portal API integration and permission mapping are still required.
-
-The accompanying change notes explain each new procedure, helper and parameter, its purpose, and the installation order. I will include this explanation with future script changes as well.
-
-Local static and syntax checks have passed. Both updates still require SQL Server testing on a restored test database before acceptance.
+The included notes explain the new objects/options and installation order. Local static and SQL syntax checks passed; SQL Server testing on a restored database is still pending. The screenshot's small text should also be checked against your original CREATE TABLE statement before acceptance.

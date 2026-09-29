@@ -341,7 +341,10 @@ BEGIN TRY
 /* Install/upgrade audit support before the main load. Dynamic SQL gives a
    useful prerequisite error even when the run-history table is absent. */
 IF OBJECT_ID(N'dbo.UPR_LOAD_RUN', N'U') IS NULL
-   OR COL_LENGTH(N'dbo.AuditLog', N'RunID') IS NULL
+   OR OBJECT_ID(N'dbo.AuditLog', N'U') IS NULL
+   OR COL_LENGTH(N'dbo.AuditLog', N'EntityNameID') IS NULL
+   OR OBJECT_ID(N'dbo.AUDIT_LOG_CONTEXT', N'U') IS NULL
+   OR OBJECT_ID(N'dbo.AUDIT_LOG', N'V') IS NULL
    OR COL_LENGTH(N'dbo.AUDIT_LOG', N'EntityRecordID') IS NULL
    OR COL_LENGTH(N'dbo.UPR_CLOSURE', N'UPRAncestry') IS NULL
     THROW 50004, 'Run the updated scripts/install_upr_audit.sql before loading data.', 1;
@@ -2072,7 +2075,8 @@ PRINT N'Step 11 complete - XREF inserted: ' + CONVERT(NVARCHAR(20), @XrefInserte
 PRINT N'Step 12: Rebuild UPR_CLOSURE...';
 
 /* Level is the descendant's depth from the root (report LevelNo), not the
-   distance from each ancestor. Derive it from ParentUPRID, not entity type:
+   distance from each ancestor. For ancestor levels including root 0 when
+   filtering one descendant, use scripts/list_upr_ancestor_path.sql. Derive it from ParentUPRID, not entity type:
    a Unit directly under a Condo is level 1; under its Building it is level 2.
    Walking only rooted trees also detects cycles without an infinite loop. */
 IF OBJECT_ID('tempdb..#UPRLevels') IS NOT NULL DROP TABLE #UPRLevels;
@@ -2230,9 +2234,12 @@ PRINT N'Step 13 complete - status history: ' + CONVERT(NVARCHAR(20), @StatusHist
    ============================================================================ */
 PRINT N'Step 14: AuditLog...';
 
-INSERT INTO dbo.AUDIT_LOG (EntityID, EntityRecordID, EntityKey, ActionType, ChangedBy, ChangedDate, ChangeSummary, RunID, SessionID)
-VALUES
-    ((SELECT EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName = N'UPR_HIER_LOAD'), 0, N'BATCH', N'INSERT', @AuditUser, @Now,
+INSERT INTO dbo.AuditLog (EntityNameID, EntityRecordID, OperationType, ChangedBy, ChangedDate)
+VALUES ((SELECT EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName = N'UPR_HIER_LOAD'),
+    0, N'INSERT', @AuditUser, @Now);
+DECLARE @SummaryAuditID INT = CONVERT(INT, SCOPE_IDENTITY());
+INSERT INTO dbo.AUDIT_LOG_CONTEXT (AuditID, EntityKey, ChangeSummary, RunID, SessionID)
+VALUES (@SummaryAuditID, N'BATCH',
      N'Parents=' + CONVERT(NVARCHAR(20), @ParentInserted)
      + N'; Complex=' + CONVERT(NVARCHAR(20), @ComplexInserted)
      + N'; Property=' + CONVERT(NVARCHAR(20), @PropertyInserted)
@@ -2336,14 +2343,14 @@ FROM (
         RowsInserted = SUM(CASE WHEN OperationType = 'INSERT' THEN 1 ELSE 0 END),
         RowsUpdated = SUM(CASE WHEN OperationType = 'UPDATE' THEN 1 ELSE 0 END),
         RowsDeleted = SUM(CASE WHEN OperationType = 'DELETE' THEN 1 ELSE 0 END)
-    FROM dbo.AuditLog WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD'
+    FROM dbo.AUDIT_LOG WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD'
     GROUP BY EntityName
     UNION ALL
     SELECT 1, N'TOTAL',
         COALESCE(SUM(CASE WHEN OperationType = 'INSERT' THEN 1 ELSE 0 END), 0),
         COALESCE(SUM(CASE WHEN OperationType = 'UPDATE' THEN 1 ELSE 0 END), 0),
         COALESCE(SUM(CASE WHEN OperationType = 'DELETE' THEN 1 ELSE 0 END), 0)
-    FROM dbo.AuditLog WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD'
+    FROM dbo.AUDIT_LOG WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD'
 ) t
 ORDER BY SortGroup, TableName;
 
@@ -2360,7 +2367,7 @@ BEGIN
 
     SELECT AuditID, RunID, EntityName AS TableName, EntityKey AS RecordKey,
         OperationType AS Action, ChangedDate, ChangedBy, OldValues, NewValues
-    FROM dbo.AuditLog WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD'
+    FROM dbo.AUDIT_LOG WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD'
     ORDER BY AuditID;
 END;
 

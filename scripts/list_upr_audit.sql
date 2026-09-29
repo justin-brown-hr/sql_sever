@@ -5,7 +5,9 @@
   Change the EXEC parameters at the bottom to select one run/table/date range.
   Result sets: load runs, changed rows, individual changed fields.
   Old audit rows retain their original values; unknown run/session stays NULL.
-  RecordKey displays the stored key as labelled values by default.
+  The main dbo.AuditLog follows the client layout. This report reads the
+  AUDIT_LOG compatibility view and technical AUDIT_LOG_CONTEXT metadata.
+  RecordKey displays the retained key as labelled values by default.
   @RawRecordKey = 1 restores the previous JSON display. No stored key is changed.
   EntityID identifies the table; EntityRecordID identifies its audited record.
   Composite/text keys use an internal negative registry ID, not a negative UPRID.
@@ -52,13 +54,13 @@ BEGIN
         ELSE SET @EntityID = @NamedEntityID;
     END;
     DECLARE @SummaryEntityID INT = (SELECT EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName = 'UPR_HIER_LOAD');
-    SELECT a.AuditLogID AS AuditID, a.RunID, a.SessionID, e.EntityName, a.EntityKey,
+    SELECT a.AuditLogID AS AuditID, a.RunID, a.SessionID, COALESCE(e.EntityName, N'Unknown EntityNameID ' + CONVERT(NVARCHAR(20), a.EntityID)) AS EntityName, a.EntityKey,
         a.ActionType AS OperationType, a.ChangedDate, a.ChangedBy, a.OldValues, a.NewValues,
         a.UPRID, a.OriginalUPRID, a.EntityID, a.EntityRecordID,
         DisplayRecordKey = CONVERT(NVARCHAR(MAX), a.EntityKey)
     INTO #AuditEvents
     FROM dbo.AUDIT_LOG a
-    JOIN dbo.REF_ENTITY_IDENTIFICATION e ON e.EntityID = a.EntityID
+    LEFT JOIN dbo.REF_ENTITY_IDENTIFICATION e ON e.EntityID = a.EntityID
     WHERE (@SummaryEntityID IS NULL OR a.EntityID <> @SummaryEntityID)
       AND (@RunID IS NULL OR a.RunID = @RunID)
       AND (@EntityID IS NULL OR a.EntityID = @EntityID)
@@ -97,6 +99,9 @@ BEGIN
               );';
         ELSE PRINT N'Readable record keys require compatibility level 130+. Showing stored keys.';
     END;
+    IF ISNULL(@RawRecordKey, 0) = 0
+        UPDATE #AuditEvents SET DisplayRecordKey = N'[EntityRecordID] = ' + CONVERT(NVARCHAR(30), EntityRecordID)
+            + N' (original key not recorded)' WHERE DisplayRecordKey IS NULL;
     PRINT N'Key guide: EntityID identifies the table. EntityRecordID identifies the record within that table.';
     PRINT N'Composite/text keys use an internal negative EntityRecordID; it is not a UPRID or an error.';
     IF @RawRecordKey = 1

@@ -1,0 +1,61 @@
+/*
+  Ancestor path for one descendant, including the root at level 0.
+  Run after the hierarchy loader. Select the intended database in SSMS first.
+  Read-only: no tables, stored procedures or hierarchy values are changed.
+
+  UPR_CLOSURE.Level stores the DESCENDANT's depth from the root. Filtering
+  that table by one DescendantUPRID repeats that same depth on every row.
+  This report instead displays each ANCESTOR's own root depth from its self-row.
+  The output Level therefore describes the node in the ancestry column.
+
+  Supports the previous AncestorUPRID spelling and current UPRAncestry spelling.
+  Edit @UPRID below; 207075 is the descendant in the client's question.
+*/
+SET QUOTED_IDENTIFIER ON;
+SET ANSI_NULLS ON;
+SET NOCOUNT ON;
+
+DECLARE @UPRID BIGINT = 207075;
+
+IF OBJECT_ID(N'dbo.UPR_CLOSURE', N'U') IS NULL
+   OR COL_LENGTH(N'dbo.UPR_CLOSURE', N'Level') IS NULL
+    THROW 50001, 'UPR_CLOSURE with Level is required. Select the correct database and run the hierarchy loader first.', 1;
+IF @UPRID IS NULL OR NOT EXISTS(SELECT 1 FROM dbo.UPR WHERE UPRID = @UPRID)
+    THROW 50001, 'The selected UPRID does not exist in this database.', 1;
+IF COL_LENGTH(N'dbo.UPR_CLOSURE', N'UPRAncestry') IS NOT NULL
+   AND COL_LENGTH(N'dbo.UPR_CLOSURE', N'AncestorUPRID') IS NOT NULL
+    THROW 50001, 'Both ancestry column spellings exist. Resolve the schema before reporting.', 1;
+DECLARE @AncestryColumn SYSNAME = CASE
+    WHEN COL_LENGTH(N'dbo.UPR_CLOSURE', N'UPRAncestry') IS NOT NULL THEN N'UPRAncestry'
+    WHEN COL_LENGTH(N'dbo.UPR_CLOSURE', N'AncestorUPRID') IS NOT NULL THEN N'AncestorUPRID' END;
+IF @AncestryColumn IS NULL
+    THROW 50001, 'No recognized ancestry column exists in UPR_CLOSURE.', 1;
+
+DECLARE @SQL NVARCHAR(MAX) = N'
+IF NOT EXISTS (
+    SELECT 1 FROM dbo.UPR_CLOSURE path
+    JOIN dbo.UPR root ON root.UPRID = path.' + QUOTENAME(@AncestryColumn) + N'
+    JOIN dbo.UPR_CLOSURE node ON node.' + QUOTENAME(@AncestryColumn) + N' = root.UPRID
+        AND node.DescendantUPRID = root.UPRID
+    WHERE path.DescendantUPRID = @SelectedUPRID AND root.ParentUPRID IS NULL AND node.[Level] = 0
+) OR NOT EXISTS (
+    SELECT 1 FROM dbo.UPR_CLOSURE node WHERE node.' + QUOTENAME(@AncestryColumn) + N' = @SelectedUPRID
+        AND node.DescendantUPRID = @SelectedUPRID
+) OR EXISTS (
+    SELECT 1 FROM dbo.UPR_CLOSURE path
+    LEFT JOIN dbo.UPR_CLOSURE node ON node.' + QUOTENAME(@AncestryColumn) + N' = path.' + QUOTENAME(@AncestryColumn) + N'
+        AND node.DescendantUPRID = path.' + QUOTENAME(@AncestryColumn) + N'
+    WHERE path.DescendantUPRID = @SelectedUPRID AND node.[Level] IS NULL
+)
+    THROW 50002, ''The closure path is incomplete or its root level is invalid. Refresh the hierarchy through the loader and retry.'', 1;
+
+-- Level belongs to the displayed ancestor, ordered from root to selected UPR.
+SELECT node.[Level], path.' + QUOTENAME(@AncestryColumn) + N', path.DescendantUPRID
+FROM dbo.UPR_CLOSURE path
+JOIN dbo.UPR_CLOSURE node ON node.' + QUOTENAME(@AncestryColumn) + N' = path.' + QUOTENAME(@AncestryColumn) + N'
+    AND node.DescendantUPRID = path.' + QUOTENAME(@AncestryColumn) + N'
+WHERE path.DescendantUPRID = @SelectedUPRID
+ORDER BY node.[Level], path.' + QUOTENAME(@AncestryColumn) + N';';
+
+PRINT N'Ancestor path: Level is each ancestor node''s depth from the root (root = 0).';
+EXEC sys.sp_executesql @SQL, N'@SelectedUPRID BIGINT', @SelectedUPRID = @UPRID;

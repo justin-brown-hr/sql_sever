@@ -94,7 +94,7 @@ IF NOT EXISTS (SELECT 1 FROM dbo.EXTERNAL_IDENTIFIER_XREF
 IF EXISTS (SELECT 1 FROM dbo.UPRMATCHREVIEW_Q
     WHERE MA_Account = '01297731' AND ReasonForNoMatch = 'MISSING PARCELID')
     THROW 51007, 'Missing parcel incorrectly caused a review entry.', 1;
-IF (SELECT COUNT(DISTINCT EntityName) FROM dbo.AuditLog
+IF (SELECT COUNT(DISTINCT EntityName) FROM dbo.AUDIT_LOG
     WHERE EntityName IN ('UPR', 'PROPERTY', 'BUILDING', 'ADDRESS', 'CONTACT', 'UPR_ADDRESS', 'UPR_CONTACT')) <> 7
     THROW 51008, 'Client sample writes lack individual audit events.', 1;
 """)
@@ -102,10 +102,10 @@ IF (SELECT COUNT(DISTINCT EntityName) FROM dbo.AuditLog
         assert query(identity_query) == previous_ids, "Upgrade replaced existing UPR IDs"
     print("UPDATED LOADER:", query(counts))
     ids = query(identity_query)
-    before = int(query("SELECT MAX(AuditID) FROM dbo.AuditLog;"))
+    before = int(query("SELECT MAX(AuditID) FROM dbo.AUDIT_LOG;"))
     sql(current)
     assert query(identity_query) == ids
-    query(f"IF EXISTS (SELECT 1 FROM dbo.AuditLog WHERE AuditID > {before} "
+    query(f"IF EXISTS (SELECT 1 FROM dbo.AUDIT_LOG WHERE AuditID > {before} "
           "AND EntityName <> 'UPR_HIER_LOAD') THROW 51009, 'Rerun changed business data.', 1; SELECT 'PASS';")
     assert query("SELECT * FROM dbo.MAIncomingTableX1 FOR JSON PATH, INCLUDE_NULL_VALUES;") == original_source
     print("PASS: client row 20977 loads with exact address/coordinates, required links, no Unit or invented names")

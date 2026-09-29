@@ -47,8 +47,9 @@ try:
     sql(script("ddl/03_new_upr_schema.sql"))
     # Reproduce the client's pre-upgrade AuditLog, with existing history.
     sql("""
-DROP VIEW dbo.AuditLog;
-DROP TABLE dbo.AUDIT_LOG;
+DROP VIEW dbo.AUDIT_LOG;
+DROP TABLE dbo.AUDIT_LOG_CONTEXT;
+DROP TABLE dbo.AuditLog;
 DROP TABLE dbo.UPR_LOAD_RUN;
 CREATE TABLE dbo.AuditLog (
     AuditID INT IDENTITY PRIMARY KEY, EntityName NVARCHAR(100) NOT NULL,
@@ -63,8 +64,8 @@ VALUES ('UNIT', '{"UnitID":999}', 'UPDATE', 'legacy-test', 'KEEP HISTORY',
     sql(script("scripts/install_upr_audit.sql"))
     sql(script("scripts/install_upr_audit.sql"))
     sql("""
-IF (SELECT COUNT(*) FROM dbo.AuditLog) <> 1
- OR NOT EXISTS (SELECT 1 FROM dbo.AuditLog WHERE ChangeSummary = 'KEEP HISTORY'
+IF (SELECT COUNT(*) FROM dbo.AUDIT_LOG) <> 1
+ OR NOT EXISTS (SELECT 1 FROM dbo.AUDIT_LOG WHERE ChangeSummary = 'KEEP HISTORY'
     AND RunID IS NULL AND SessionID IS NULL AND JSON_VALUE(NewValues, '$.UnitNumber') = 'AFTER')
     THROW 51001, 'Upgrade lost or reattributed existing audit history.', 1;
 """)
@@ -87,7 +88,7 @@ IF NOT EXISTS (SELECT 1 FROM dbo.AUDIT_LOG a JOIN dbo.REF_ENTITY_IDENTIFICATION 
 IF CONVERT(NVARCHAR(128), SESSION_CONTEXT(N'UPR_AuditRunID')) <> N'caller-value'
     THROW 51002, 'Successful load leaked session context.', 1;
 INSERT dbo.REF_ENTITYTYPE (Description) VALUES ('MANUAL AFTER LOAD');
-IF NOT EXISTS (SELECT 1 FROM dbo.AuditLog WHERE EntityName = 'REF_ENTITYTYPE'
+IF NOT EXISTS (SELECT 1 FROM dbo.AUDIT_LOG WHERE EntityName = 'REF_ENTITYTYPE'
     AND JSON_VALUE(NewValues, '$.Description') = 'MANUAL AFTER LOAD'
     AND RunID IS NULL AND SessionID = @@SPID)
     THROW 51003, 'Manual edit was lost or attributed to the completed load.', 1;
@@ -97,16 +98,16 @@ IF NOT EXISTS (SELECT 1 FROM dbo.AuditLog WHERE EntityName = 'REF_ENTITYTYPE'
 IF NOT EXISTS (SELECT 1 FROM dbo.UPR_LOAD_RUN WHERE RunID = '{first}'
     AND RunStatus = 'COMPLETED' AND FinishedAt >= StartedAt AND SourceRowsRead > 0 AND RejectedRows > 0)
     THROW 51004, 'First run lacks status/source counts.', 1;
-IF (SELECT COUNT(*) FROM dbo.AuditLog WHERE RunID = '{first}' AND EntityName <> 'UPR_HIER_LOAD') < 100
+IF (SELECT COUNT(*) FROM dbo.AUDIT_LOG WHERE RunID = '{first}' AND EntityName <> 'UPR_HIER_LOAD') < 100
     THROW 51005, 'First run did not collect its row events.', 1;
-IF EXISTS (SELECT 1 FROM dbo.AuditLog WHERE RunID = '{first}' AND SessionID IS NULL)
+IF EXISTS (SELECT 1 FROM dbo.AUDIT_LOG WHERE RunID = '{first}' AND SessionID IS NULL)
     THROW 51006, 'Run event lost session metadata.', 1;
 """)
     sql(script("scripts/load_upr_master.sql"))
     second = latest_run()
     assert first != second
     sql(f"""
-IF (SELECT COUNT(*) FROM dbo.AuditLog WHERE RunID = '{second}') <> 1
+IF (SELECT COUNT(*) FROM dbo.AUDIT_LOG WHERE RunID = '{second}') <> 1
  OR NOT EXISTS (SELECT 1 FROM dbo.UPR_LOAD_RUN WHERE RunID = '{second}' AND RunStatus = 'COMPLETED')
     THROW 51007, 'Unchanged run should retain its status and only its batch summary.', 1;
 """)
@@ -129,9 +130,10 @@ INSERT dbo.CONTACT (ContactTypeID, OrganizationName)
 SELECT TOP (1) ContactTypeID, 'AUDIT NULL TEST' FROM dbo.REF_CONTACTTYPE;
 UPDATE dbo.CONTACT SET OrganizationName = NULL WHERE OrganizationName = 'AUDIT NULL TEST';
 INSERT dbo.REF_ENTITY_IDENTIFICATION (EntityName) VALUES ('REPORT_FIXTURE');
-INSERT dbo.AUDIT_LOG (EntityID, EntityRecordID, EntityKey, ActionType, ChangedBy, OldValues, NewValues)
-VALUES ((SELECT EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName = 'REPORT_FIXTURE'), 1, '{"ID":1}', 'UPDATE', 'test', '{"Text":null}',
+INSERT dbo.AuditLog (EntityNameID, EntityRecordID, OperationType, ChangedBy, OldValues, NewValues)
+VALUES ((SELECT EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName = 'REPORT_FIXTURE'), 1, 'UPDATE', 'test', '{"Text":null}',
     N'{"Text":"' + REPLICATE(CONVERT(NVARCHAR(MAX), N'X'), 5000) + N'"}');
+INSERT dbo.AUDIT_LOG_CONTEXT(AuditID,EntityKey) VALUES(CONVERT(INT,SCOPE_IDENTITY()),N'{"ID":1}');
 """)
     output = sql("EXEC dbo.usp_UPR_AuditReport @TableName = N'CONTACT';")
     assert "AUDIT NULL TEST|NULL|Value|NULL" in output, output[-4000:]
@@ -161,8 +163,9 @@ VALUES ((SELECT EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName = '
 DECLARE @E INT=(SELECT EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName='AUDIT_KEY_FIXTURE');
 INSERT dbo.AUDIT_ENTITY_RECORD(EntityID,EntityKey) VALUES(@E,N'{escaped_key}');
 DECLARE @Record BIGINT=-CONVERT(BIGINT,SCOPE_IDENTITY());
-INSERT dbo.AUDIT_LOG(EntityID,EntityRecordID,EntityKey,ActionType,ChangedBy,OldValues,NewValues)
-VALUES(@E,@Record,N'{escaped_key}','UPDATE','key-display-test',N'{{"Flag":0}}',N'{{"Flag":1}}');
+INSERT dbo.AuditLog(EntityNameID,EntityRecordID,OperationType,ChangedBy,OldValues,NewValues)
+VALUES(@E,@Record,'UPDATE','key-display-test',N'{{"Flag":0}}',N'{{"Flag":1}}');
+INSERT dbo.AUDIT_LOG_CONTEXT(AuditID,EntityKey) VALUES(CONVERT(INT,SCOPE_IDENTITY()),N'{escaped_key}');
 """)
     stored_query = """
 SELECT a.AuditLogID,a.EntityRecordID,a.EntityKey,a.OldValues,a.NewValues
@@ -194,7 +197,7 @@ INSERT dbo.UPR (EntityTypeID, ParentUPRID) VALUES (@Et, @A);
 DECLARE @B BIGINT = SCOPE_IDENTITY();
 UPDATE dbo.UPR SET ParentUPRID = @B WHERE UPRID = @A;
 """)
-    before = sql("SELECT MAX(AuditID) FROM dbo.AuditLog;").strip()
+    before = sql("SELECT MAX(AuditID) FROM dbo.AUDIT_LOG;").strip()
     failed_output = sql("EXEC sys.sp_set_session_context @key = N'UPR_AuditRunID', @value = N'failure-caller';\nGO\n"
                         + script("scripts/load_upr_master.sql") + """
 SELECT N'RESTORED=' + CONVERT(NVARCHAR(128), SESSION_CONTEXT(N'UPR_AuditRunID'));
@@ -206,7 +209,7 @@ SELECT N'RESTORED=' + CONVERT(NVARCHAR(128), SESSION_CONTEXT(N'UPR_AuditRunID'))
 IF NOT EXISTS (SELECT 1 FROM dbo.UPR_LOAD_RUN WHERE RunID = '{failed}'
     AND RunStatus = 'FAILED' AND FinishedAt IS NOT NULL AND ErrorMessage LIKE '%cycle%')
     THROW 51008, 'Failed load status was not retained.', 1;
-IF EXISTS (SELECT 1 FROM dbo.AuditLog WHERE AuditID > {before})
+IF EXISTS (SELECT 1 FROM dbo.AUDIT_LOG WHERE AuditID > {before})
     THROW 51009, 'Failed load retained rolled-back row events.', 1;
 IF EXISTS (SELECT 1 FROM dbo.UPR WHERE AccountNumber = '99998888')
     THROW 51010, 'Failed load retained business writes.', 1;

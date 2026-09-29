@@ -1,5 +1,10 @@
 > The package also includes the [EntityKey explanation and readable audit report](CLIENT_AUDIT_KEY_UPDATE_2026-09-24.md).
 
+> September 24 combined revision: search, readable audit keys and the supplied
+> physical AuditLog layout. [Latest installation contract](CLIENT_AUDIT_LAYOUT_2026-09-24.md)
+> supersedes earlier descriptions of AUDIT_LOG as a table / AuditLog as a view.
+> [Combined results](WORK_RESULTS_2026-09-24.md); SQL Server execution remains pending.
+
 > Current search behavior and installation notes: [September 24 search update](CLIENT_SEARCH_UPDATE_2026-09-24.md).
 > The refreshed SQL candidate still requires SQL Server integration execution.
 

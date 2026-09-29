@@ -1,5 +1,6 @@
 /* Read-only source/destination evidence for the client-reported accounts.
-   Run on the client's database; no normalization functions are required.
+   Run after the current audit installer on the client's test database;
+   no normalization functions are required.
    These queries do not insert, update, or manufacture source data. */
 USE UPRXDB_TEST;
 GO
@@ -14,19 +15,27 @@ INSERT #WatchAccount VALUES
 
 PRINT N'Latest loader audit summaries (duplicate marker: MA-SDAT-OVERLAP-2026-09-23)';
 SELECT TOP (5) AuditID, ChangedDate, ChangeSummary
-FROM dbo.AuditLog WHERE EntityName = N'UPR_HIER_LOAD' ORDER BY AuditID DESC;
+FROM dbo.AUDIT_LOG WHERE EntityName = N'UPR_HIER_LOAD' ORDER BY AuditID DESC;
 
 PRINT N'Original MasterAddress source rows';
 SELECT ma.*
 FROM dbo.MAIncomingTableX1 ma
+CROSS APPLY (SELECT LTRIM(RTRIM(CONVERT(NVARCHAR(50), ma.Account))) AS RawAccount) raw
+CROSS APPLY (SELECT REPLACE(REPLACE(raw.RawAccount,N' ',N''),N'-',N'') AS Digits) norm
 WHERE EXISTS (SELECT 1 FROM #WatchAccount w
-    WHERE w.AccountNumber = RIGHT(N'00000000' + LTRIM(RTRIM(CONVERT(NVARCHAR(50), ma.Account))), 8));
+    WHERE w.AccountNumber = CASE WHEN norm.Digits<>N'' AND norm.Digits NOT LIKE N'%[^0-9]%'
+        THEN CASE WHEN LEN(norm.Digits)<8 THEN RIGHT(N'00000000'+norm.Digits,8) ELSE norm.Digits END
+        ELSE raw.RawAccount END);
 
 PRINT N'Original SDAT source rows (includes CondoUnit if the column exists)';
 SELECT s.*
 FROM dbo.SDATIncomingTableX1 s
+CROSS APPLY (SELECT LTRIM(RTRIM(CONVERT(NVARCHAR(50), s.AccountNumber))) AS RawAccount) raw
+CROSS APPLY (SELECT REPLACE(REPLACE(raw.RawAccount,N' ',N''),N'-',N'') AS Digits) norm
 WHERE EXISTS (SELECT 1 FROM #WatchAccount w
-    WHERE w.AccountNumber = RIGHT(N'00000000' + LTRIM(RTRIM(CONVERT(NVARCHAR(50), s.AccountNumber))), 8));
+    WHERE w.AccountNumber = CASE WHEN norm.Digits<>N'' AND norm.Digits NOT LIKE N'%[^0-9]%'
+        THEN CASE WHEN LEN(norm.Digits)<8 THEN RIGHT(N'00000000'+norm.Digits,8) ELSE norm.Digits END
+        ELSE raw.RawAccount END);
 
 PRINT N'Written UPR entities with direct Address and Contact links';
 ;WITH Tree AS (
@@ -97,13 +106,13 @@ ORDER BY TableName;
    UPR_HIER_LOAD batch-summary row - that is correct, not a bug. */
 PRINT N'Audit coverage summary';
 SELECT
-    TotalAuditRows       = (SELECT COUNT(*) FROM dbo.AuditLog),
-    RowLevelAuditRows     = (SELECT COUNT(*) FROM dbo.AuditLog WHERE EntityName <> 'UPR_HIER_LOAD'),
-    BatchSummaryRows      = (SELECT COUNT(*) FROM dbo.AuditLog WHERE EntityName = 'UPR_HIER_LOAD'),
-    DistinctTablesAudited = (SELECT COUNT(DISTINCT EntityName) FROM dbo.AuditLog WHERE EntityName <> 'UPR_HIER_LOAD'),
+    TotalAuditRows       = (SELECT COUNT(*) FROM dbo.AUDIT_LOG),
+    RowLevelAuditRows     = (SELECT COUNT(*) FROM dbo.AUDIT_LOG WHERE EntityName <> 'UPR_HIER_LOAD'),
+    BatchSummaryRows      = (SELECT COUNT(*) FROM dbo.AUDIT_LOG WHERE EntityName = 'UPR_HIER_LOAD'),
+    DistinctTablesAudited = (SELECT COUNT(DISTINCT EntityName) FROM dbo.AUDIT_LOG WHERE EntityName <> 'UPR_HIER_LOAD'),
     EnabledTriggerCount   = (SELECT COUNT(*) FROM sys.triggers WHERE name LIKE N'tr_UPR_Audit[_]%' AND is_disabled = 0),
-    EarliestAuditEvent    = (SELECT MIN(ChangedDate) FROM dbo.AuditLog WHERE EntityName <> 'UPR_HIER_LOAD'),
-    LatestAuditEvent      = (SELECT MAX(ChangedDate) FROM dbo.AuditLog),
+    EarliestAuditEvent    = (SELECT MIN(ChangedDate) FROM dbo.AUDIT_LOG WHERE EntityName <> 'UPR_HIER_LOAD'),
+    LatestAuditEvent      = (SELECT MAX(ChangedDate) FROM dbo.AUDIT_LOG),
     EarliestUPRCreated    = (SELECT MIN(CreatedDate) FROM dbo.UPR);
 PRINT N'If EnabledTriggerCount < 23, run scripts/install_upr_audit.sql.';
 PRINT N'If EarliestUPRCreated is well before EarliestAuditEvent, some UPR rows';
@@ -124,7 +133,7 @@ BEGIN
             SELECT RowsInserted = SUM(CASE WHEN OperationType = ''INSERT'' THEN 1 ELSE 0 END),
                 RowsUpdated = SUM(CASE WHEN OperationType = ''UPDATE'' THEN 1 ELSE 0 END),
                 RowsDeleted = SUM(CASE WHEN OperationType = ''DELETE'' THEN 1 ELSE 0 END)
-            FROM dbo.AuditLog WHERE RunID = r.RunID AND EntityName <> N''UPR_HIER_LOAD''
+            FROM dbo.AUDIT_LOG WHERE RunID = r.RunID AND EntityName <> N''UPR_HIER_LOAD''
         ) a
         ORDER BY r.StartedAt DESC, r.RunID;';
     PRINT N'Run scripts/list_upr_audit.sql to see every row and changed field.';
