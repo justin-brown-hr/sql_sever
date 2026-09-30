@@ -41,7 +41,8 @@ passes apply to the previous delivery, not this update.
   Condo-to-Complex reclassification. Condo name is removed from reports. Condo parcel search/display uses the archived
   value for existing Condos and loader history for new Condos, with provenance
   shown in the hierarchy report. PROPERTY.Parcel remains available.
-- Rename `UPR_CLOSURE.AncestorUPRID` to `UPRAncestry` throughout current scripts.
+- Superseded September 29: keep `UPR_CLOSURE.AncestorUPRID` for the existing API;
+  current scripts no longer require the candidate name `UPRAncestry`.
   The ancestor/descendant relationships and root-depth `Level` meaning remain.
 - The repository runner now defaults to upgrading the existing schema.
   Only explicit `--sample-data` resets tables; invalid modes stop before SQL runs.
@@ -104,7 +105,8 @@ Re-run the loader unchanged. Business counts and IDs should remain stable, with 
 new run record and summary but no new business-row events. Confirm both source links
 for each merged overlap and inspect any queued repair conflicts.
 
-The installer also removes columns and renames a closure column, so application
+The installer also removes the previously specified Condo columns and can restore
+a candidate-renamed closure column to AncestorUPRID, so application
 queries outside this repository must be updated to the new schema. Reinstall the
 supplied reports before resuming their use. Do not use the destructive DDL reset or
 sample-data scripts against an existing database. They are excluded from the ZIP.

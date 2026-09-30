@@ -1,5 +1,8 @@
 # Combined work results — September 24, 2026
 
+> Latest September 29 contract: [retain the original AncestorUPRID API column](CLIENT_CLOSURE_API_2026-09-29.md).
+> The level-0 display test is read-only and does not change UPR_CLOSURE.
+
 > September 28 follow-up: [ancestor query including root level 0](CLIENT_CLOSURE_LEVEL_2026-09-28.md).
 > The current ZIP also includes that read-only report and its separate validation notes.
 

@@ -346,7 +346,7 @@ IF OBJECT_ID(N'dbo.UPR_LOAD_RUN', N'U') IS NULL
    OR OBJECT_ID(N'dbo.AUDIT_LOG_CONTEXT', N'U') IS NULL
    OR OBJECT_ID(N'dbo.AUDIT_LOG', N'V') IS NULL
    OR COL_LENGTH(N'dbo.AUDIT_LOG', N'EntityRecordID') IS NULL
-   OR COL_LENGTH(N'dbo.UPR_CLOSURE', N'UPRAncestry') IS NULL
+   OR COL_LENGTH(N'dbo.UPR_CLOSURE', N'AncestorUPRID') IS NULL
     THROW 50004, 'Run the updated scripts/install_upr_audit.sql before loading data.', 1;
 EXEC sys.sp_executesql N'
     INSERT dbo.UPR_LOAD_RUN (RunID, StartedAt, RunStatus, StartedBy, SessionID)
@@ -817,7 +817,7 @@ IF EXISTS (
     JOIN dbo.EXTERNAL_IDENTIFIER_XREF x ON x.SourceSystem = s.SourceSystem
         AND x.IdentifierType = N'SOURCE_RECORD_ID' AND x.IdentifierValue = s.SourceRecordID
     JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = x.UPRID
-    JOIN dbo.UPR u ON u.UPRID = cl.UPRAncestry
+    JOIN dbo.UPR u ON u.UPRID = cl.AncestorUPRID
     WHERE (LEN(s.AccountNumber) BETWEEN 9 AND 12
       AND s.AccountNumber NOT LIKE N'%[^0-9]%'
       AND u.AccountNumber = RIGHT(s.AccountNumber, 8))
@@ -1204,7 +1204,7 @@ INNER JOIN dbo.EXTERNAL_IDENTIFIER_XREF x
    walk up the closure to the Property parent instead of matching x.UPRID.
    The closure contains self rows, which covers rows linked to the parent. */
 INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = x.UPRID
-INNER JOIN dbo.UPR anc ON anc.UPRID = cl.UPRAncestry AND anc.EntityTypeID = g.EntityTypeID
+INNER JOIN dbo.UPR anc ON anc.UPRID = cl.AncestorUPRID AND anc.EntityTypeID = g.EntityTypeID
 WHERE (g.PathType = N'PROPERTY' OR (g.PathType = N'CONDO' AND g.AccountNumber IS NULL))
   AND NOT EXISTS (SELECT 1 FROM #ParentSkip p WHERE p.GroupKey = g.GroupKey)
 GROUP BY g.GroupKey;
@@ -1416,7 +1416,7 @@ UPDATE b SET YearBuilt = donor.YearBuilt FROM dbo.BUILDING b
 JOIN #OverlapRepair r ON r.KeepBuildingID = b.BuildingID
 JOIN dbo.BUILDING donor ON donor.BuildingID = r.DropBuildingID
 WHERE b.YearBuilt IS NULL AND donor.YearBuilt IS NOT NULL;
-DELETE c FROM dbo.UPR_CLOSURE c WHERE EXISTS (SELECT 1 FROM #MergeUPR m WHERE m.OldUPRID IN (c.UPRAncestry,c.DescendantUPRID));
+DELETE c FROM dbo.UPR_CLOSURE c WHERE EXISTS (SELECT 1 FROM #MergeUPR m WHERE m.OldUPRID IN (c.AncestorUPRID,c.DescendantUPRID));
 DELETE u FROM dbo.UNIT u JOIN #OverlapRepair r ON r.DropUnit = u.UPRID;
 DELETE u FROM dbo.UPR u JOIN #OverlapRepair r ON r.DropUnit = u.UPRID;
 DELETE b FROM dbo.BUILDING b JOIN #OverlapRepair r ON r.DropBuilding = b.UPRID WHERE r.DropBuilding <> r.KeepBuilding;
@@ -1608,7 +1608,7 @@ WHERE NOT EXISTS (SELECT a.XCoordinate, a.YCoordinate EXCEPT SELECT src.LegacyMa
       SELECT 1 FROM #Stage s
       INNER JOIN dbo.EXTERNAL_IDENTIFIER_XREF x ON x.SourceSystem = s.SourceSystem
           AND x.IdentifierType = N'SOURCE_RECORD_ID' AND x.IdentifierValue = s.SourceRecordID
-      INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = x.UPRID AND cl.UPRAncestry = src.ParentUPRID
+      INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = x.UPRID AND cl.AncestorUPRID = src.ParentUPRID
       WHERE s.GroupKey = src.GroupKey AND s.NormalizedFullAddress = src.NormalizedFullAddress AND s.IsValid = 1);
 
 UPDATE a SET XCoordinate = r.XCoordinate, YCoordinate = r.YCoordinate
@@ -2101,37 +2101,37 @@ IF EXISTS (SELECT 1 FROM dbo.UPR u
    Unchanged loads must not produce thousands of delete/reinsert audit events. */
 IF OBJECT_ID('tempdb..#ExpectedClosure') IS NOT NULL DROP TABLE #ExpectedClosure;
 CREATE TABLE #ExpectedClosure (
-    UPRAncestry BIGINT NOT NULL,
+    AncestorUPRID BIGINT NOT NULL,
     DescendantUPRID BIGINT NOT NULL,
     [Level] INT NOT NULL,
-    PRIMARY KEY (UPRAncestry, DescendantUPRID)
+    PRIMARY KEY (AncestorUPRID, DescendantUPRID)
 );
-INSERT INTO #ExpectedClosure (UPRAncestry, DescendantUPRID, [Level])
+INSERT INTO #ExpectedClosure (AncestorUPRID, DescendantUPRID, [Level])
 SELECT UPRID, UPRID, [Level] FROM #UPRLevels;
 DECLARE @ClosureAdded INT = 1;
 WHILE @ClosureAdded > 0
 BEGIN
-    INSERT INTO #ExpectedClosure (UPRAncestry, DescendantUPRID, [Level])
-    SELECT c.UPRAncestry, child.UPRID, l.[Level]
+    INSERT INTO #ExpectedClosure (AncestorUPRID, DescendantUPRID, [Level])
+    SELECT c.AncestorUPRID, child.UPRID, l.[Level]
     FROM #ExpectedClosure c
     INNER JOIN dbo.UPR child ON child.ParentUPRID = c.DescendantUPRID
     INNER JOIN #UPRLevels l ON l.UPRID = child.UPRID
     WHERE NOT EXISTS (SELECT 1 FROM #ExpectedClosure x
-        WHERE x.UPRAncestry = c.UPRAncestry AND x.DescendantUPRID = child.UPRID);
+        WHERE x.AncestorUPRID = c.AncestorUPRID AND x.DescendantUPRID = child.UPRID);
     SET @ClosureAdded = @@ROWCOUNT;
 END;
 DELETE c FROM dbo.UPR_CLOSURE c
 WHERE NOT EXISTS (SELECT 1 FROM #ExpectedClosure e
-    WHERE e.UPRAncestry = c.UPRAncestry AND e.DescendantUPRID = c.DescendantUPRID);
+    WHERE e.AncestorUPRID = c.AncestorUPRID AND e.DescendantUPRID = c.DescendantUPRID);
 UPDATE c SET [Level] = e.[Level]
 FROM dbo.UPR_CLOSURE c
 INNER JOIN #ExpectedClosure e
-    ON e.UPRAncestry = c.UPRAncestry AND e.DescendantUPRID = c.DescendantUPRID
+    ON e.AncestorUPRID = c.AncestorUPRID AND e.DescendantUPRID = c.DescendantUPRID
 WHERE c.[Level] IS NULL OR c.[Level] <> e.[Level];
-INSERT INTO dbo.UPR_CLOSURE (UPRAncestry, DescendantUPRID, [Level])
-SELECT e.UPRAncestry, e.DescendantUPRID, e.[Level] FROM #ExpectedClosure e
+INSERT INTO dbo.UPR_CLOSURE (AncestorUPRID, DescendantUPRID, [Level])
+SELECT e.AncestorUPRID, e.DescendantUPRID, e.[Level] FROM #ExpectedClosure e
 WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_CLOSURE c
-    WHERE c.UPRAncestry = e.UPRAncestry AND c.DescendantUPRID = e.DescendantUPRID);
+    WHERE c.AncestorUPRID = e.AncestorUPRID AND c.DescendantUPRID = e.DescendantUPRID);
 
 IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.UPR_CLOSURE')
            AND name = N'Level' AND is_nullable = 1)
@@ -2188,7 +2188,7 @@ INSERT INTO dbo.UPR_CONTACT (UPRID, ContactID, RoleTypeID, EffectiveDate)
 SELECT DISTINCT cl.DescendantUPRID, uc.ContactID, uc.RoleTypeID, CONVERT(DATE, @Now)
 FROM #ParentMap pm
 INNER JOIN dbo.UPR_CONTACT uc ON uc.UPRID = pm.UPRID AND uc.RoleTypeID = @RoleOwner
-INNER JOIN dbo.UPR_CLOSURE cl ON cl.UPRAncestry = pm.UPRID
+INNER JOIN dbo.UPR_CLOSURE cl ON cl.AncestorUPRID = pm.UPRID
 WHERE cl.DescendantUPRID <> pm.UPRID
   AND NOT EXISTS (SELECT 1 FROM dbo.UPR_CONTACT existing
       WHERE existing.UPRID = cl.DescendantUPRID AND existing.ContactID = uc.ContactID

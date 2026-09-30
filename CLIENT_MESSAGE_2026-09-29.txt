@@ -1,0 +1,11 @@
+Hello. Please use the attached UPR_Descendant_Level0_Test_2026-09-29.zip for this test. It contains two read-only SQL files and a START_HERE guide. Your existing UPR_CLOSURE table and API column names remain unchanged.
+
+1. Extract the ZIP and open SQL Server Management Studio.
+2. Open list_upr_ancestor_path.sql and select the intended database. Keep @UPRID = 207075 and execute the entire file. The results should show the ancestor path starting with the root at level 0.
+3. Open check_descendant_level0.sql, select the same database, keep @UPRID = 207075, and execute it. It should return PASS followed by the ancestor path.
+4. Please send me the Results from both files and any Messages/errors. If an error occurs, stop and send me the exact message.
+
+No schema update, installer, or loader rerun is needed for this test. The corrected report displays each ancestor's own level; it does not change stored level values. SQL Server testing is pending your run.
+
+Thanks,
+Ade

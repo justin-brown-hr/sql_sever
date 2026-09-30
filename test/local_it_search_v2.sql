@@ -43,11 +43,11 @@ BEGIN TRY
     DECLARE @Nodes TABLE(UPRID BIGINT PRIMARY KEY,ParentUPRID BIGINT,[Level] INT);
     INSERT @Nodes VALUES(@R1,NULL,0),(@R2,NULL,0),(@B1,@R1,1),(@B2,@R2,1),(@U1,@B1,2),(@U2,@R2,1);
     ;WITH Paths AS (
-        SELECT UPRAncestry=UPRID,DescendantUPRID=UPRID,[Level] FROM @Nodes
+        SELECT AncestorUPRID=UPRID,DescendantUPRID=UPRID,[Level] FROM @Nodes
         UNION ALL
-        SELECT p.UPRAncestry,n.UPRID,n.[Level] FROM Paths p JOIN @Nodes n ON n.ParentUPRID=p.DescendantUPRID
+        SELECT p.AncestorUPRID,n.UPRID,n.[Level] FROM Paths p JOIN @Nodes n ON n.ParentUPRID=p.DescendantUPRID
     )
-    INSERT dbo.UPR_CLOSURE(UPRAncestry,DescendantUPRID,[Level]) SELECT * FROM Paths;
+    INSERT dbo.UPR_CLOSURE(AncestorUPRID,DescendantUPRID,[Level]) SELECT * FROM Paths;
     SELECT @Allowed=N'['+STUFF((SELECT N','+CONVERT(NVARCHAR(20),UPRID) FROM @Nodes ORDER BY UPRID FOR XML PATH('')),1,1,N'')+N']';
     INSERT dbo.ADDRESS(StreetNumber,StreetName,StreetType,City,ZipCode,NormalizedAddress)
         VALUES('123','MAIN','ST','ROCKVILLE','20850','123 MAIN ST ROCKVILLE 20850'); SET @A1=SCOPE_IDENTITY();

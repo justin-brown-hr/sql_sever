@@ -16,7 +16,7 @@ For an ordinary Unit row, `{"UnitID":123}` means Unit table row 123. UnitID is t
 Unit table's row identifier; the Unit's UPRID is a separate master identity.
 
 A closure record is identified by a pair, for example
-`{"UPRAncestry":10025,"DescendantUPRID":10026}`. It records a relationship from
+`{"AncestorUPRID":10025,"DescendantUPRID":10026}`. It records a relationship from
 UPR 10025 to UPR 10026. Either ID alone can occur in many closure rows and cannot
 identify this particular relationship. JSON retains both column names and values
 in one audit field without dropping part of the key. The relationship may be
@@ -52,7 +52,7 @@ field-detail results:
 | Stored EntityKey / previous display | New default RecordKey display |
 |---|---|
 | `{"UnitID":123}` | `[UnitID] = 123` |
-| `{"UPRAncestry":10025,"DescendantUPRID":10026}` | `[UPRAncestry] = 10025; [DescendantUPRID] = 10026` |
+| `{"AncestorUPRID":10025,"DescendantUPRID":10026}` | `[AncestorUPRID] = 10025; [DescendantUPRID] = 10026` |
 | `{"Code":"OWNER"}` | `[Code] = "OWNER"` |
 
 The readable display itself adds no stored display column. The combined layout
@@ -68,8 +68,9 @@ existing parameters. Set it to 1 for the previous raw key presentation. Report
 column names/order remain the same. Consumers that parse RecordKey as JSON
 should opt into this raw mode.
 
-Historical keys keep their original column names, including AncestorUPRID in
-older events. Unknown legacy text, arrays, empty JSON objects and nested key
+Historical keys keep their original column names, including UPRAncestry in
+events recorded by the abandoned rename candidate. New closure keys use the
+API-compatible AncestorUPRID spelling. Unknown legacy text, arrays, empty JSON objects and nested key
 structures are shown unchanged rather than guessed. Text values are quoted and
 escaped. Readable formatting needs compatibility level 130+; older compatibility
 levels retain raw keys and print an explanation. The normal installer already

@@ -82,7 +82,7 @@ SELECT root.AccountNumber, RootUPRID = root.UPRID, e.Description AS RootEntityTy
 FROM dbo.EXTERNAL_IDENTIFIER_XREF x
 INNER JOIN dbo.UPR linked ON linked.UPRID = x.UPRID
 INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = x.UPRID
-INNER JOIN dbo.UPR root ON root.UPRID = cl.UPRAncestry AND root.ParentUPRID IS NULL
+INNER JOIN dbo.UPR root ON root.UPRID = cl.AncestorUPRID AND root.ParentUPRID IS NULL
 INNER JOIN dbo.REF_ENTITYTYPE e ON e.EntityTypeID = root.EntityTypeID
 LEFT JOIN dbo.UNIT un ON un.UPRID = x.UPRID
 WHERE x.SourceSystem = N'KDAT' AND x.IdentifierType = N'SOURCE_RECORD_ID'

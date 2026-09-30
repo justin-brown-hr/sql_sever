@@ -171,12 +171,17 @@ BEGIN
     IF COL_LENGTH(N'dbo.CONDO', N'Parcel') IS NOT NULL
         EXEC(N'ALTER TABLE dbo.CONDO DROP COLUMN Parcel;');
 END;
-IF COL_LENGTH(N'dbo.UPR_CLOSURE', N'AncestorUPRID') IS NOT NULL
+/* September 29: keep the original API column name. Existing AncestorUPRID
+   tables are not altered. Restore only a prior candidate's renamed column;
+   no relationship rows, levels or column positions are changed here. */
+IF COL_LENGTH(N'dbo.UPR_CLOSURE', N'UPRAncestry') IS NOT NULL
 BEGIN
-    IF COL_LENGTH(N'dbo.UPR_CLOSURE', N'UPRAncestry') IS NOT NULL
+    IF COL_LENGTH(N'dbo.UPR_CLOSURE', N'AncestorUPRID') IS NOT NULL
         THROW 50004, 'Both closure ancestry columns exist; resolve before migration.', 1;
-    EXEC sys.sp_rename N'dbo.UPR_CLOSURE.AncestorUPRID', N'UPRAncestry', N'COLUMN';
+    EXEC sys.sp_rename N'dbo.UPR_CLOSURE.UPRAncestry', N'AncestorUPRID', N'COLUMN';
 END;
+IF COL_LENGTH(N'dbo.UPR_CLOSURE', N'AncestorUPRID') IS NULL
+    THROW 50004, 'The API-compatible UPR_CLOSURE.AncestorUPRID column is required.', 1;
 IF OBJECT_ID(N'dbo.UPR_LOAD_RUN', N'U') IS NULL
     EXEC(N'CREATE TABLE dbo.UPR_LOAD_RUN
     (
@@ -221,8 +226,8 @@ BEGIN
         FROM dbo.AuditLog_PreSept17 a
         WHERE NOT EXISTS(SELECT 1 FROM dbo.REF_ENTITY_IDENTIFICATION e WHERE e.EntityName=a.EntityName);
     SELECT a.AuditID,e.EntityID,a.EntityKey,
-        RegistryKey=CASE WHEN e.EntityName=''UPR_CLOSURE'' AND ck.UPRAncestry IS NOT NULL AND ck.DescendantUPRID IS NOT NULL
-            THEN (SELECT ck.UPRAncestry,ck.DescendantUPRID FOR JSON PATH,WITHOUT_ARRAY_WRAPPER) ELSE a.EntityKey END,
+        RegistryKey=CASE WHEN e.EntityName=''UPR_CLOSURE'' AND ck.AncestorUPRID IS NOT NULL AND ck.DescendantUPRID IS NOT NULL
+            THEN (SELECT ck.AncestorUPRID,ck.DescendantUPRID FOR JSON PATH,WITHOUT_ARRAY_WRAPPER) ELSE a.EntityKey END,
         NativeID=CASE WHEN k.KeyCount=1 THEN k.NativeID END,
         OriginalUPRID=COALESCE(
             TRY_CONVERT(BIGINT,JSON_VALUE(CASE WHEN ISJSON(a.NewValues)=1 THEN a.NewValues ELSE N''{}'' END,''$.UPRID'')),
@@ -234,9 +239,9 @@ BEGIN
     OUTER APPLY(SELECT COUNT(*) KeyCount,MAX(TRY_CONVERT(BIGINT,value)) NativeID
         FROM OPENJSON(CASE WHEN ISJSON(a.EntityKey)=1 THEN a.EntityKey ELSE N''{}'' END)) k
     OUTER APPLY(SELECT
-        UPRAncestry=COALESCE(
-            TRY_CONVERT(BIGINT,JSON_VALUE(CASE WHEN ISJSON(a.EntityKey)=1 THEN a.EntityKey ELSE N''{}'' END,''$.UPRAncestry'')),
-            TRY_CONVERT(BIGINT,JSON_VALUE(CASE WHEN ISJSON(a.EntityKey)=1 THEN a.EntityKey ELSE N''{}'' END,''$.AncestorUPRID''))),
+        AncestorUPRID=COALESCE(
+            TRY_CONVERT(BIGINT,JSON_VALUE(CASE WHEN ISJSON(a.EntityKey)=1 THEN a.EntityKey ELSE N''{}'' END,''$.AncestorUPRID'')),
+            TRY_CONVERT(BIGINT,JSON_VALUE(CASE WHEN ISJSON(a.EntityKey)=1 THEN a.EntityKey ELSE N''{}'' END,''$.UPRAncestry''))),
         DescendantUPRID=TRY_CONVERT(BIGINT,JSON_VALUE(CASE WHEN ISJSON(a.EntityKey)=1 THEN a.EntityKey ELSE N''{}'' END,''$.DescendantUPRID''))) ck;
     INSERT dbo.AUDIT_ENTITY_RECORD(EntityID,EntityKey)
         SELECT DISTINCT k.EntityID,k.RegistryKey FROM #LegacyKeys k WHERE k.NativeID IS NULL
@@ -272,16 +277,16 @@ EXEC(N'
         SELECT a.AuditID,a.UPRID FROM dbo.AuditLog a
         WHERE NOT EXISTS(SELECT 1 FROM dbo.AUDIT_LOG_CONTEXT c WHERE c.AuditID=a.AuditID);
 ');
-EXEC(N'/* Earlier September 23 candidates registered old closure JSON under its old
-   column spelling. Reconcile those IDs without changing original event JSON. */
+EXEC(N'/* Prior candidates used UPRAncestry in closure keys. Reconcile registry
+   references to the restored AncestorUPRID key; retain original event JSON. */
 SELECT r.RecordID, r.EntityID,
-    CanonicalKey = (SELECT k.UPRAncestry, k.DescendantUPRID FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)
+    CanonicalKey = (SELECT k.AncestorUPRID, k.DescendantUPRID FOR JSON PATH, WITHOUT_ARRAY_WRAPPER)
 INTO #ClosureAuditAliases
 FROM dbo.AUDIT_ENTITY_RECORD r JOIN dbo.REF_ENTITY_IDENTIFICATION e ON e.EntityID = r.EntityID
 CROSS APPLY (SELECT
-    UPRAncestry = TRY_CONVERT(BIGINT,JSON_VALUE(CASE WHEN ISJSON(r.EntityKey)=1 THEN r.EntityKey ELSE N''{}'' END,''$.AncestorUPRID'')),
+    AncestorUPRID = TRY_CONVERT(BIGINT,JSON_VALUE(CASE WHEN ISJSON(r.EntityKey)=1 THEN r.EntityKey ELSE N''{}'' END,''$.UPRAncestry'')),
     DescendantUPRID = TRY_CONVERT(BIGINT,JSON_VALUE(CASE WHEN ISJSON(r.EntityKey)=1 THEN r.EntityKey ELSE N''{}'' END,''$.DescendantUPRID''))) k
-WHERE e.EntityName = ''UPR_CLOSURE'' AND k.UPRAncestry IS NOT NULL AND k.DescendantUPRID IS NOT NULL;
+WHERE e.EntityName = ''UPR_CLOSURE'' AND k.AncestorUPRID IS NOT NULL AND k.DescendantUPRID IS NOT NULL;
 INSERT dbo.AUDIT_ENTITY_RECORD (EntityID,EntityKey)
 SELECT DISTINCT a.EntityID,a.CanonicalKey FROM #ClosureAuditAliases a
 WHERE NOT EXISTS (SELECT 1 FROM dbo.AUDIT_ENTITY_RECORD r WHERE r.EntityID=a.EntityID AND r.EntityKey=a.CanonicalKey);

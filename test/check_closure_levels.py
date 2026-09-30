@@ -34,7 +34,7 @@ def load():
 
 def closure():
     return {tuple(map(int, line.split("|"))) for line in sql(
-        "SELECT UPRAncestry, DescendantUPRID, [Level] FROM dbo.UPR_CLOSURE;"
+        "SELECT AncestorUPRID, DescendantUPRID, [Level] FROM dbo.UPR_CLOSURE;"
     ).splitlines() if line.strip()}
 
 
@@ -101,7 +101,10 @@ subprocess.run(
 try:
     run_file("test/local_it_setup.sql")
     run_file("ddl/03_new_upr_schema.sql")
+    original_shape = sql("SELECT OBJECT_ID(N'dbo.UPR_CLOSURE'),column_id,name FROM sys.columns WHERE object_id=OBJECT_ID(N'dbo.UPR_CLOSURE') ORDER BY column_id;")
     run_file("scripts/install_upr_audit.sql")
+    assert sql("SELECT OBJECT_ID(N'dbo.UPR_CLOSURE'),column_id,name FROM sys.columns WHERE object_id=OBJECT_ID(N'dbo.UPR_CLOSURE') ORDER BY column_id;") == original_shape, "Installer altered the original API table"
+
     load()
     verify()
     assert_quiet_rerun()
@@ -145,7 +148,7 @@ INSERT dbo.CONDO (UPRID) SELECT UPRID FROM @Nodes WHERE Kind = 'Condo';
     sql("""
 DECLARE @Root BIGINT = (SELECT UPRID FROM dbo.UPR WHERE AccountNumber = '01231829');
 DECLARE @Condo BIGINT = (SELECT UPRID FROM dbo.UPR WHERE AccountNumber = '08123748');
-IF (SELECT COUNT(*) FROM dbo.UPR_CLOSURE WHERE UPRAncestry = @Root) <> 9
+IF (SELECT COUNT(*) FROM dbo.UPR_CLOSURE WHERE AncestorUPRID = @Root) <> 9
    OR (SELECT COUNT(*) FROM dbo.UPR_CLOSURE WHERE DescendantUPRID = @Condo AND [Level] = 2) <> 3
     THROW 51006, 'Illustrated Property tree or child Condo ancestor paths were lost.', 1;
 IF NOT EXISTS (SELECT 1 FROM dbo.CONDO c INNER JOIN dbo.UPR u ON u.UPRID = c.UPRID
@@ -163,13 +166,39 @@ IF NOT EXISTS (SELECT 1 FROM dbo.CONDO c INNER JOIN dbo.UPR u ON u.UPRID = c.UPR
     last_report_event = audit_id()
     verify_ancestor_report(root)
     verify_ancestor_report(child)
+    client_check = (ROOT / "test/check_descendant_level0.sql").read_text().replace(
+        "DECLARE @UPRID BIGINT = 207075;", f"DECLARE @UPRID BIGINT = {child};")
+    assert "PASS" in sql(client_check)
     assert closure() == before_report and audit_id() == last_report_event, "Read-only report changed data"
-    # The screenshot uses the old spelling; both layouts must work unchanged.
-    sql("EXEC sys.sp_rename N'dbo.UPR_CLOSURE.UPRAncestry',N'AncestorUPRID',N'COLUMN';")
-    try:
-        verify_ancestor_report(child)
-    finally:
-        sql("EXEC sys.sp_rename N'dbo.UPR_CLOSURE.AncestorUPRID',N'UPRAncestry',N'COLUMN';")
+    # A prior candidate may have renamed the column. The read-only report
+    # supports it; the installer restores the API name and preserves all rows.
+    table_identity = sql("SELECT OBJECT_ID(N'dbo.UPR_CLOSURE'),COLUMNPROPERTY(OBJECT_ID(N'dbo.UPR_CLOSURE'),N'AncestorUPRID','ColumnId');")
+    sql("EXEC sys.sp_rename N'dbo.UPR_CLOSURE.AncestorUPRID',N'UPRAncestry',N'COLUMN';")
+    verify_ancestor_report(child)
+    sql(f"""
+DECLARE @Entity INT=(SELECT EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName='UPR_CLOSURE');
+DECLARE @Key NVARCHAR(200)=(SELECT CONVERT(BIGINT,{root}) AS UPRAncestry, CONVERT(BIGINT,{child}) AS DescendantUPRID FOR JSON PATH,WITHOUT_ARRAY_WRAPPER);
+INSERT dbo.AUDIT_ENTITY_RECORD(EntityID,EntityKey) VALUES(@Entity,@Key);
+DECLARE @Record BIGINT=-CONVERT(BIGINT,SCOPE_IDENTITY());
+INSERT dbo.AuditLog(EntityNameID,EntityRecordID,OperationType,ChangedBy)
+VALUES(@Entity,@Record,'UPDATE','prior-candidate-key');
+INSERT dbo.AUDIT_LOG_CONTEXT(AuditID,EntityKey) VALUES(CONVERT(INT,SCOPE_IDENTITY()),@Key);
+""")
+    run_file("scripts/install_upr_audit.sql")
+    sql(f"""
+IF NOT EXISTS(SELECT 1 FROM dbo.AUDIT_LOG a JOIN dbo.AUDIT_ENTITY_RECORD r
+    ON a.EntityID=r.EntityID AND a.EntityRecordID=-r.RecordID
+    WHERE a.ChangedBy='prior-candidate-key'
+      AND JSON_VALUE(a.EntityKey,'$.UPRAncestry')='{root}'
+      AND JSON_VALUE(r.EntityKey,'$.AncestorUPRID')='{root}'
+      AND JSON_VALUE(r.EntityKey,'$.DescendantUPRID')='{child}')
+    THROW 51008,'API restoration lost original event JSON or canonical record identity.',1;
+""")
+    assert closure() == before_report, "API-name restoration changed closure rows or levels"
+    assert sql("SELECT OBJECT_ID(N'dbo.UPR_CLOSURE'),COLUMNPROPERTY(OBJECT_ID(N'dbo.UPR_CLOSURE'),N'AncestorUPRID','ColumnId');") == table_identity
+    run_file("scripts/install_upr_audit.sql")
+    assert closure() == before_report, "Repeated installation changed closure rows or levels"
+    verify_ancestor_report(child)
     print('PASS: ancestor report includes root 0, preserves self/path rows and supports both column spellings')
 
 

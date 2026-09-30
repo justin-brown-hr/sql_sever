@@ -1,0 +1,43 @@
+UPR DESCENDANT LEVEL-0 TEST - 29 SEPTEMBER 2026
+
+Purpose
+Keep the existing UPR_CLOSURE table and AncestorUPRID API column unchanged.
+Display each ancestor's own level, including the root at level 0.
+
+Files in this ZIP
+- list_upr_ancestor_path.sql: corrected ancestor-path report.
+- check_descendant_level0.sql: verifies the API columns and reported path.
+- START_HERE.txt: these instructions.
+
+Run in this order
+1. Extract the ZIP to a folder.
+2. Open SQL Server Management Studio (SSMS) and connect to your database server.
+3. Open list_upr_ancestor_path.sql. Select the intended database in the SSMS
+   database dropdown. This file does not automatically select a database.
+4. Keep DECLARE @UPRID BIGINT = 207075; for the reported record. Execute the
+   entire file (F5, with no partial text selected).
+5. Review the Results tab. The ancestor path should start with the root at
+   Level 0 and end with the selected record. For a record at depth 2, the
+   levels should be 0, 1, 2. Level 0 means the root, not the selected record.
+6. Open check_descendant_level0.sql. Select the SAME database, keep @UPRID set
+   to 207075, and execute the entire file.
+7. Expected test output: a PASS result with the root UPRID and ancestor count,
+   followed by the ancestor path starting at Level 0.
+8. Send Ade the Results from both files and any Messages/errors. If either
+   file reports an error, stop and send the exact error before making changes.
+
+To test another existing record, set the same @UPRID in both files.
+
+What this package changes
+These files read the existing UPR tables; the test uses temporary working
+tables only. They do not change UPR_CLOSURE, its stored levels, or your API.
+No installer, schema update, or loader rerun is required for this test on the
+existing populated table. Do not run other update scripts for this test.
+
+The raw SELECT * filtered by DescendantUPRID still shows the stored descendant
+level on every row. Use list_upr_ancestor_path.sql to display each ancestor's
+own level. The selected record is included at its existing hierarchy level.
+
+Validation status
+Local checks have passed. Execution against your SQL Server/database remains
+pending; please return the test output so Ade can confirm the result.

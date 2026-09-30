@@ -4,7 +4,8 @@ The same package also includes the [EntityKey explanation and audit report updat
 
 The existing `scripts/search_upr_master.sql` now installs the updated
 `dbo.usp_UPR_Search` and a new `dbo.usp_UPR_Property360` detail procedure. The
-September 23 hierarchy, closure column names and Condo migration remain in place.
+September 23 hierarchy and Condo migration remain in place. Per the September 29
+API requirement, closure uses the original `AncestorUPRID` column name.
 The audit storage now follows the separately documented client layout. This is a **SQL test candidate**, not a deployed Housing Portal
 API or a database-validated release.
 

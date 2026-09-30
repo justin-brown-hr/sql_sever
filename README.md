@@ -5,7 +5,10 @@ SQL Server integration that loads **AddressMaster** and **SDAT** into the **hier
 **Model:** `docs/NewUPRTABLEUSED.docx` + `docs/Response.docx` (COMPLEX).  
 **Old flat model** archived under `legacy/` for reference only - do not run it.
 
-Latest client follow-up: [descendant lookup including root level 0](CLIENT_CLOSURE_LEVEL_2026-09-28.md).
+Latest client instruction: [retain the original UPR_CLOSURE API table](CLIENT_CLOSURE_API_2026-09-29.md).
+Run [the read-only descendant test](test/check_descendant_level0.sql) after the ancestor report.
+
+Previous client follow-up: [descendant lookup including root level 0](CLIENT_CLOSURE_LEVEL_2026-09-28.md).
 Use [list_upr_ancestor_path.sql](scripts/list_upr_ancestor_path.sql) to display each
 ancestor's own level when selecting a descendant.
 
@@ -20,7 +23,7 @@ Previous update: [September 17 review implementation](CLIENT_UPDATE_2026-09-23.m
 Package: `UPR_Corrections_2026-09-23_Review_Update.zip`.
 See [review findings and corrections](CLIENT_REVIEW_FEEDBACK_2026-09-23.md).
 Includes MA/SDAT overlap matching, `BLV` normalization, guarded existing-duplicate
-repair, Condo column removal, `UPRAncestry`, and normalized auditing.
+repair, Condo column removal, original `AncestorUPRID` API compatibility, and normalized auditing.
 **Static checks pass; the updated integration suite is pending a SQL Server runtime.**
 
 ## Requirements

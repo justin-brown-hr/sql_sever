@@ -1,5 +1,8 @@
 > The package also includes the [EntityKey explanation and readable audit report](CLIENT_AUDIT_KEY_UPDATE_2026-09-24.md).
 
+> Latest September 29 contract: [retain the original AncestorUPRID API column](CLIENT_CLOSURE_API_2026-09-29.md).
+> The level-0 display test is read-only and does not change UPR_CLOSURE.
+
 > September 24 combined revision: search, readable audit keys and the supplied
 > physical AuditLog layout. [Latest installation contract](CLIENT_AUDIT_LAYOUT_2026-09-24.md)
 > supersedes earlier descriptions of AUDIT_LOG as a table / AuditLog as a view.

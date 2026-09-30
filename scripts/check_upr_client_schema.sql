@@ -8,7 +8,7 @@ SELECT @@SERVERNAME AS ServerName, DB_NAME() AS DatabaseName;
 WITH RequiredColumns AS (
     SELECT TableName, ColumnName
     FROM (VALUES
-        (N'UPR_CLOSURE', N'UPRAncestry'),
+        (N'UPR_CLOSURE', N'AncestorUPRID'),
         (N'UPR_CLOSURE', N'DescendantUPRID'),
         (N'UPR_CLOSURE', N'Level'),
         (N'AuditLog', N'AuditID'),

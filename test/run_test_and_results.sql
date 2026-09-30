@@ -194,11 +194,11 @@ INSERT #V VALUES (CASE WHEN @n = @m THEN 'PASS' ELSE 'FAIL' END,
 /* closure table complete */
 SELECT @n = COUNT(*) FROM dbo.UPR u
 WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_CLOSURE c
-                  WHERE c.UPRAncestry = u.UPRID AND c.DescendantUPRID = u.UPRID);
+                  WHERE c.AncestorUPRID = u.UPRID AND c.DescendantUPRID = u.UPRID);
 SELECT @m = COUNT(*) FROM dbo.UPR u
 WHERE u.ParentUPRID IS NOT NULL
   AND NOT EXISTS (SELECT 1 FROM dbo.UPR_CLOSURE c
-                  WHERE c.UPRAncestry = u.ParentUPRID AND c.DescendantUPRID = u.UPRID);
+                  WHERE c.AncestorUPRID = u.ParentUPRID AND c.DescendantUPRID = u.UPRID);
 INSERT #V VALUES (CASE WHEN @n + @m = 0 THEN 'PASS' ELSE 'FAIL' END,
     'Hierarchy closure table complete', CONVERT(VARCHAR(20), @n + @m) + ' missing rows');
 
@@ -272,7 +272,7 @@ BEGIN
         Address       = a.NormalizedAddress,
         OwnerContact  = ct.OrganizationName
     FROM dbo.UPR root
-    INNER JOIN dbo.UPR_CLOSURE cl ON cl.UPRAncestry = root.UPRID
+    INNER JOIN dbo.UPR_CLOSURE cl ON cl.AncestorUPRID = root.UPRID
     INNER JOIN dbo.UPR u ON u.UPRID = cl.DescendantUPRID
     INNER JOIN dbo.REF_ENTITYTYPE e ON e.EntityTypeID = u.EntityTypeID
     LEFT JOIN dbo.COMPLEX cx ON cx.UPRID = u.UPRID
@@ -284,7 +284,7 @@ BEGIN
     LEFT JOIN dbo.CONTACT ct ON ct.ContactID = uc.ContactID
     WHERE root.AccountNumber = @SampleAccount
       AND root.ParentUPRID IS NULL
-    ORDER BY cl.UPRAncestry, u.ParentUPRID, u.UPRID;
+    ORDER BY cl.AncestorUPRID, u.ParentUPRID, u.UPRID;
 END;
 
 PRINT N'';

@@ -45,7 +45,7 @@ sql("""
 IF NOT EXISTS (
     SELECT 1 FROM dbo.UNIT un
     INNER JOIN dbo.UPR_CLOSURE cl ON cl.DescendantUPRID = un.UPRID
-    INNER JOIN dbo.UPR root ON root.UPRID = cl.UPRAncestry
+    INNER JOIN dbo.UPR root ON root.UPRID = cl.AncestorUPRID
     WHERE root.AccountNumber = '00089876' AND un.UnitNumber IS NULL
 ) THROW 51001, 'Condo record with an AccountNumber but no CondoUnit value must still get a Unit row (NULL, not skipped).', 1;
 IF NOT EXISTS (
@@ -163,7 +163,7 @@ print("PASS: external multirow INSERT/UPDATE/DELETE, MERGE, rollback and 23-tabl
 # Both key columns must be retained in every closure event, including same-ancestor rows.
 sql("""
 IF EXISTS (SELECT 1 FROM dbo.AUDIT_LOG WHERE EntityName = 'UPR_CLOSURE'
-    AND (JSON_VALUE(EntityKey, '$.UPRAncestry') IS NULL
+    AND (JSON_VALUE(EntityKey, '$.AncestorUPRID') IS NULL
       OR JSON_VALUE(EntityKey, '$.DescendantUPRID') IS NULL))
     THROW 51019, 'Composite audit key is incomplete.', 1;
 """)

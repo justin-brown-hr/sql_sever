@@ -1,3 +1,28 @@
+# Latest continuation — API closure compatibility, September 29, 2026
+
+Client told Ade to keep the old UPR_CLOSURE table because their API uses it.
+This supersedes the September 23 rename. Main scripts, fresh DDL and fixtures
+now use AncestorUPRID again; Level still stores descendant root depth. The
+ancestor-path report displays ancestor root depth, including 0, without changing
+stored data. Raw SELECT * by descendant keeps its original stored meaning.
+
+Installer leaves existing AncestorUPRID closure tables alone. If only the prior
+candidate UPRAncestry name exists, it restores AncestorUPRID in the existing
+transaction and regenerates managed audit triggers. Both names together stop.
+Audit registry alias normalization now points to AncestorUPRID; original JSON
+is retained. Full script set must be installed together for prior candidates.
+
+Client can test immediately with scripts/list_upr_ancestor_path.sql then
+new test/check_descendant_level0.sql, @UPRID=207075, intended database selected.
+No installer/loader needed for this test on the original API table. Test checks
+original columns and compares report path/levels to independent ParentUPRID walk.
+Prepared migration regressions preserve object ID/column order/rows/levels and
+repeat install. Local static/schema/runner/Python checks pass; SQL Server runtime
+is absent. No database/API deployment occurred. See CLIENT_CLOSURE_API_2026-09-29.md.
+Existing delivery ZIP refreshed; CLIENT_MESSAGE_2026-09-29.txt is the unsent reply.
+
+---
+
 # Latest continuation — descendant level-0 query, September 28, 2026
 
 Client screenshot filters DescendantUPRID=207075 and sees repeated Level 2,

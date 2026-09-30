@@ -104,8 +104,8 @@ IF (SELECT COUNT(*) FROM dbo.EXTERNAL_IDENTIFIER_XREF WHERE IdentifierType = 'SO
     THROW 51702, 'Source links were lost.', 1;
 IF COL_LENGTH('dbo.CONDO','CondoName') IS NOT NULL OR COL_LENGTH('dbo.CONDO','Parcel') IS NOT NULL
     THROW 51703, 'Removed Condo columns remain.', 1;
-IF COL_LENGTH('dbo.UPR_CLOSURE','AncestorUPRID') IS NOT NULL OR COL_LENGTH('dbo.UPR_CLOSURE','UPRAncestry') IS NULL
-    THROW 51704, 'Closure rename was not applied.', 1;
+IF COL_LENGTH('dbo.UPR_CLOSURE','UPRAncestry') IS NOT NULL OR COL_LENGTH('dbo.UPR_CLOSURE','AncestorUPRID') IS NULL
+    THROW 51704, 'Original API closure column was not retained.', 1;
 IF EXISTS (SELECT 1 FROM dbo.AUDIT_LOG WHERE EntityID IS NULL OR EntityRecordID IS NULL)
     THROW 51705, 'Normalized audit identity is missing.', 1;
 IF EXISTS (SELECT 1 FROM dbo.AUDIT_LOG a JOIN dbo.REF_ENTITY_IDENTIFICATION e ON e.EntityID = a.EntityID
@@ -139,17 +139,17 @@ def test_closure_audit_identity():
     query("""
 BEGIN TRANSACTION;
 DECLARE @Ancestor BIGINT, @Descendant BIGINT, @RecordID BIGINT, @Before BIGINT;
-SELECT TOP (1) @Ancestor = c.UPRAncestry, @Descendant = c.DescendantUPRID, @RecordID = a.EntityRecordID
+SELECT TOP (1) @Ancestor = c.AncestorUPRID, @Descendant = c.DescendantUPRID, @RecordID = a.EntityRecordID
 FROM dbo.UPR_CLOSURE c JOIN dbo.AUDIT_LOG a
-    ON TRY_CONVERT(BIGINT, JSON_VALUE(a.EntityKey,'$.AncestorUPRID')) = c.UPRAncestry
+    ON TRY_CONVERT(BIGINT, JSON_VALUE(a.EntityKey,'$.AncestorUPRID')) = c.AncestorUPRID
    AND TRY_CONVERT(BIGINT, JSON_VALUE(a.EntityKey,'$.DescendantUPRID')) = c.DescendantUPRID
 JOIN dbo.REF_ENTITY_IDENTIFICATION e ON e.EntityID = a.EntityID AND e.EntityName = 'UPR_CLOSURE';
 IF @RecordID IS NULL THROW 51717, 'No migrated closure event for identity test.', 1;
 SELECT @Before = MAX(AuditLogID) FROM dbo.AUDIT_LOG;
-UPDATE dbo.UPR_CLOSURE SET [Level] = [Level] + 1 WHERE UPRAncestry = @Ancestor AND DescendantUPRID = @Descendant;
+UPDATE dbo.UPR_CLOSURE SET [Level] = [Level] + 1 WHERE AncestorUPRID = @Ancestor AND DescendantUPRID = @Descendant;
 IF NOT EXISTS (SELECT 1 FROM dbo.AUDIT_LOG WHERE AuditLogID > @Before AND EntityRecordID = @RecordID
-    AND JSON_VALUE(EntityKey,'$.UPRAncestry') = CONVERT(NVARCHAR(30),@Ancestor))
-    THROW 51718, 'Column rename split the audit identity of an existing closure row.', 1;
+    AND JSON_VALUE(EntityKey,'$.AncestorUPRID') = CONVERT(NVARCHAR(30),@Ancestor))
+    THROW 51718, 'API-compatible closure key split the audit identity of an existing row.', 1;
 ROLLBACK;
 """)
 

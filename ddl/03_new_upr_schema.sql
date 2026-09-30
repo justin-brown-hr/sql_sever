@@ -511,19 +511,19 @@ GO
    ============================================================================ */
 CREATE TABLE dbo.UPR_CLOSURE
 (
-    UPRAncestry   BIGINT NOT NULL,
+    AncestorUPRID   BIGINT NOT NULL,
     DescendantUPRID BIGINT NOT NULL,
     /* Descendant's depth from its root, matching the report's LevelNo. */
     [Level]        INT NOT NULL,
     CONSTRAINT CK_UPR_CLOSURE_Level CHECK ([Level] >= 0),
-    CONSTRAINT PK_UPR_CLOSURE PRIMARY KEY CLUSTERED (UPRAncestry, DescendantUPRID),
-    CONSTRAINT FK_UPR_CLOSURE_Ancestor FOREIGN KEY (UPRAncestry) REFERENCES dbo.UPR (UPRID),
+    CONSTRAINT PK_UPR_CLOSURE PRIMARY KEY CLUSTERED (AncestorUPRID, DescendantUPRID),
+    CONSTRAINT FK_UPR_CLOSURE_Ancestor FOREIGN KEY (AncestorUPRID) REFERENCES dbo.UPR (UPRID),
     CONSTRAINT FK_UPR_CLOSURE_Descendant FOREIGN KEY (DescendantUPRID) REFERENCES dbo.UPR (UPRID)
 );
 GO
 
-CREATE INDEX IX_UPR_CLOSURE_Descendant ON dbo.UPR_CLOSURE (DescendantUPRID, UPRAncestry);
-CREATE INDEX IX_UPR_CLOSURE_Ancestor ON dbo.UPR_CLOSURE (UPRAncestry) INCLUDE (DescendantUPRID);
+CREATE INDEX IX_UPR_CLOSURE_Descendant ON dbo.UPR_CLOSURE (DescendantUPRID, AncestorUPRID);
+CREATE INDEX IX_UPR_CLOSURE_Ancestor ON dbo.UPR_CLOSURE (AncestorUPRID) INCLUDE (DescendantUPRID);
 GO
 
 /* ============================================================================

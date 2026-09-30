@@ -250,7 +250,7 @@ BEGIN
           AND (@SourceSystem IS NULL OR x.SourceSystem = @SourceSystem))
           OR (@UnitNumber IS NOT NULL AND EXISTS (
               SELECT 1 FROM dbo.UPR_CLOSURE cl
-              JOIN dbo.UPR parent ON parent.UPRID=cl.UPRAncestry
+              JOIN dbo.UPR parent ON parent.UPRID=cl.AncestorUPRID
               JOIN #Allowed permittedParent ON permittedParent.UPRID=parent.UPRID
               WHERE cl.DescendantUPRID=u.UPRID AND
                 ((@SourceSystem IS NULL AND parent.AccountNumber IN(@AccountNumber,@NormAccount)) OR EXISTS (
@@ -261,8 +261,8 @@ BEGIN
       AND (@SourceSystem IS NULL OR EXISTS (SELECT 1 FROM dbo.EXTERNAL_IDENTIFIER_XREF x
           WHERE x.UPRID = u.UPRID AND x.SourceSystem = @SourceSystem)
           OR (@UnitNumber IS NOT NULL AND @NormAccount IS NOT NULL AND EXISTS (
-              SELECT 1 FROM dbo.UPR_CLOSURE cl JOIN #Allowed pa ON pa.UPRID=cl.UPRAncestry
-              JOIN dbo.EXTERNAL_IDENTIFIER_XREF ax ON ax.UPRID=cl.UPRAncestry
+              SELECT 1 FROM dbo.UPR_CLOSURE cl JOIN #Allowed pa ON pa.UPRID=cl.AncestorUPRID
+              JOIN dbo.EXTERNAL_IDENTIFIER_XREF ax ON ax.UPRID=cl.AncestorUPRID
               WHERE cl.DescendantUPRID=u.UPRID AND ax.SourceSystem=@SourceSystem
                 AND ax.IdentifierType=N'ACCOUNT_NUMBER' AND ax.IdentifierValue IN(@AccountNumber,@NormAccount))))
       AND (@UnitNumber IS NULL OR un.UnitNumber = @UnitNumber)
@@ -398,9 +398,9 @@ BEGIN
         ORDER BY CASE WHEN a.AddressID=am.AddressID THEN 0 ELSE 1 END,a.IsPrimary DESC,a.AddressID) ad
     OUTER APPLY (SELECT MIN(o.MatchRank) AS MatchRank FROM #Owners o WHERE o.UPRID=e.UPRID) own
     OUTER APPLY (SELECT TOP (1) au.UPRID FROM dbo.UPR_CLOSURE cl
-        JOIN dbo.UPR au ON au.UPRID=cl.UPRAncestry JOIN #Allowed al ON al.UPRID=au.UPRID
+        JOIN dbo.UPR au ON au.UPRID=cl.AncestorUPRID JOIN #Allowed al ON al.UPRID=au.UPRID
         JOIN dbo.REF_ENTITYTYPE ae ON ae.EntityTypeID=au.EntityTypeID
-        JOIN dbo.UPR_CLOSURE self ON self.UPRAncestry=au.UPRID AND self.DescendantUPRID=au.UPRID
+        JOIN dbo.UPR_CLOSURE self ON self.AncestorUPRID=au.UPRID AND self.DescendantUPRID=au.UPRID
         WHERE cl.DescendantUPRID=e.UPRID AND ae.Description IN ('Property','Complex')
         ORDER BY self.[Level] DESC,au.UPRID) anc
     WHERE @HasAddress=0 OR am.AddressID IS NOT NULL;
@@ -421,14 +421,14 @@ BEGIN
             SELECT TOP (@Top) x.ExternalIdentifierID,x.UPRID,m.AccountNumber,m.EntityType,
                 x.SourceSystem,x.IdentifierType,x.IdentifierValue,x.CreatedDate
             FROM #Identifiers x JOIN #Matches m ON m.UPRID=x.UPRID ORDER BY x.UPRID,x.SourceSystem,x.ExternalIdentifierID;
-            SELECT TOP (@Top) cl.UPRAncestry,ae.Description AS AncestorEntityType,cl.DescendantUPRID,
+            SELECT TOP (@Top) cl.AncestorUPRID,ae.Description AS AncestorEntityType,cl.DescendantUPRID,
                 de.Description AS DescendantEntityType,d.AccountNumber AS DescendantAccount
-            FROM dbo.UPR_CLOSURE cl JOIN #Matches m ON m.UPRID=cl.UPRAncestry
-            JOIN dbo.UPR a ON a.UPRID=cl.UPRAncestry JOIN dbo.UPR d ON d.UPRID=cl.DescendantUPRID
+            FROM dbo.UPR_CLOSURE cl JOIN #Matches m ON m.UPRID=cl.AncestorUPRID
+            JOIN dbo.UPR a ON a.UPRID=cl.AncestorUPRID JOIN dbo.UPR d ON d.UPRID=cl.DescendantUPRID
             JOIN #Allowed al ON al.UPRID=d.UPRID
             JOIN dbo.REF_ENTITYTYPE ae ON ae.EntityTypeID=a.EntityTypeID
             JOIN dbo.REF_ENTITYTYPE de ON de.EntityTypeID=d.EntityTypeID
-            WHERE cl.UPRAncestry<>cl.DescendantUPRID ORDER BY cl.UPRAncestry,cl.DescendantUPRID;
+            WHERE cl.AncestorUPRID<>cl.DescendantUPRID ORDER BY cl.AncestorUPRID,cl.DescendantUPRID;
         END;
         SELECT TOP (@Top) q.UPRMatchReviewID,q.UPRID,q.IncomingSourceSystem,q.MA_Account,
             q.MA_NormalizedIncomingAddress,q.MA_ParcelID,q.SDAT_AccountNumber,q.SDAT_NormalizedIncomingAddress,
@@ -538,12 +538,12 @@ BEGIN
     INSERT #Scope
     SELECT u.UPRID,'PARENT' FROM dbo.UPR u JOIN #DetailAllowed a ON a.UPRID=u.UPRID
     WHERE u.UPRID<>@UPRID AND ((@Parent=1 AND u.UPRID=(SELECT ParentUPRID FROM dbo.UPR WHERE UPRID=@UPRID))
-        OR (@Parents=1 AND EXISTS(SELECT 1 FROM dbo.UPR_CLOSURE c WHERE c.UPRAncestry=u.UPRID AND c.DescendantUPRID=@UPRID)));
+        OR (@Parents=1 AND EXISTS(SELECT 1 FROM dbo.UPR_CLOSURE c WHERE c.AncestorUPRID=u.UPRID AND c.DescendantUPRID=@UPRID)));
     INSERT #Scope
     SELECT u.UPRID,'CHILD' FROM dbo.UPR u JOIN #DetailAllowed a ON a.UPRID=u.UPRID
     WHERE NOT EXISTS(SELECT 1 FROM #Scope s WHERE s.UPRID=u.UPRID)
       AND ((@Children=1 AND u.ParentUPRID=@UPRID) OR (@Descendants=1 AND EXISTS(
-          SELECT 1 FROM dbo.UPR_CLOSURE c WHERE c.UPRAncestry=@UPRID AND c.DescendantUPRID=u.UPRID)));
+          SELECT 1 FROM dbo.UPR_CLOSURE c WHERE c.AncestorUPRID=@UPRID AND c.DescendantUPRID=u.UPRID)));
     /* A Condo Unit can link to a Building that is not its ancestor. Include
        that authorized entity as related context without changing the tree. */
     IF @Full=1
@@ -559,7 +559,7 @@ BEGIN
         s.Relation,c.[Level] AS RootLevel
     INTO #Nodes FROM #Scope s JOIN dbo.UPR u ON u.UPRID=s.UPRID
     JOIN dbo.REF_ENTITYTYPE et ON et.EntityTypeID=u.EntityTypeID
-    LEFT JOIN dbo.UPR_CLOSURE c ON c.UPRAncestry=u.UPRID AND c.DescendantUPRID=u.UPRID;
+    LEFT JOIN dbo.UPR_CLOSURE c ON c.AncestorUPRID=u.UPRID AND c.DescendantUPRID=u.UPRID;
     SET @ResponseJson=(SELECT
         JSON_QUERY((SELECT n.UPRID AS uprId,n.EntityTypeID AS entityTypeId,n.EntityType AS entityType,
             n.ParentUPRID AS parentUprId,n.AccountNumber AS accountNumber,n.StatusCode AS statusCode

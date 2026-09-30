@@ -1,5 +1,8 @@
 # Descendant lookup and level 0 — September 28, 2026
 
+> Latest September 29 contract: [retain the original AncestorUPRID API column](CLIENT_CLOSURE_API_2026-09-29.md).
+> The level-0 display test is read-only and does not change UPR_CLOSURE.
+
 The client asked why filtering `UPR_CLOSURE` by descendant 207075 shows no level 0,
 while filtering by an ancestor shows level 0. The screenshot uses the earlier
 column name `AncestorUPRID`; the latest scripts use `UPRAncestry`.

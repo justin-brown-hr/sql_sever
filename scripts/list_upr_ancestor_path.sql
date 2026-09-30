@@ -8,7 +8,8 @@
   This report instead displays each ANCESTOR's own root depth from its self-row.
   The output Level therefore describes the node in the ancestry column.
 
-  Supports the previous AncestorUPRID spelling and current UPRAncestry spelling.
+  Keeps the original API column AncestorUPRID. Also reads the earlier
+  candidate spelling UPRAncestry without changing it.
   Edit @UPRID below; 207075 is the descendant in the client's question.
 */
 SET QUOTED_IDENTIFIER ON;

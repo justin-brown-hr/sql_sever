@@ -68,7 +68,7 @@ WHERE @NormAccount IS NULL
    OR EXISTS (
         SELECT 1
         FROM dbo.UPR_CLOSURE cl
-        INNER JOIN dbo.UPR root ON root.UPRID = cl.UPRAncestry
+        INNER JOIN dbo.UPR root ON root.UPRID = cl.AncestorUPRID
         WHERE cl.DescendantUPRID = u.UPRID
           AND root.ParentUPRID IS NULL
           AND root.AccountNumber = @NormAccount
@@ -241,14 +241,14 @@ OUTER APPLY (
         SELECT ua.AddressID, ua.IsPrimary, ua.UPRAddressID, Pri = 1
         FROM dbo.UPR_CLOSURE cl
         INNER JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = cl.DescendantUPRID
-        WHERE cl.UPRAncestry = t.UPRID
+        WHERE cl.AncestorUPRID = t.UPRID
           AND cl.DescendantUPRID <> t.UPRID
         UNION ALL
         SELECT ua.AddressID, ua.IsPrimary, ua.UPRAddressID, Pri = 2
         FROM dbo.UPR_CLOSURE cl
-        INNER JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = cl.UPRAncestry
+        INNER JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = cl.AncestorUPRID
         WHERE cl.DescendantUPRID = t.UPRID
-          AND cl.UPRAncestry <> t.UPRID
+          AND cl.AncestorUPRID <> t.UPRID
     ) rel
     INNER JOIN dbo.ADDRESS addr ON addr.AddressID = rel.AddressID
     ORDER BY rel.Pri, rel.IsPrimary DESC, rel.UPRAddressID
@@ -309,7 +309,7 @@ FROM (
            OR u.AccountNumber = @NormAccount
            OR EXISTS (
                 SELECT 1 FROM dbo.UPR_CLOSURE cl
-                INNER JOIN dbo.UPR root ON root.UPRID = cl.UPRAncestry
+                INNER JOIN dbo.UPR root ON root.UPRID = cl.AncestorUPRID
                 WHERE cl.DescendantUPRID = u.UPRID
                   AND root.ParentUPRID IS NULL
                   AND root.AccountNumber = @NormAccount
@@ -364,7 +364,7 @@ FROM (
            OR u.AccountNumber = @NormAccount
            OR EXISTS (
                 SELECT 1 FROM dbo.UPR_CLOSURE cl
-                INNER JOIN dbo.UPR root ON root.UPRID = cl.UPRAncestry
+                INNER JOIN dbo.UPR root ON root.UPRID = cl.AncestorUPRID
                 WHERE cl.DescendantUPRID = u.UPRID
                   AND root.ParentUPRID IS NULL
                   AND root.AccountNumber = @NormAccount

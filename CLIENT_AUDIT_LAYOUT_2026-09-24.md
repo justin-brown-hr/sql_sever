@@ -65,9 +65,10 @@ replacement are one transaction; errors roll back those changes. Reinstallation
 does not copy archives again or duplicate current events.
 
 Existing AuditIDs, dates, before/after values, raw keys and available run/session
-metadata are retained. The existing closure registry spelling correction can
-reconcile old AncestorUPRID registry references to the canonical UPRAncestry
-reference; original event JSON remains unchanged. Source tables stay archived.
+metadata are retained. The closure registry spelling correction now reconciles prior candidate
+UPRAncestry references to the restored AncestorUPRID reference; original event
+JSON remains unchanged. The original API closure column name is retained per
+[the September 29 instruction](CLIENT_CLOSURE_API_2026-09-29.md). Source tables stay archived.
 
 The installer stops for IDs outside INT range, overlapping/unrecognized audit
 layouts, unmapped entity IDs, future timestamps that violate the supplied check,
