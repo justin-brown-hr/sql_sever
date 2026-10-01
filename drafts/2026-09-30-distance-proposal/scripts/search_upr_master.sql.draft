@@ -1,5 +1,7 @@
 /* UPR-SEARCH-002. SQL Server 2016 SP1+, compatibility 130+.
-   Install after install_upr_audit.sql and the updated load_upr_master.sql.
+   Requires the UPR model plus existing fn_UPR_NormalizeSDATAccount and
+   fn_UPR_NormalizeStreetNumber helpers. No AuditLog migration is required.
+   September 30: entity labels retained; address.role and opt-in physical preference added.
    REPORT preserves the administrative four-result-set interface/column order.
    GRID/JSON are bounded Portal contracts; the trusted API MUST supply an
    authorized UPR allowlist (JSON array of integer IDs). Never accept this list
@@ -131,7 +133,8 @@ CREATE OR ALTER PROCEDURE dbo.usp_UPR_Search
     @IncludeContacts BIT = 0,
     @IncludeIdentifiers BIT = 0,
     @ResponseJson NVARCHAR(MAX) = NULL OUTPUT,
-    @EmitResult BIT = 1
+    @EmitResult BIT = 1,
+    @PreferPhysicalAddress BIT = 0 -- opt-in tie preference; AddressRole remains a strict filter
 AS
 BEGIN
     SET NOCOUNT ON;
@@ -301,7 +304,8 @@ BEGIN
 
     /* All directly linked addresses qualify, including secondary and mailing
        links. The loader already shares building addresses with parents/units. */
-    SELECT DISTINCT e.UPRID, ua.AddressID, ua.IsPrimary, ad.NormalizedAddress,
+    SELECT DISTINCT e.UPRID, ua.AddressID, ua.IsPrimary, ar.AddressRoleCode,
+        AddressPreference=CASE WHEN ar.AddressRoleCode=N'PHYSICAL' THEN 0 ELSE 1 END,ad.NormalizedAddress,
         ad.StreetNumber,ad.StreetName,ad.StreetType,ad.City,ad.State,ad.ZipCode,
         StreetText = dbo.fn_UPR_SearchText(CONCAT(ad.StreetNumber,N' ',ad.StreetName,N' ',ad.StreetType),1),
         FullText = dbo.fn_UPR_SearchText(CONCAT(ad.StreetNumber,N' ',ad.StreetName,N' ',ad.StreetType,N' ',ad.City,N' ',ad.State,N' ',ad.ZipCode),1),
@@ -376,7 +380,8 @@ BEGIN
         p.PropertyName,pt.PropertyTypeCode,p.OwnerName AS PropertyOwner,cx.CommunityName,
         b.BuildingName,b.YearBuilt,un.UnitNumber,
         ad.NormalizedAddress,ad.StreetNumber,ad.StreetName,ad.City,ad.ZipCode,u.CreatedDate,
-        AddressID=ad.AddressID,
+        AddressID=ad.AddressID,AddressRole=ad.AddressRoleCode,
+        AddressPreference=CASE WHEN @PreferPhysicalAddress=1 THEN ISNULL(ad.AddressPreference,1) ELSE 0 END,
         BuildingUPRID=CASE WHEN EXISTS(SELECT 1 FROM #Allowed al WHERE al.UPRID=ub.UPRID) THEN ub.UPRID END,
         PropertyUPRID=anc.UPRID,
         MatchRank=CASE WHEN ISNULL(own.MatchRank,0)>CASE WHEN @HasAddress=1 THEN ISNULL(am.MatchRank,0) ELSE 0 END
@@ -392,10 +397,16 @@ BEGIN
     LEFT JOIN dbo.UNIT un ON un.UPRID=u.UPRID
     LEFT JOIN dbo.BUILDING ub ON ub.BuildingID=un.BuildingID
     OUTER APPLY (SELECT TOP (1) m.AddressID,m.MatchRank,m.MatchScore FROM #AddressMatches m
-        WHERE m.UPRID=e.UPRID AND @HasAddress=1 ORDER BY m.MatchRank,m.MatchScore DESC,m.AddressID) am
+        JOIN #Addresses pick ON pick.UPRID=m.UPRID AND pick.AddressID=m.AddressID
+        WHERE m.UPRID=e.UPRID AND @HasAddress=1
+        ORDER BY m.MatchRank,m.MatchScore DESC,
+            CASE WHEN @PreferPhysicalAddress=1 THEN pick.AddressPreference ELSE 0 END,
+            m.AddressID,pick.IsPrimary DESC,pick.AddressRoleCode) am
     OUTER APPLY (SELECT TOP (1) a.* FROM #Addresses a WHERE a.UPRID=e.UPRID
         AND (@HasAddress=0 OR a.AddressID=am.AddressID)
-        ORDER BY CASE WHEN a.AddressID=am.AddressID THEN 0 ELSE 1 END,a.IsPrimary DESC,a.AddressID) ad
+        ORDER BY CASE WHEN a.AddressID=am.AddressID THEN 0 ELSE 1 END,
+            CASE WHEN @PreferPhysicalAddress=1 THEN a.AddressPreference ELSE 0 END,
+            a.IsPrimary DESC,a.AddressID,a.AddressRoleCode) ad
     OUTER APPLY (SELECT MIN(o.MatchRank) AS MatchRank FROM #Owners o WHERE o.UPRID=e.UPRID) own
     OUTER APPLY (SELECT TOP (1) au.UPRID FROM dbo.UPR_CLOSURE cl
         JOIN dbo.UPR au ON au.UPRID=cl.AncestorUPRID JOIN #Allowed al ON al.UPRID=au.UPRID
@@ -450,11 +461,12 @@ BEGIN
         @Offset BIGINT=(CONVERT(BIGINT,@PageNumber)-1)*@PageSize;
     SELECT m.*, MatchType=CONVERT(VARCHAR(20),CASE m.MatchRank WHEN 0 THEN 'EXACT'
         WHEN 1 THEN 'NORMALIZED_EXACT' WHEN 2 THEN 'PARTIAL' ELSE 'FUZZY' END)
-    INTO #Page FROM #Matches m ORDER BY m.MatchRank,m.MatchScore DESC,m.UPRID
+    INTO #Page FROM #Matches m ORDER BY m.MatchRank,m.MatchScore DESC,m.AddressPreference,m.UPRID
     OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY;
     SET @ResponseJson=(SELECT @SearchID AS searchId,@Total AS totalResults,@PageNumber AS pageNumber,@PageSize AS pageSize,
         JSON_QUERY((SELECT m.UPRID AS uprId,UPPER(m.EntityType) AS entityType,m.EntityType AS entityTypeDescription,
             m.MatchType AS matchType,m.MatchScore AS matchScore,m.NormalizedAddress AS [address.formatted],
+            m.AddressRole AS [address.role],
             m.AccountNumber AS accountNumber,
             CASE WHEN EXISTS(SELECT 1 FROM #Allowed al WHERE al.UPRID=m.ParentUPRID) THEN m.ParentUPRID END AS parentUprId,
             m.UnitNumber AS unitNumber,m.BuildingUPRID AS buildingUprId,m.PropertyUPRID AS propertyUprId,
@@ -469,7 +481,7 @@ BEGIN
                 o.LastName AS lastName,o.OrganizationName AS organizationName,o.RoleTypeCode AS role,
                 CASE o.MatchRank WHEN 0 THEN 'EXACT' WHEN 1 THEN 'NORMALIZED_EXACT' ELSE 'PARTIAL' END AS matchType
                 FROM #Owners o WHERE o.UPRID=m.UPRID ORDER BY o.ContactID,o.RoleTypeCode FOR JSON PATH) END) AS matchedContacts
-            FROM #Page m ORDER BY m.MatchRank,m.MatchScore DESC,m.UPRID FOR JSON PATH)) AS results
+            FROM #Page m ORDER BY m.MatchRank,m.MatchScore DESC,m.AddressPreference,m.UPRID FOR JSON PATH)) AS results
         FOR JSON PATH,WITHOUT_ARRAY_WRAPPER);
     IF @EmitResult=1
     BEGIN

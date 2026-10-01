@@ -1,3 +1,7 @@
+> October 1 correction: [UPR_CLOSURE pair-distance repair](CLIENT_CLOSURE_DISTANCE_FIX_2026-10-01.md).
+> Send `UPR_Closure_Distance_Fix_2026-10-01.zip` for the current closure test.
+> Historical packages below were not rebuilt and do not contain this data correction.
+
 > The package also includes the [EntityKey explanation and readable audit report](CLIENT_AUDIT_KEY_UPDATE_2026-09-24.md).
 
 > Latest September 29 contract: [retain the original AncestorUPRID API column](CLIENT_CLOSURE_API_2026-09-29.md).

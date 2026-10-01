@@ -1,0 +1,19 @@
+Hello, I reviewed the bigger-picture explanation and agree with the diagnosis. UPR_CLOSURE.Level must represent relationship distance: self 0, parent 1, grandparent 2. The earlier loader incorrectly stored descendant root depth on every pair.
+
+My earlier report adjusted the display only; the stored-data correction and permanent loader change are both needed. The prepared correction follows that rule across all UPRs using ParentUPRID.
+
+I recommend retaining the column name Level to preserve the existing API contract, while documenting its distance meaning. Renaming it to Depth would require a coordinated API change.
+
+One distinction: correcting closure distances does not automatically implement the complete tree from a unit. That query must resolve the root, retrieve the root's descendants and identify the selected unit. The closure repair does not modify that endpoint.
+
+Please test the attached two-file ZIP on a restored test database:
+1. Run repair_upr_closure_distance.sql.
+2. Run check_upr_closure_distance.sql with UPRID 207075.
+3. Share the results and retest /api/upr/207075/ancestors.
+
+Before the next load, apply the loader edits in the repair file's header. They are already made in my project copy; an old loader would restore the incorrect values.
+
+Local checks passed, but SQL Server and API execution still need your test. If the repair reports a parent/path mismatch, please send the error for review.
+
+Thanks,
+Ade

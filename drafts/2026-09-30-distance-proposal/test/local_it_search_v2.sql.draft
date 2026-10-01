@@ -143,22 +143,12 @@ BEGIN TRY
     EXEC dbo.usp_UPR_Property360 @UPRID=@U1,@Expand=N'parents',@AuthorizedUPRIDs=@Allowed,@ResponseJson=@Json OUTPUT,@EmitResult=0;
     IF (SELECT COUNT(*) FROM OPENJSON(@Json,'$.hierarchy.parents'))<>2
         THROW 51000,'parents expansion lost ancestors or included self.',1;
-    IF NOT EXISTS(SELECT 1 FROM OPENJSON(@Json,'$.hierarchy.parents')
-        WITH(uprId BIGINT,rootLevel INT) WHERE uprId=@R1 AND rootLevel=0)
-       OR NOT EXISTS(SELECT 1 FROM OPENJSON(@Json,'$.hierarchy.parents')
-        WITH(uprId BIGINT,rootLevel INT) WHERE uprId=@B1 AND rootLevel=1)
-        THROW 51000,'Pair-distance closure caused incorrect ancestor root levels.',1;
     EXEC dbo.usp_UPR_Property360 @UPRID=@R1,@Expand=N'children',@AuthorizedUPRIDs=@Allowed,@ResponseJson=@Json OUTPUT,@EmitResult=0;
     IF (SELECT COUNT(*) FROM OPENJSON(@Json,'$.hierarchy.children'))<>1
         THROW 51000,'children expansion included grandchildren.',1;
     EXEC dbo.usp_UPR_Property360 @UPRID=@R1,@Expand=N'descendants',@AuthorizedUPRIDs=@Allowed,@ResponseJson=@Json OUTPUT,@EmitResult=0;
     IF (SELECT COUNT(*) FROM OPENJSON(@Json,'$.hierarchy.children'))<>2
         THROW 51000,'descendants expansion lost subtree or included self.',1;
-    IF NOT EXISTS(SELECT 1 FROM OPENJSON(@Json,'$.hierarchy.children')
-        WITH(uprId BIGINT,rootLevel INT) WHERE uprId=@B1 AND rootLevel=1)
-       OR NOT EXISTS(SELECT 1 FROM OPENJSON(@Json,'$.hierarchy.children')
-        WITH(uprId BIGINT,rootLevel INT) WHERE uprId=@U1 AND rootLevel=2)
-        THROW 51000,'Pair-distance closure caused incorrect descendant root levels.',1;
     EXEC dbo.usp_UPR_Property360 @UPRID=@R1,@Expand=N'parents,children',@AuthorizedUPRIDs=@Allowed,@ResponseJson=@Json OUTPUT,@EmitResult=0;
     IF (SELECT COUNT(*) FROM OPENJSON(@Json,'$.hierarchy.children'))<>1 OR JSON_QUERY(@Json,'$.hierarchy.parents')<>N'[]'
         THROW 51000,'Combined expansion failed.',1;
@@ -194,6 +184,30 @@ BEGIN TRY
         IF ERROR_NUMBER()=50001 SET @Caught=1; ELSE THROW;
     END CATCH;
     IF @Caught=0 THROW 51000,'Oversized expansion was silently truncated.',1;
+    -- September 30: same address can legitimately identify several entities.
+    DECLARE @Physical INT=(SELECT AddressRoleID FROM dbo.REF_ADDRESSROLE WHERE AddressRoleCode='PHYSICAL'),
+        @Mailing INT=(SELECT AddressRoleID FROM dbo.REF_ADDRESSROLE WHERE AddressRoleCode='MAILING');
+    UPDATE dbo.UPR_ADDRESS SET AddressRoleID=@Mailing
+        WHERE UPRID IN (@R1,@B1,@U1,@R2) AND AddressID=@A1;
+    UPDATE dbo.UPR_ADDRESS SET AddressRoleID=@Physical WHERE UPRID=@U1 AND AddressID=@A1;
+    EXEC dbo.usp_UPR_Search @Address=N'123 MAIN ST',@ResultMode='JSON',@AuthorizedUPRIDs=@Allowed,
+        @PreferPhysicalAddress=1,@ResponseJson=@Json OUTPUT,@EmitResult=0;
+    IF (SELECT COUNT(*) FROM OPENJSON(@Json,'$.results'))<>4
+       OR (SELECT COUNT(DISTINCT entityType) FROM OPENJSON(@Json,'$.results') WITH(entityType NVARCHAR(50)))<>4
+       OR TRY_CONVERT(BIGINT,JSON_VALUE(@Json,'$.results[0].uprId'))<>@U1
+       OR JSON_VALUE(@Json,'$.results[0].address.role')<>'PHYSICAL'
+        THROW 51000,'Shared-address entities/role labels or physical preference failed.',1;
+    EXEC dbo.usp_UPR_Search @Address=N'123 MAIN ST',@EntityType=N'Building',@AddressRole=N'MAILING',
+        @PreferPhysicalAddress=1,@ResultMode='JSON',@AuthorizedUPRIDs=@Allowed,@ResponseJson=@Json OUTPUT,@EmitResult=0;
+    IF (SELECT COUNT(*) FROM OPENJSON(@Json,'$.results'))<>1
+       OR TRY_CONVERT(BIGINT,JSON_VALUE(@Json,'$.results[0].uprId'))<>@B1
+       OR JSON_VALUE(@Json,'$.results[0].address.role')<>'MAILING'
+        THROW 51000,'Physical preference overrode explicit entity/address-role filters.',1;
+    EXEC dbo.usp_UPR_Search @Address=N'123 MAIN ST',@AddressRole=N'PHYSICAL',@ResultMode='JSON',
+        @AuthorizedUPRIDs=@Allowed,@ResponseJson=@Json OUTPUT,@EmitResult=0;
+    IF (SELECT COUNT(*) FROM OPENJSON(@Json,'$.results'))<>1
+        THROW 51000,'Physical-only search included a mailing result.',1;
+
     PRINT 'PASS: UPR-SEARCH-002 matching, ambiguity, pagination, authorization and expansion assertions.';
     ROLLBACK TRANSACTION;
 END TRY

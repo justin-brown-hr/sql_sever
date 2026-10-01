@@ -5,8 +5,13 @@ SQL Server integration that loads **AddressMaster** and **SDAT** into the **hier
 **Model:** `docs/NewUPRTABLEUSED.docx` + `docs/Response.docx` (COMPLEX).  
 **Old flat model** archived under `legacy/` for reference only - do not run it.
 
-Latest client instruction: [retain the original UPR_CLOSURE API table](CLIENT_CLOSURE_API_2026-09-29.md).
-Run [the read-only descendant test](test/check_descendant_level0.sql) after the ancestor report.
+Latest correction: [stored closure pair distances](CLIENT_CLOSURE_DISTANCE_FIX_2026-10-01.md).
+The original table layout is retained; Level now counts parent links within each
+ancestor/descendant pair (self = 0). Send the October 1 two-file repair/check ZIP
+for testing existing data. The active loader must also be updated before reruns.
+
+Historical client instruction: [retain the original UPR_CLOSURE API table](CLIENT_CLOSURE_API_2026-09-29.md).
+The earlier read-only report was not a stored-data correction.
 
 Previous client follow-up: [descendant lookup including root level 0](CLIENT_CLOSURE_LEVEL_2026-09-28.md).
 Use [list_upr_ancestor_path.sql](scripts/list_upr_ancestor_path.sql) to display each

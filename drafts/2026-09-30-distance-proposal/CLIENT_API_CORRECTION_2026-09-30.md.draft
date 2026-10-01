@@ -1,0 +1,151 @@
+# September 30 correction: stored distance, unit-started tree and address search
+
+**This supersedes the September 28/29 report-only workaround.** The client's
+clarification requires distance between an ancestor and descendant. The previous
+loader stored the descendant's absolute root depth on every path. That calculation
+was unsuitable for parent traversal. The earlier report changed the presentation;
+it did not correct the stored values returned by a direct API query.
+
+## Correct Level meaning, unchanged table layout
+
+Keep `dbo.UPR_CLOSURE(AncestorUPRID, DescendantUPRID, Level)` and the existing keys.
+Level becomes the count of parent edges between that row's two UPR IDs:
+
+| Pair | Correct stored Level |
+|---|---:|
+| Unit -> same Unit | 0 |
+| Its immediate parent -> Unit | 1 |
+| Root -> Unit two edges below it | 2 |
+
+For descendant 207075 at depth 2, ascending Level means self 0, its actual parent
+1, root 24 at 2. No intermediate parent ID is inferred from the screenshots.
+Root-to-tree rows still show root 0, Buildings 1 and Units 2 where that is the
+actual hierarchy. Absolute root depth belongs in `rootLevel` / report `LevelNo`.
+Do not use the self-row's Level as a node's root depth: every self-row is now 0.
+
+The screenshots of `/api/upr/24/ancestors` keep ancestorUPRID=24 and vary the
+descendant. That response travels down the tree. The API developer should verify
+endpoint direction/naming; do not rename routes without checking their contract.
+
+## Exact restored-database test sequence
+
+1. Restore a test copy and pause its loader/writers for the correction. Capture
+   the current descendant-207075 rows, root-24 rows and API responses.
+2. Select that test database in SSMS and run
+   **`scripts/repair_upr_closure_distance.sql`**. This is a **data update**:
+   it changes incorrect Level values only, in a transaction. It does not rename
+   columns, add/delete relationship pairs, reload incoming data or install auditing.
+   Existing audit triggers record updates. It first derives every expected path
+   from ParentUPRID; missing/extra closure paths or a cycle stop and roll back.
+   Repeating a successful repair should report UpdatedRows=0.
+3. Run **`test/check_descendant_level0.sql`**, @UPRID=207075. Expected: PASS,
+   the ancestor root-depth report, then the raw stored-distance result ordered
+   self 0, parent 1, next ancestor 2. This test is read-only. Compare the API
+   parent response again; a direct, uncached closure query should now see corrected
+   values. Different output needs the actual endpoint query/cache investigation.
+4. Test root traversal as well:
+
+   ```sql
+   SELECT [Level],AncestorUPRID,DescendantUPRID FROM dbo.UPR_CLOSURE
+   WHERE AncestorUPRID=24 ORDER BY [Level],DescendantUPRID;
+   SELECT [Level],AncestorUPRID,DescendantUPRID FROM dbo.UPR_CLOSURE
+   WHERE DescendantUPRID=207075 ORDER BY [Level],AncestorUPRID;
+   ```
+
+5. For full-tree/address API integration, install `scripts/query_upr_hierarchy.sql`
+   in the selected test DB and `scripts/search_upr_master.sql` after editing its
+   USE statement to the same DB. These install query procedures/functions; they
+   do not change UPR_CLOSURE. Search needs the UPR model and the existing
+   fn_UPR_NormalizeSDATAccount / fn_UPR_NormalizeStreetNumber helpers. It does not
+   require an AuditLog migration. If those helpers are missing, report that before
+   running unrelated loaders or migrations.
+6. The API developer must connect the tree/search calls and confirm their returned
+   fields. No API application code is present here. The screenshot alone cannot
+   identify the SQL used behind a route.
+
+**Future loads:** `scripts/load_upr_master.sql` now writes pair distances, so it
+will preserve the repair. Do not resume a previous loader that writes root depth
+onto all paths; it would undo the correction. The included loader is the current
+complete project version and requires its current AuditLog support. Do not run
+it blindly against an older audit deployment. Compare the client's deployed
+loader/schema and deploy the matching full update, or apply the targeted Step 12
+change to their existing loader: seed self paths with 0 and extend a path with
+`c.Level + 1`. This correction's repair/test does not require that full migration.
+
+## API hierarchy procedure — new and explicitly disclosed
+
+`scripts/query_upr_hierarchy.sql` installs `dbo.usp_UPR_Hierarchy`. It reads
+ParentUPRID and entity names, independently of the closure's stored levels.
+Parameters: UPRID, Direction, AuthorizedUPRIDs, MaxNodes (default 10000),
+ResponseJson OUTPUT, EmitResult. It returns a JSON array.
+
+| Direction | Pair returned / level | Scope |
+|---|---|---|
+| PARENTS | Each ancestor -> selected UPR; number of upward steps | Includes selected self 0, parent 1, etc. |
+| DESCENDANTS | Selected UPR -> each descendant; number of downward steps | Includes selected self 0 and its subtree |
+| TREE | Resolved root -> each node; root-to-node distance | Same full authorized tree from root, Building or Unit input |
+
+Rows include level, ancestorUPRID, descendantUPRID, uprId, parentUprId, rootLevel,
+entityType and isSelected. TREE includes sibling branches, unlike the existing
+selected-context Property360 `360` mode. Root depth and pair distance have explicit
+separate fields. The API can map the first three fields into its current DTO.
+Do not double-encode the returned JSON string as a quoted HTTP string.
+
+The trusted API must derive AuthorizedUPRIDs, never accept it as user-granted
+permission. All returned nodes are filtered; unauthorized parent IDs are masked.
+TREE additionally requires access to its root. A filtered tree may omit nodes the
+caller cannot access. Limits cause an error instead of silent truncation; parent
+cycles/missing parents are rejected. No permission grants are installed.
+
+Example for an authorized administrative test using the IDs visible in the
+client's screenshot; substitute the actual caller's permitted IDs for API use:
+
+```sql
+DECLARE @Allowed NVARCHAR(MAX)=N'[24,88787,88788,207074,207075]';
+EXEC dbo.usp_UPR_Hierarchy @UPRID=207075,@Direction='PARENTS',@AuthorizedUPRIDs=@Allowed;
+EXEC dbo.usp_UPR_Hierarchy @UPRID=207075,@Direction='TREE',@AuthorizedUPRIDs=@Allowed;
+EXEC dbo.usp_UPR_Hierarchy @UPRID=24,@Direction='TREE',@AuthorizedUPRIDs=@Allowed;
+```
+
+The two TREE results should contain the same permitted nodes/edges; isSelected
+will identify different requested nodes. The actual endpoint bindings are pending.
+
+## Address search changes
+
+Shared addresses remain separate UPR results: Complex, Property, Building, Condo
+and Unit records are not merged because their address text matches. Existing
+entityType/entityTypeDescription remain in JSON/GRID and EntityType in REPORT.
+The API/UI needs to display that entity label next to each address result.
+
+New JSON `address.role` (also inside GRID's address JSON) identifies the selected
+address role. Existing `@EntityType` and `@AddressRole` filters remain strict.
+Appended `@PreferPhysicalAddress BIT=0` is an opt-in preference for equally ranked
+matches in JSON/GRID, including which matching address represents each UPR.
+Matching quality remains the first priority; explicit role filters take precedence.
+Use `@AddressRole=N'PHYSICAL'` for physical-only results, or prefer-physical=1 to
+keep other roles available. The API can enable preference for its code-user flow.
+Free-text address input uses existing `@Address`; no new universal search box or
+HTTP endpoint is claimed. REPORT column order remains unchanged.
+
+## Local results and remaining verification
+
+- Hierarchy static checks, loader/schema contract, runner modes, Python syntax,
+  shell syntax and whitespace checks pass.
+- The actual loader path-building SELECTs were executed against SQLite fixtures:
+  119 nodes / 503 paths matched an independent parent-chain distance calculation.
+- The root-depth report was checked for both column spellings under old/new level
+  values. The hierarchy procedure's actual result SELECT was checked for parent,
+  descendant, full-tree output and authorized-node masking using SQLite fixtures.
+- SQL Server regression assertions cover old-depth migration, repeated repair,
+  failure without partial changes when paths are missing, future-load distances,
+  reparenting, tree-from-unit equivalence, permissions, caps, cycle rejection,
+  shared-address types, role labels and physical preference/filter precedence.
+- **SQL Server batches/procedures have not run here.** No sqlcmd/Docker/SQL Server
+  runtime is available. SQLite checks do not validate SQL Server compilation,
+  transactions, audit-trigger behavior or production performance.
+- No client database or API has been modified. Actual HTTP integration remains
+  pending the endpoint SQL/code and restored-database/API test results.
+
+The previous small read-only ZIP is not this correction. Send the new dated
+correction package and follow the ordered steps above. Repository integration
+fixtures are for disposable databases and are not included as client run steps.

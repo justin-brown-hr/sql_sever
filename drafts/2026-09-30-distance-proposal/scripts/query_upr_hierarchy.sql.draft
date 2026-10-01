@@ -1,0 +1,89 @@
+/* September 30 API hierarchy query contract; SQL Server 2016 SP1+, compat 130+.
+   Select the intended database before installation. Creates one query procedure.
+   No UPR_CLOSURE schema/data changes. ParentUPRID is the source of hierarchy.
+   The trusted API must derive AuthorizedUPRIDs; never accept it as user-granted access.
+   Existing HTTP routes must be wired to this procedure by the API developer.
+*/
+SET QUOTED_IDENTIFIER ON;
+SET ANSI_NULLS ON;
+GO
+CREATE OR ALTER PROCEDURE dbo.usp_UPR_Hierarchy
+    @UPRID BIGINT,
+    @Direction VARCHAR(12) = 'PARENTS', -- PARENTS | DESCENDANTS | TREE
+    @AuthorizedUPRIDs NVARCHAR(MAX),
+    @MaxNodes INT = 10000,
+    @ResponseJson NVARCHAR(MAX) = NULL OUTPUT,
+    @EmitResult BIT = 1
+AS
+BEGIN
+    SET NOCOUNT ON;
+    SET @ResponseJson=NULL;
+    SET @Direction=UPPER(LTRIM(RTRIM(@Direction)));
+    IF @Direction IS NULL OR @Direction NOT IN ('PARENTS','DESCENDANTS','TREE')
+        THROW 50001,'Direction must be PARENTS, DESCENDANTS or TREE.',1;
+    IF @UPRID IS NULL OR @MaxNodes IS NULL OR @MaxNodes NOT BETWEEN 1 AND 10000
+        THROW 50001,'UPRID is required and MaxNodes must be 1..10000.',1;
+    IF @AuthorizedUPRIDs IS NULL OR ISJSON(@AuthorizedUPRIDs)<>1
+       OR LEFT(LTRIM(@AuthorizedUPRIDs),1)<>N'['
+        THROW 50001,'Hierarchy requires a trusted API authorized UPR allowlist.',1;
+    IF EXISTS(SELECT 1 FROM OPENJSON(@AuthorizedUPRIDs) WHERE [type]<>2 OR TRY_CONVERT(BIGINT,value) IS NULL)
+        THROW 50001,'AuthorizedUPRIDs contains an invalid integer UPRID.',1;
+    CREATE TABLE #HierarchyAllowed(UPRID BIGINT NOT NULL PRIMARY KEY);
+    INSERT #HierarchyAllowed SELECT DISTINCT CONVERT(BIGINT,value) FROM OPENJSON(@AuthorizedUPRIDs);
+    IF NOT EXISTS(SELECT 1 FROM dbo.UPR u JOIN #HierarchyAllowed a ON a.UPRID=u.UPRID WHERE u.UPRID=@UPRID)
+        THROW 50004,'Property not found or not accessible.',1;
+
+    -- Walk real parent edges: self 0, immediate parent 1, grandparent 2.
+    CREATE TABLE #UpPath(UPRID BIGINT NOT NULL PRIMARY KEY,Steps INT NOT NULL);
+    DECLARE @Current BIGINT=@UPRID,@Parent BIGINT,@Steps INT=0,@Root BIGINT,@SelectedDepth INT;
+    WHILE @Current IS NOT NULL
+    BEGIN
+        IF EXISTS(SELECT 1 FROM #UpPath WHERE UPRID=@Current)
+            THROW 50002,'Hierarchy contains a cycle.',1;
+        IF NOT EXISTS(SELECT 1 FROM dbo.UPR WHERE UPRID=@Current)
+            THROW 50002,'Hierarchy contains a missing parent.',1;
+        IF @Steps>=@MaxNodes THROW 50001,'Hierarchy exceeds MaxNodes.',1;
+        INSERT #UpPath VALUES(@Current,@Steps);
+        SELECT @Parent=ParentUPRID FROM dbo.UPR WHERE UPRID=@Current;
+        SELECT @Root=@Current,@Current=@Parent,@Steps=@Steps+1;
+    END;
+    SET @SelectedDepth=@Steps-1;
+    IF @Direction='TREE' AND NOT EXISTS(SELECT 1 FROM #HierarchyAllowed WHERE UPRID=@Root)
+        THROW 50004,'Tree root not accessible. Request permitted parent/descendant context instead.',1;
+
+    CREATE TABLE #HierarchyNodes(UPRID BIGINT NOT NULL PRIMARY KEY,RootLevel INT NOT NULL,PairLevel INT NOT NULL);
+    IF @Direction='PARENTS'
+        INSERT #HierarchyNodes SELECT UPRID,@SelectedDepth-Steps,Steps FROM #UpPath;
+    ELSE
+    BEGIN
+        DECLARE @Start BIGINT=CASE WHEN @Direction='TREE' THEN @Root ELSE @UPRID END;
+        INSERT #HierarchyNodes VALUES(@Start,CASE WHEN @Direction='TREE' THEN 0 ELSE @SelectedDepth END,0);
+        DECLARE @Added INT=1;
+        WHILE @Added>0
+        BEGIN
+            DECLARE @Remaining INT=@MaxNodes+1-(SELECT COUNT(*) FROM #HierarchyNodes);
+            INSERT #HierarchyNodes
+            SELECT TOP (@Remaining) child.UPRID,parent.RootLevel+1,parent.PairLevel+1
+            FROM dbo.UPR child JOIN #HierarchyNodes parent ON parent.UPRID=child.ParentUPRID
+            WHERE NOT EXISTS(SELECT 1 FROM #HierarchyNodes seen WHERE seen.UPRID=child.UPRID);
+            SET @Added=@@ROWCOUNT;
+            IF (SELECT COUNT(*) FROM #HierarchyNodes)>@MaxNodes
+                THROW 50001,'Hierarchy exceeds MaxNodes; no partial tree was returned.',1;
+        END;
+    END;
+
+    -- level is ALWAYS distance between the returned ancestor/descendant pair.
+    -- In TREE mode that pair starts at the resolved root, even for a Unit input.
+    SET @ResponseJson=(SELECT n.PairLevel AS [level],
+        CASE WHEN @Direction='PARENTS' THEN n.UPRID WHEN @Direction='TREE' THEN @Root ELSE @UPRID END AS ancestorUPRID,
+        CASE WHEN @Direction='PARENTS' THEN @UPRID ELSE n.UPRID END AS descendantUPRID,
+        n.UPRID AS uprId,
+        CASE WHEN EXISTS(SELECT 1 FROM #HierarchyAllowed p WHERE p.UPRID=u.ParentUPRID) THEN u.ParentUPRID END AS parentUprId,
+        n.RootLevel AS rootLevel,UPPER(et.Description) AS entityType,
+        CONVERT(BIT,CASE WHEN n.UPRID=@UPRID THEN 1 ELSE 0 END) AS isSelected
+        FROM #HierarchyNodes n JOIN #HierarchyAllowed allowed ON allowed.UPRID=n.UPRID
+        JOIN dbo.UPR u ON u.UPRID=n.UPRID JOIN dbo.REF_ENTITYTYPE et ON et.EntityTypeID=u.EntityTypeID
+        ORDER BY n.PairLevel,n.UPRID FOR JSON PATH,INCLUDE_NULL_VALUES);
+    IF @EmitResult=1 SELECT @ResponseJson AS ResponseJson;
+END;
+GO

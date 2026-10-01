@@ -1,3 +1,51 @@
+# Latest continuation — confirmed closure data correction, October 1, 2026
+
+Reviewed subsequent client's Bigger Picture message against current source and
+verified the two-file ZIP still matches. No further SQL change needed for its
+distance rule. Guide/client message now clarify: retain Level column for API
+compatibility; upward/downward generation are equivalent; full tree from unit
+still needs root resolution plus root-subtree retrieval in the endpoint. Existing
+Property360 is selected-node scope, not a full-root tree. Do not claim closure
+repair alone completes that separate behavior or proves every API mapping correct.
+
+Client explicitly says raw closure 2/2/2 is wrong; expects 24→207075=2,
+88788→207075=1,207075→207075=0. This authorizes correcting stored Level semantics
+while retaining table layout. Earlier API-only speculation and display-only fix
+were incomplete. Source loader now uses self 0 and edge +1. Repair updates only
+Level after validating all pairs against ParentUPRID, inside a transaction; no
+schema/parent/identifier changes. Independent read-only verifier walks upward.
+
+Local report/search root-depth consumers were adapted and tests updated. New ZIP
+UPR_Closure_Distance_Fix_2026-10-01.zip is limited to repair/check SQL; active loader
+needs the small documented Step 12 change before next load. Full historical ZIPs
+were not refreshed. See CLIENT_CLOSURE_DISTANCE_FIX_2026-10-01.md and unsent
+CLIENT_MESSAGE_2026-10-01.txt. September 30 message/review are marked superseded.
+
+Static/schema/runner checks and SQLite relational checks passed (229 nodes, 6068
+paths). No SQL Server runtime or API source; integration tests remain pending.
+No deployed changes or actual client results. Archived .draft proposals remain
+historical and excluded from delivery. No new API endpoints or address-search
+features were imported from those drafts.
+
+---
+
+# Historical continuation — research review, September 30, 2026
+
+Reviewed Research_What I would change in the UPR specification.docx. Absolute
+Level versus relative HierarchyDistance is coherent. Proposed closure Depth has
+different semantics from current descendant-root-depth Level. Do not treat the
+document as authorization to change that contract. Screenshot /api/upr/24/ancestors
+returns descendants, suggesting direction/naming mismatch. Deployed data and API
+have not been verified; no API source or SQL Server runtime is available here.
+
+See RESEARCH_REVIEW_2026-09-30.md and CLIENT_MESSAGE_2026-09-30.txt (unsent).
+Requested endpoint queries/procedures and response mapping. Earlier experimental
+changes from this turn are archived under drafts/2026-09-30-distance-proposal/
+with .draft suffixes. Executable scripts retain the September 29 contract.
+No database/API deployment or new ZIP was made for this review.
+
+---
+
 # Latest continuation — API closure compatibility, September 29, 2026
 
 Client told Ade to keep the old UPR_CLOSURE table because their API uses it.

@@ -1,0 +1,92 @@
+/* DISPOSABLE database only. Requires seeded UPR schema and query_upr_hierarchy.sql.
+   Fixture writes and audit events are rolled back. No closure rebuild is used. */
+USE UPRXDB_TEST;
+GO
+SET NOCOUNT ON;
+SET QUOTED_IDENTIFIER ON;
+SET ANSI_NULLS ON;
+SET ANSI_PADDING ON;
+SET ANSI_WARNINGS ON;
+SET CONCAT_NULL_YIELDS_NULL ON;
+SET ARITHABORT ON;
+SET NUMERIC_ROUNDABORT OFF;
+SET XACT_ABORT OFF;
+GO
+BEGIN TRANSACTION;
+BEGIN TRY
+    DECLARE @Root BIGINT,@B1 BIGINT,@B2 BIGINT,@U1 BIGINT,@U2 BIGINT,
+        @Property INT=(SELECT EntityTypeID FROM dbo.REF_ENTITYTYPE WHERE Description='Property'),
+        @Building INT=(SELECT EntityTypeID FROM dbo.REF_ENTITYTYPE WHERE Description='Building'),
+        @Unit INT=(SELECT EntityTypeID FROM dbo.REF_ENTITYTYPE WHERE Description='Unit'),
+        @Allowed NVARCHAR(MAX),@UnitOnly NVARCHAR(MAX),@Json NVARCHAR(MAX),@RootJson NVARCHAR(MAX),@Caught BIT;
+    INSERT dbo.UPR(EntityTypeID) VALUES(@Property); SET @Root=SCOPE_IDENTITY();
+    INSERT dbo.UPR(EntityTypeID,ParentUPRID) VALUES(@Building,@Root); SET @B1=SCOPE_IDENTITY();
+    INSERT dbo.UPR(EntityTypeID,ParentUPRID) VALUES(@Building,@Root); SET @B2=SCOPE_IDENTITY();
+    INSERT dbo.UPR(EntityTypeID,ParentUPRID) VALUES(@Unit,@B1); SET @U1=SCOPE_IDENTITY();
+    INSERT dbo.UPR(EntityTypeID,ParentUPRID) VALUES(@Unit,@B2); SET @U2=SCOPE_IDENTITY();
+    SET @Allowed=CONCAT(N'[',@Root,N',',@B1,N',',@B2,N',',@U1,N',',@U2,N']');
+    SET @UnitOnly=CONCAT(N'[',@U1,N']');
+    SELECT * INTO #ClosureBefore FROM dbo.UPR_CLOSURE;
+    EXEC dbo.usp_UPR_Hierarchy @UPRID=@U1,@Direction='PARENTS',@AuthorizedUPRIDs=@Allowed,@ResponseJson=@Json OUTPUT,@EmitResult=0;
+    IF (SELECT COUNT(*) FROM OPENJSON(@Json))<>3
+       OR JSON_VALUE(@Json,'$[0].level')<>'0' OR TRY_CONVERT(BIGINT,JSON_VALUE(@Json,'$[0].ancestorUPRID'))<>@U1
+       OR JSON_VALUE(@Json,'$[1].level')<>'1' OR TRY_CONVERT(BIGINT,JSON_VALUE(@Json,'$[1].ancestorUPRID'))<>@B1
+       OR JSON_VALUE(@Json,'$[2].level')<>'2' OR TRY_CONVERT(BIGINT,JSON_VALUE(@Json,'$[2].ancestorUPRID'))<>@Root
+       OR JSON_VALUE(@Json,'$[0].rootLevel')<>'2' OR JSON_VALUE(@Json,'$[2].rootLevel')<>'0'
+        THROW 51900,'Parent traversal did not distinguish pair distance from root depth.',1;
+    IF EXISTS(SELECT 1 FROM OPENJSON(@Json) WITH(descendantUPRID BIGINT) WHERE descendantUPRID<>@U1)
+        THROW 51900,'Parent traversal reversed the selected descendant.',1;
+    EXEC dbo.usp_UPR_Hierarchy @UPRID=@B1,@Direction='DESCENDANTS',@AuthorizedUPRIDs=@Allowed,@ResponseJson=@Json OUTPUT,@EmitResult=0;
+    IF (SELECT COUNT(*) FROM OPENJSON(@Json))<>2 OR JSON_VALUE(@Json,'$[0].level')<>'0'
+       OR JSON_VALUE(@Json,'$[1].level')<>'1' OR TRY_CONVERT(BIGINT,JSON_VALUE(@Json,'$[1].descendantUPRID'))<>@U1
+        THROW 51900,'Descendant traversal did not calculate distance from the selected Building.',1;
+    EXEC dbo.usp_UPR_Hierarchy @UPRID=@Root,@Direction='TREE',@AuthorizedUPRIDs=@Allowed,@ResponseJson=@RootJson OUTPUT,@EmitResult=0;
+    EXEC dbo.usp_UPR_Hierarchy @UPRID=@U1,@Direction='TREE',@AuthorizedUPRIDs=@Allowed,@ResponseJson=@Json OUTPUT,@EmitResult=0;
+    IF (SELECT COUNT(*) FROM OPENJSON(@Json))<>5 OR EXISTS (
+        SELECT uprId,parentUprId,rootLevel,[level] FROM OPENJSON(@RootJson) WITH(uprId BIGINT,parentUprId BIGINT,rootLevel INT,[level] INT)
+        EXCEPT SELECT uprId,parentUprId,rootLevel,[level] FROM OPENJSON(@Json) WITH(uprId BIGINT,parentUprId BIGINT,rootLevel INT,[level] INT)
+    ) OR NOT EXISTS(SELECT 1 FROM OPENJSON(@Json) WITH(uprId BIGINT,isSelected BIT) WHERE uprId=@U1 AND isSelected=1)
+        THROW 51900,'TREE from a Unit differs from root TREE or loses selected identity.',1;
+    EXEC dbo.usp_UPR_Hierarchy @UPRID=@U1,@Direction='PARENTS',@AuthorizedUPRIDs=@UnitOnly,@ResponseJson=@Json OUTPUT,@EmitResult=0;
+    IF (SELECT COUNT(*) FROM OPENJSON(@Json))<>1 OR JSON_VALUE(@Json,'$[0].parentUprId') IS NOT NULL
+        THROW 51900,'Hierarchy exposed an unauthorized ancestor.',1;
+    SET @Caught=0;
+    BEGIN TRY
+        EXEC dbo.usp_UPR_Hierarchy @UPRID=@U1,@Direction='TREE',@AuthorizedUPRIDs=@UnitOnly,@EmitResult=0;
+    END TRY BEGIN CATCH
+        IF ERROR_NUMBER()=50004 SET @Caught=1; ELSE THROW;
+    END CATCH;
+    IF @Caught=0 THROW 51900,'TREE accepted an unauthorized root.',1;
+    SET @Caught=0;
+    BEGIN TRY
+        EXEC dbo.usp_UPR_Hierarchy @UPRID=@U1,@Direction='TREE',@AuthorizedUPRIDs=@Allowed,@MaxNodes=4,@EmitResult=0;
+    END TRY BEGIN CATCH
+        IF ERROR_NUMBER()=50001 SET @Caught=1; ELSE THROW;
+    END CATCH;
+    IF @Caught=0 THROW 51900,'TREE silently truncated an oversized tree.',1;
+    SET @Caught=0;
+    BEGIN TRY
+        EXEC dbo.usp_UPR_Hierarchy @UPRID=@U1,@AuthorizedUPRIDs=N'[]',@EmitResult=0;
+    END TRY BEGIN CATCH
+        IF ERROR_NUMBER()=50004 SET @Caught=1; ELSE THROW;
+    END CATCH;
+    IF @Caught=0 THROW 51900,'Unauthorized selection succeeded.',1;
+    UPDATE dbo.UPR SET ParentUPRID=@U1 WHERE UPRID=@Root;
+    SET @Caught=0;
+    BEGIN TRY
+        EXEC dbo.usp_UPR_Hierarchy @UPRID=@U1,@AuthorizedUPRIDs=@Allowed,@EmitResult=0;
+    END TRY BEGIN CATCH
+        IF ERROR_NUMBER()=50002 SET @Caught=1; ELSE THROW;
+    END CATCH;
+    IF @Caught=0 THROW 51900,'Cyclic parent chain was accepted.',1;
+    IF EXISTS(SELECT * FROM dbo.UPR_CLOSURE EXCEPT SELECT * FROM #ClosureBefore)
+       OR EXISTS(SELECT * FROM #ClosureBefore EXCEPT SELECT * FROM dbo.UPR_CLOSURE)
+        THROW 51900,'Query correction changed UPR_CLOSURE.',1;
+    PRINT 'PASS: parent distances, full tree from Unit, directions, permissions, caps and unchanged closure.';
+    ROLLBACK TRANSACTION;
+END TRY
+BEGIN CATCH
+    IF @@TRANCOUNT>0 ROLLBACK TRANSACTION;
+    THROW;
+END CATCH;
+GO
