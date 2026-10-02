@@ -132,6 +132,6 @@ These authorization parameters must be derived by trusted API code, not accepted
 as user-granted access. SQL helpers do not implement the Housing Portal itself.
 
 The existing delivery ZIP contains all three updates and their guides. Its filename
-remains `UPR_Corrections_2026-09-23_Review_Update.zip`; the refreshed manifest
+remains `archive/deliveries/UPR_Corrections_2026-09-23_Review_Update.zip`; the refreshed manifest
 identifies this September 24 revision. All three updates remain candidates for a
 restored test database, pending actual SQL Server integration execution.

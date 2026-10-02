@@ -33,6 +33,14 @@
   Prerequisites: create the schema once, then run scripts/install_upr_audit.sql.
   Re-runnable: unchanged incoming data inserts no business rows (batch audit remains).
 
+  October 2 closure correction is included in this MAIN script:
+    - Level counts parent links within each ancestor/descendant pair (self = 0).
+    - Ensures composite uniqueness and indexes for both traversal directions.
+    - Reuses equivalent existing indexes, including the composite primary key.
+    - Existing duplicate pairs stop the load with a diagnostic; no silent deletion.
+  Run test/check_upr_closure_distance.sql after the load. No separate Level repair
+  or manual edits to Step 12 are needed with this version.
+
   EDIT USE database name to match your environment.
 ================================================================================
 */
@@ -288,7 +296,7 @@ BEGIN
 END;
 
 /* Existing databases: add without a guessed default. Step 12 backfills the
-   actual report levels and enforces NOT NULL inside the load transaction. */
+   actual pair distances and enforces NOT NULL inside the load transaction. */
 IF OBJECT_ID(N'dbo.UPR_CLOSURE', N'U') IS NOT NULL
    AND COL_LENGTH(N'dbo.UPR_CLOSURE', N'Level') IS NULL
 BEGIN
@@ -428,6 +436,20 @@ IF EXISTS (
     THROW 50004, 'Run scripts/install_upr_audit.sql before loading data.', 1;
 
 BEGIN TRANSACTION;
+/* Reject existing duplicate pairs before loading business rows. Hold these locks
+   through Step 12, which ensures pair uniqueness and both index directions after
+   any legacy Level backfill. Individual ancestor/descendant IDs are not unique.
+   A later load failure rolls back the transaction, including newly added indexes. */
+DECLARE @ClosureObjectID INT=OBJECT_ID(N'dbo.UPR_CLOSURE');
+IF EXISTS(SELECT 1 FROM dbo.UPR_CLOSURE WITH(UPDLOCK,HOLDLOCK)
+          GROUP BY AncestorUPRID,DescendantUPRID HAVING COUNT_BIG(*)>1)
+BEGIN
+    SELECT TOP(20) AncestorUPRID,DescendantUPRID,COUNT_BIG(*) AS DuplicateRows
+    FROM dbo.UPR_CLOSURE GROUP BY AncestorUPRID,DescendantUPRID
+    HAVING COUNT_BIG(*)>1 ORDER BY AncestorUPRID,DescendantUPRID;
+    THROW 50006,'UPR_CLOSURE contains duplicate ancestor/descendant pairs. Load stopped; review the reported duplicates before rerunning.',1;
+END;
+
 PRINT N'Step 0 complete - required tables/functions present.';
 
 /* ============================================================================
@@ -2136,6 +2158,47 @@ IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.UPR_CLOSU
     ALTER TABLE dbo.UPR_CLOSURE ALTER COLUMN [Level] INT NOT NULL;
 IF OBJECT_ID(N'dbo.CK_UPR_CLOSURE_Level', N'C') IS NULL
     ALTER TABLE dbo.UPR_CLOSURE WITH CHECK ADD CONSTRAINT CK_UPR_CLOSURE_Level CHECK ([Level] >= 0);
+
+/* Ensure indexes after any legacy Level backfill/nullability upgrade. */
+/* CLOSURE_FORWARD_INDEX_CHECK */
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes i
+    JOIN sys.index_columns a ON a.object_id=i.object_id AND a.index_id=i.index_id AND a.key_ordinal=1
+    JOIN sys.columns ac ON ac.object_id=a.object_id AND ac.column_id=a.column_id
+    JOIN sys.index_columns d ON d.object_id=i.object_id AND d.index_id=i.index_id AND d.key_ordinal=2
+    JOIN sys.columns dc ON dc.object_id=d.object_id AND dc.column_id=d.column_id
+    WHERE i.object_id=@ClosureObjectID AND i.[type] IN (1,2)
+      AND i.is_unique=1 AND i.ignore_dup_key=0 AND i.is_disabled=0
+      AND i.has_filter=0 AND i.is_hypothetical=0
+      AND ac.name=N'AncestorUPRID' AND dc.name=N'DescendantUPRID'
+      AND (SELECT COUNT(*) FROM sys.index_columns k
+           WHERE k.object_id=i.object_id AND k.index_id=i.index_id AND k.key_ordinal>0)=2
+)
+BEGIN
+    IF EXISTS(SELECT 1 FROM sys.indexes WHERE object_id=@ClosureObjectID AND name=N'UX_UPR_CLOSURE_AncestorDescendant')
+        THROW 50007,'UX_UPR_CLOSURE_AncestorDescendant exists with an incompatible definition. Review it before rerunning.',1;
+    CREATE UNIQUE NONCLUSTERED INDEX UX_UPR_CLOSURE_AncestorDescendant
+        ON dbo.UPR_CLOSURE(AncestorUPRID,DescendantUPRID) INCLUDE([Level]);
+END;
+
+/* CLOSURE_REVERSE_INDEX_CHECK */
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes i
+    JOIN sys.index_columns d ON d.object_id=i.object_id AND d.index_id=i.index_id AND d.key_ordinal=1
+    JOIN sys.columns dc ON dc.object_id=d.object_id AND dc.column_id=d.column_id
+    JOIN sys.index_columns a ON a.object_id=i.object_id AND a.index_id=i.index_id AND a.key_ordinal=2
+    JOIN sys.columns ac ON ac.object_id=a.object_id AND ac.column_id=a.column_id
+    WHERE i.object_id=@ClosureObjectID AND i.[type] IN (1,2)
+      AND i.is_disabled=0 AND i.has_filter=0 AND i.is_hypothetical=0
+      AND dc.name=N'DescendantUPRID' AND ac.name=N'AncestorUPRID'
+)
+BEGIN
+    IF EXISTS(SELECT 1 FROM sys.indexes WHERE object_id=@ClosureObjectID AND name=N'IX_UPR_CLOSURE_Descendant')
+        THROW 50007,'IX_UPR_CLOSURE_Descendant exists with an incompatible definition. Review it before rerunning.',1;
+    CREATE NONCLUSTERED INDEX IX_UPR_CLOSURE_Descendant
+        ON dbo.UPR_CLOSURE(DescendantUPRID,AncestorUPRID) INCLUDE([Level]);
+END;
+PRINT N'Closure indexes verified: unique ancestor/descendant pair and descendant-first traversal.';
 
 /* Link the same source address records to their parent and Units as well.
    This creates associations, not extra addresses or guessed address values. */

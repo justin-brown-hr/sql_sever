@@ -109,6 +109,50 @@ try:
     verify()
     assert_quiet_rerun()
     print("PASS: new schema stores exact ancestor paths and pair distances; unchanged rerun is quiet")
+    # Composite PK already supplies the ancestor-first unique pair index.
+    sql("""
+IF EXISTS(SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID(N'dbo.UPR_CLOSURE')
+          AND name=N'UX_UPR_CLOSURE_AncestorDescendant')
+    THROW 51009,'Loader added a redundant unique index beside the primary key.',1;
+""")
+    index_rows_before = verify()
+    sql("""
+ALTER TABLE dbo.UPR_CLOSURE DROP CONSTRAINT PK_UPR_CLOSURE;
+DROP INDEX IX_UPR_CLOSURE_Descendant ON dbo.UPR_CLOSURE;
+""")
+    load()
+    assert verify() == index_rows_before
+    sql("""
+IF NOT EXISTS(SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID(N'dbo.UPR_CLOSURE')
+              AND name=N'UX_UPR_CLOSURE_AncestorDescendant' AND is_unique=1)
+ OR NOT EXISTS(SELECT 1 FROM sys.indexes WHERE object_id=OBJECT_ID(N'dbo.UPR_CLOSURE')
+               AND name=N'IX_UPR_CLOSURE_Descendant')
+    THROW 51009,'Main load did not create missing pair/reverse indexes.',1;
+""")
+    index_shape = sql("SELECT index_id,name,is_unique FROM sys.indexes WHERE object_id=OBJECT_ID(N'dbo.UPR_CLOSURE') ORDER BY index_id;")
+    assert_quiet_rerun()
+    assert sql("SELECT index_id,name,is_unique FROM sys.indexes WHERE object_id=OBJECT_ID(N'dbo.UPR_CLOSURE') ORDER BY index_id;") == index_shape
+    dupe = next(iter(index_rows_before))
+    dupe_insert = f"INSERT dbo.UPR_CLOSURE(AncestorUPRID,DescendantUPRID,[Level]) VALUES({dupe[0]},{dupe[1]},{dupe[2]});"
+    error = sql(dupe_insert, expect_error=True)
+    assert 'duplicate' in error.lower()
+    # Legacy heap without pair uniqueness must fail before source mutations.
+    sql("DROP INDEX UX_UPR_CLOSURE_AncestorDescendant ON dbo.UPR_CLOSURE;")
+    sql(dupe_insert)
+    before_duplicate_load = sql("SELECT AncestorUPRID,DescendantUPRID,[Level] FROM dbo.UPR_CLOSURE ORDER BY AncestorUPRID,DescendantUPRID,[Level];")
+    parents_before_duplicate_load = sql("SELECT UPRID,ParentUPRID FROM dbo.UPR ORDER BY UPRID;")
+    last_duplicate_event = audit_id()
+    error = sql((ROOT / "scripts/load_upr_master.sql").read_text().replace(
+        "USE UPRXDB_TEST;", f"USE [{DATABASE}];"), expect_error=True)
+    assert 'duplicate ancestor/descendant pairs' in error
+    assert sql("SELECT AncestorUPRID,DescendantUPRID,[Level] FROM dbo.UPR_CLOSURE ORDER BY AncestorUPRID,DescendantUPRID,[Level];") == before_duplicate_load
+    assert sql("SELECT UPRID,ParentUPRID FROM dbo.UPR ORDER BY UPRID;") == parents_before_duplicate_load
+    assert audit_id() == last_duplicate_event
+    # Fixture cleanup only: remove the single extra copy and restore the PK.
+    sql(f"DELETE TOP(1) FROM dbo.UPR_CLOSURE WHERE AncestorUPRID={dupe[0]} AND DescendantUPRID={dupe[1]};")
+    sql("ALTER TABLE dbo.UPR_CLOSURE ADD CONSTRAINT PK_UPR_CLOSURE PRIMARY KEY CLUSTERED(AncestorUPRID,DescendantUPRID);")
+    assert verify() == index_rows_before
+    print('PASS: PK reuse, missing index upgrade, repeat load and duplicate rejection')
     expected_distance = verify()
     repair_shape = sql("SELECT OBJECT_ID(N'dbo.UPR_CLOSURE'),column_id,name FROM sys.columns WHERE object_id=OBJECT_ID(N'dbo.UPR_CLOSURE') ORDER BY column_id;")
     repair_parents = sql("SELECT UPRID,ParentUPRID FROM dbo.UPR ORDER BY UPRID;")
@@ -248,6 +292,7 @@ IF NOT EXISTS(SELECT 1 FROM dbo.AUDIT_LOG a JOIN dbo.AUDIT_ENTITY_RECORD r
     before = verify()
     sql("""
 ALTER TABLE dbo.UPR_CLOSURE DROP CONSTRAINT CK_UPR_CLOSURE_Level;
+DROP INDEX IX_UPR_CLOSURE_Descendant ON dbo.UPR_CLOSURE;
 ALTER TABLE dbo.UPR_CLOSURE DROP COLUMN [Level];
 """)
     run_file("scripts/install_upr_audit.sql")

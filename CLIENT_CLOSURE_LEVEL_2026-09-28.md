@@ -1,5 +1,8 @@
 # Descendant lookup and level 0 — September 28, 2026
 
+Historical display-only fix. Use [the October 2 main-loader delivery](CLIENT_MAIN_LOADER_2026-10-02.md)
+for the current pair-distance contract and permanent correction.
+
 > Latest September 29 contract: [retain the original AncestorUPRID API column](CLIENT_CLOSURE_API_2026-09-29.md).
 > The level-0 display test is read-only and does not change UPR_CLOSURE.
 
@@ -68,8 +71,9 @@ comment linking to the new report.
   sqlcmd nor a Docker/SQL Server runtime. SQLite checks do not validate T-SQL
   execution, object binding or behavior on the client's database.
 
-The existing `UPR_Corrections_2026-09-23_Review_Update.zip` is refreshed in place
+The existing `archive/deliveries/UPR_Corrections_2026-09-23_Review_Update.zip` is refreshed in place
 with this report and note, retaining the earlier three-work delivery. This query
 can also be used alone with the client's earlier schema; the AuditLog migration
-is not a prerequisite for it. The separate follow-up client draft is
-`CLIENT_MESSAGE_2026-09-28.txt` and has not been sent externally.
+is not a prerequisite for it. The superseded follow-up draft was removed during
+October 2 cleanup. Use [the main-loader delivery](CLIENT_MAIN_LOADER_2026-10-02.md)
+and `CLIENT_MESSAGE_2026-10-02.txt` for the current test.

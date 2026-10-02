@@ -112,7 +112,7 @@ does not establish that a unit was found, or that its hierarchy is wrong.
    The node sets should match, with only the selected-node marker differing.
 5. Verify search entity type, role filters and agreed physical-address preference.
 
-Keep UPR_CLOSURE unchanged while investigating. No SQL Server or API execution
-was performed for this review. Earlier exploratory changes are archived as
-`.draft` files under `drafts/2026-09-30-distance-proposal/`, not a client delivery.
-Executable SQL retains the September 29 contract. No new deployment ZIP was made.
+At the time of this review, UPR_CLOSURE was left unchanged pending clarification.
+No SQL Server or API execution was performed. The later client clarification
+resulted in the October correction linked above. Obsolete exploratory snapshots
+were removed during October 2 cleanup; their history remains in Git.

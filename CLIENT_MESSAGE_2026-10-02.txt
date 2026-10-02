@@ -1,0 +1,18 @@
+Hello, I have updated the main load_upr_master.sql so the closure is populated correctly during the normal load. It uses the same distance rule as your CTE: self 0, parent 1, grandparent 2.
+
+The loader now also ensures:
+- Composite uniqueness on (AncestorUPRID, DescendantUPRID), reusing the existing primary key if it already provides this.
+- A reverse index on (DescendantUPRID, AncestorUPRID) for parent traversal.
+- Repeat loading without duplicate pairs. Existing duplicate pairs are reported and stop the load for review.
+
+The table and column names remain unchanged. Your API changes do not need to be replaced by this delivery.
+
+Please use the new UPR_Main_Loader_2026-10-02.zip on a restored test database:
+1. Set the database name and run the complete load_upr_master.sql.
+2. Run check_upr_closure_distance.sql in the same database with UPRID 207075.
+3. Repeat the load and verification with unchanged input, then share the results.
+
+This version includes the permanent fix; no separate repair script or manual loader edits are needed. Local checks passed; SQL Server testing remains pending your run.
+
+Thanks,
+Ade

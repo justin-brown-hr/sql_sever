@@ -5,10 +5,12 @@ SQL Server integration that loads **AddressMaster** and **SDAT** into the **hier
 **Model:** `docs/NewUPRTABLEUSED.docx` + `docs/Response.docx` (COMPLEX).  
 **Old flat model** archived under `legacy/` for reference only - do not run it.
 
-Latest correction: [stored closure pair distances](CLIENT_CLOSURE_DISTANCE_FIX_2026-10-01.md).
-The original table layout is retained; Level now counts parent links within each
-ancestor/descendant pair (self = 0). Send the October 1 two-file repair/check ZIP
-for testing existing data. The active loader must also be updated before reruns.
+Latest delivery: [main loader with closure distances and indexes](CLIENT_MAIN_LOADER_2026-10-02.md).
+Send `UPR_Main_Loader_2026-10-02.zip`: the complete loader and read-only verification.
+It calculates pair distances and ensures composite uniqueness plus reverse
+traversal indexes during the normal load. No separate repair or manual edits.
+
+Previous correction: [October 1 standalone data repair](CLIENT_CLOSURE_DISTANCE_FIX_2026-10-01.md).
 
 Historical client instruction: [retain the original UPR_CLOSURE API table](CLIENT_CLOSURE_API_2026-09-29.md).
 The earlier read-only report was not a stored-data correction.
@@ -25,7 +27,7 @@ Extends the existing search script with Portal modes and Property 360; SQL Serve
 integration execution remains pending.
 
 Previous update: [September 17 review implementation](CLIENT_UPDATE_2026-09-23.md).
-Package: `UPR_Corrections_2026-09-23_Review_Update.zip`.
+Package: `archive/deliveries/UPR_Corrections_2026-09-23_Review_Update.zip`.
 See [review findings and corrections](CLIENT_REVIEW_FEEDBACK_2026-09-23.md).
 Includes MA/SDAT overlap matching, `BLV` normalization, guarded existing-duplicate
 repair, Condo column removal, original `AncestorUPRID` API compatibility, and normalized auditing.

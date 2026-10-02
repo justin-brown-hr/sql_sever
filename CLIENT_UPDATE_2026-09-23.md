@@ -8,7 +8,7 @@
 
 # September 17 review update — September 23 implementation
 
-Package: `UPR_Corrections_2026-09-23_Review_Update.zip`.
+Package: `archive/deliveries/UPR_Corrections_2026-09-23_Review_Update.zip`.
 Revised after a [client-perspective review](CLIENT_REVIEW_FEEDBACK_2026-09-23.md).
 This supersedes the September 16 package. It is a **candidate for isolated database testing**:
 static checks pass, but the updated SQL has not been executed against SQL Server in this

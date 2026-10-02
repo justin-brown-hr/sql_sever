@@ -1,7 +1,8 @@
-/* READ-ONLY verification after repair_upr_closure_distance.sql.
+/* October 2: READ-ONLY verification after load_upr_master.sql.
    Select the same database used by the API. Run the entire file.
-   Checks ALL UPR parent chains, closure pairs and distances; working tables
-   are temporary. Traverses upward independently of the repair's downward walk.
+   Checks both index directions, pair uniqueness, ALL UPR parent chains,
+   closure pairs and distances; working tables are temporary. Traverses upward
+   independently of the main loader's downward walk.
    Set @UPRID for the detail output (client example: 207075).
    PASS validates closure against ParentUPRID, not external source correctness.
    The UNIT detail result helps distinguish UnitID from UPRID for API testing.
@@ -18,6 +19,37 @@ IF COL_LENGTH(N'dbo.UPR',N'ParentUPRID') IS NULL
 
 BEGIN TRY
 BEGIN TRANSACTION;
+DECLARE @ClosureObjectID INT=OBJECT_ID(N'dbo.UPR_CLOSURE');
+/* CLOSURE_FORWARD_INDEX_CHECK */
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes i
+    JOIN sys.index_columns a ON a.object_id=i.object_id AND a.index_id=i.index_id AND a.key_ordinal=1
+    JOIN sys.columns ac ON ac.object_id=a.object_id AND ac.column_id=a.column_id
+    JOIN sys.index_columns d ON d.object_id=i.object_id AND d.index_id=i.index_id AND d.key_ordinal=2
+    JOIN sys.columns dc ON dc.object_id=d.object_id AND dc.column_id=d.column_id
+    WHERE i.object_id=@ClosureObjectID AND i.[type] IN (1,2)
+      AND i.is_unique=1 AND i.ignore_dup_key=0 AND i.is_disabled=0
+      AND i.has_filter=0 AND i.is_hypothetical=0
+      AND ac.name=N'AncestorUPRID' AND dc.name=N'DescendantUPRID'
+      AND (SELECT COUNT(*) FROM sys.index_columns k
+           WHERE k.object_id=i.object_id AND k.index_id=i.index_id AND k.key_ordinal>0)=2
+)
+    THROW 52103,'Missing active unique ancestor/descendant pair index or primary key. Run the October 2 main loader.',1;
+
+/* CLOSURE_REVERSE_INDEX_CHECK */
+IF NOT EXISTS (
+    SELECT 1 FROM sys.indexes i
+    JOIN sys.index_columns d ON d.object_id=i.object_id AND d.index_id=i.index_id AND d.key_ordinal=1
+    JOIN sys.columns dc ON dc.object_id=d.object_id AND dc.column_id=d.column_id
+    JOIN sys.index_columns a ON a.object_id=i.object_id AND a.index_id=i.index_id AND a.key_ordinal=2
+    JOIN sys.columns ac ON ac.object_id=a.object_id AND ac.column_id=a.column_id
+    WHERE i.object_id=@ClosureObjectID AND i.[type] IN (1,2)
+      AND i.is_disabled=0 AND i.has_filter=0 AND i.is_hypothetical=0
+      AND dc.name=N'DescendantUPRID' AND ac.name=N'AncestorUPRID'
+)
+    THROW 52103,'Missing active descendant-first ancestor traversal index. Run the October 2 main loader.',1;
+
+
 IF OBJECT_ID('tempdb..#Parents') IS NOT NULL DROP TABLE #Parents;
 IF OBJECT_ID('tempdb..#ActualPaths') IS NOT NULL DROP TABLE #ActualPaths;
 IF OBJECT_ID('tempdb..#ExpectedPaths') IS NOT NULL DROP TABLE #ExpectedPaths;
@@ -79,7 +111,13 @@ COMMIT TRANSACTION;
 
 SELECT Result=N'PASS',CheckedUPRs=(SELECT COUNT_BIG(*) FROM #Parents),
     CheckedClosureRows=(SELECT COUNT_BIG(*) FROM #ActualPaths),
-    Meaning=N'All closure paths and pair distances match ParentUPRID; all self rows are zero.';
+    Meaning=N'All closure paths/distances match ParentUPRID; self rows zero; pair uniqueness and both traversal indexes verified.';
+SELECT i.name AS IndexName,i.is_unique AS IsUnique,i.is_primary_key AS IsPrimaryKey,
+    c.name AS KeyColumn,ic.key_ordinal AS KeyOrdinal
+FROM sys.indexes i JOIN sys.index_columns ic ON ic.object_id=i.object_id AND ic.index_id=i.index_id
+JOIN sys.columns c ON c.object_id=ic.object_id AND c.column_id=ic.column_id
+WHERE i.object_id=@ClosureObjectID AND ic.key_ordinal>0 AND i.is_disabled=0
+ORDER BY i.index_id,ic.key_ordinal;
 -- Raw values, not adjusted for display. Order root to selected for comparison.
 SELECT [Level],AncestorUPRID,DescendantUPRID FROM #ActualPaths
 WHERE DescendantUPRID=@UPRID ORDER BY [Level] DESC,AncestorUPRID;

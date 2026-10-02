@@ -1,5 +1,8 @@
 # UPR closure distance correction — October 1, 2026
 
+Historical repair notes. The obsolete repair ZIP was removed during cleanup.
+For the current client test, send the [October 2 main-loader package](CLIENT_MAIN_LOADER_2026-10-02.md).
+
 The client's raw-table screenshot confirms a loader defect under the clarified
 contract: Level must count parent links from AncestorUPRID to DescendantUPRID.
 The previous loader copied descendant root depth into every pair. The earlier
@@ -47,9 +50,9 @@ For the stated chain, `24` has child `88788`, which has child `207075`. The
 client's first small ASCII diagram indents both nodes equally, but their explicit
 chain, tables and distance examples make the intended relationship clear.
 
-## Send only the new two-file ZIP for this test
+## Historical standalone repair delivery
 
-`UPR_Closure_Distance_Fix_2026-10-01.zip` contains:
+The retired October 1 ZIP contained:
 
 1. `repair_upr_closure_distance.sql`: transactional update of incorrect Level
    values. First checks all UPR nodes form rooted trees and that the closure pairs
@@ -60,8 +63,8 @@ chain, tables and distance examples make the intended relationship clear.
    verification of all closure pairs and distances. Shows raw results for 207075,
    separately labelled TreeLevel/HierarchyDistance, and UPR-to-UnitID mapping.
 
-Do not send the earlier September 29 level-0 report ZIP as the data correction.
-Other historical ZIPs have not been rebuilt and do not contain this fix.
+Both older closure-test ZIPs were removed during cleanup. The earlier full
+release remains under `archive/deliveries/` for comparison, not current testing.
 
 ## Client test order
 

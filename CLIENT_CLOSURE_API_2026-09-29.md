@@ -1,5 +1,9 @@
 # Preserve the original UPR_CLOSURE API contract — September 29, 2026
 
+Historical notes: the later client clarification changed Level to pair distance.
+Use [the October 2 main-loader delivery](CLIENT_MAIN_LOADER_2026-10-02.md) for the
+current contract and test instructions. The interpretation below is superseded.
+
 The client's latest instruction supersedes the earlier column rename. Keep the
 existing physical `dbo.UPR_CLOSURE` table with `AncestorUPRID`, `DescendantUPRID`
 and `Level`. Stored Level continues to mean the descendant's depth from its root.
@@ -67,7 +71,8 @@ client's read-only test passes for a known fixture descendant. These SQL Server
 checks are prepared but **not executed here**: no SQL Server/sqlcmd/Docker runtime
 is available. No client database or API has been modified by this workspace work.
 
-The existing `UPR_Corrections_2026-09-23_Review_Update.zip` contains the updated
-scripts, both client test/report files, and this note. Its older filename is
-retained for delivery continuity; use the current SHA-256 manifest. The new
-`CLIENT_MESSAGE_2026-09-29.txt` is the reply for Ade to send, not an external send.
+The historical full release is retained at
+`archive/deliveries/UPR_Corrections_2026-09-23_Review_Update.zip` for comparison.
+The superseded reply was removed during October 2 cleanup. Use
+[the current main-loader delivery](CLIENT_MAIN_LOADER_2026-10-02.md) and
+`CLIENT_MESSAGE_2026-10-02.txt` for the current test.

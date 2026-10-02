@@ -1,5 +1,0 @@
-Hello. The difference comes from what the stored Level represents: it is the descendant's depth from the root. Filtering by descendant 207075 repeats that descendant's level for every ancestor row, including the row identifying the root. Filtering by the root ancestor also returns the root's own record, which has level 0.
-
-I have added a corrected ancestor-path query that displays each ancestor's own level, so the path shows the root at level 0, followed by the parent and selected record at their respective levels. It includes the selected record itself and does not change the hierarchy or stored data.
-
-Please run list_upr_ancestor_path.sql with @UPRID = 207075. It supports both AncestorUPRID and UPRAncestry column names. Local checks passed; SQL Server testing is still pending.

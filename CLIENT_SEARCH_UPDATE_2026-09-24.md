@@ -71,7 +71,7 @@ SOURCE_RECORD_ID. Search JSON displays the stored account and matching XREF
 values; it does not promise an archival copy of every original source field.
 
 The existing delivery ZIP is refreshed in place:
-`UPR_Corrections_2026-09-23_Review_Update.zip`. Its filename is retained for
+`archive/deliveries/UPR_Corrections_2026-09-23_Review_Update.zip`. Its filename is retained for
 continuity; the September 24 guide and SHA-256 manifest identify the new contents.
 Replace the extracted set together. Earlier packages/test results do not validate
 this revision.

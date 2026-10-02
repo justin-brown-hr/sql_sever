@@ -1,9 +1,0 @@
-SUPERSEDED UNSENT DRAFT. Use CLIENT_MESSAGE_2026-10-01.txt following the client's clarification that stored closure Level must be pair distance.
-
-Thank you. This shows /api/unit/207075 returning HTTP 200 with a null body. It is the unit-detail endpoint, so it does not yet show the ancestor traversal result.
-
-The schema has separate UnitID and UPRID fields. We know 207075 is being used as a UPRID in the hierarchy examples. Please confirm whether /api/unit/{id} searches by UnitID or UPRID; if it expects UnitID, we need the UnitID linked to UPRID 207075.
-
-Please also run /api/upr/207075 and /api/upr/207075/ancestors, and share the query or stored procedure behind the unit and ancestor endpoints. We can then compare the responses with the unit mapping and ParentUPRID chain in the same database used by the API.
-
-This result does not establish a hierarchy defect or prove an API-only fault. UPR_CLOSURE should remain unchanged while we verify the identifier mapping and traversal query.

@@ -1,4 +1,36 @@
-# Latest continuation — confirmed closure data correction, October 1, 2026
+# Latest continuation — main loader and index delivery, October 2, 2026
+
+Cleanup requested by user: removed 16 obsolete draft snapshots, four superseded
+closure client messages, one obsolete test guide and two obsolete closure ZIPs
+(23 files). Archived the earlier full-release ZIP in archive/deliveries/ without
+changing its contents. Current root ZIP is UPR_Main_Loader_2026-10-02.zip only.
+Preserved all working scripts/tests, client source documents and technical notes.
+Historical notes below record past decisions; use the October 2 guide/message.
+
+Client fixed API yesterday and now explicitly requests the main script with
+permanent closure distance generation, pair uniqueness and reverse indexing.
+Main load already used self 0/edge+1; it now rejects pre-existing duplicate pairs
+before business loading and ensures indexes in Step 12 after legacy Level upgrade.
+Reuses an equivalent PK/unique (AncestorUPRID,DescendantUPRID); creates missing
+UX_UPR_CLOSURE_AncestorDescendant INCLUDE(Level). Reuses reverse leading keys
+(DescendantUPRID,AncestorUPRID); creates missing IX_UPR_CLOSURE_Descendant INCLUDE(Level).
+Incompatible reserved index names stop; no silent drop/dedup. Table/column names
+unchanged. Uses transactional differences, not TRUNCATE/reinsert. No API edits.
+
+Delivery: UPR_Main_Loader_2026-10-02.zip, exactly load_upr_master.sql and updated
+check_upr_closure_distance.sql (also verifies index definitions). Send this for
+the main-script test, not the old repair ZIP. No manual Step 12 edits needed.
+See CLIENT_MAIN_LOADER_2026-10-02.md and unsent CLIENT_MESSAGE_2026-10-02.txt.
+
+Static/schema/runner/syntax and offline hierarchy/index-predicate tests passed.
+SQL Server integration remains unexecuted (no runtime). Integration tests cover
+PK reuse, missing index creation, repeat loads, duplicate prevention/fail-fast.
+No client database deployment. The earlier full release is archived; obsolete
+standalone closure-test ZIPs were removed during cleanup.
+
+---
+
+# Previous continuation — confirmed closure data correction, October 1, 2026
 
 Reviewed subsequent client's Bigger Picture message against current source and
 verified the two-file ZIP still matches. No further SQL change needed for its
@@ -15,16 +47,16 @@ were incomplete. Source loader now uses self 0 and edge +1. Repair updates only
 Level after validating all pairs against ParentUPRID, inside a transaction; no
 schema/parent/identifier changes. Independent read-only verifier walks upward.
 
-Local report/search root-depth consumers were adapted and tests updated. New ZIP
-UPR_Closure_Distance_Fix_2026-10-01.zip is limited to repair/check SQL; active loader
-needs the small documented Step 12 change before next load. Full historical ZIPs
-were not refreshed. See CLIENT_CLOSURE_DISTANCE_FIX_2026-10-01.md and unsent
-CLIENT_MESSAGE_2026-10-01.txt. September 30 message/review are marked superseded.
+Local report/search root-depth consumers were adapted and tests updated. The
+October 1 ZIP contained repair/check SQL with separate manual loader instructions.
+It was superseded by the complete main-loader delivery. See the historical
+CLIENT_CLOSURE_DISTANCE_FIX_2026-10-01.md notes. Its unsent reply and obsolete ZIP
+were removed during cleanup.
 
 Static/schema/runner checks and SQLite relational checks passed (229 nodes, 6068
 paths). No SQL Server runtime or API source; integration tests remain pending.
-No deployed changes or actual client results. Archived .draft proposals remain
-historical and excluded from delivery. No new API endpoints or address-search
+No deployed changes or actual client results. Obsolete draft proposals were later
+removed during cleanup. No new API endpoints or address-search
 features were imported from those drafts.
 
 ---
@@ -38,11 +70,10 @@ document as authorization to change that contract. Screenshot /api/upr/24/ancest
 returns descendants, suggesting direction/naming mismatch. Deployed data and API
 have not been verified; no API source or SQL Server runtime is available here.
 
-See RESEARCH_REVIEW_2026-09-30.md and CLIENT_MESSAGE_2026-09-30.txt (unsent).
-Requested endpoint queries/procedures and response mapping. Earlier experimental
-changes from this turn are archived under drafts/2026-09-30-distance-proposal/
-with .draft suffixes. Executable scripts retain the September 29 contract.
-No database/API deployment or new ZIP was made for this review.
+See RESEARCH_REVIEW_2026-09-30.md. Requested endpoint queries/procedures and response
+mapping. At that point, scripts retained the September 29 contract. Experimental
+drafts and the superseded unsent message were later removed during cleanup.
+No database/API deployment or new ZIP was made for that research review.
 
 ---
 
@@ -67,7 +98,8 @@ original columns and compares report path/levels to independent ParentUPRID walk
 Prepared migration regressions preserve object ID/column order/rows/levels and
 repeat install. Local static/schema/runner/Python checks pass; SQL Server runtime
 is absent. No database/API deployment occurred. See CLIENT_CLOSURE_API_2026-09-29.md.
-Existing delivery ZIP refreshed; CLIENT_MESSAGE_2026-09-29.txt is the unsent reply.
+The then-current delivery ZIP was refreshed; its superseded unsent reply was
+later removed during cleanup.
 
 ---
 
@@ -90,7 +122,8 @@ Added integration assertions to check_closure_levels.py; actual SQL Server runs
 remain pending. Extracted query/guard expressions passed 14 SQLite fixture checks;
 static/schema checks and Python syntax passed. Prior unrelated working-tree changes
 were retained. Existing delivery ZIP refreshed with new query, guide and draft.
-See CLIENT_CLOSURE_LEVEL_2026-09-28.md and CLIENT_MESSAGE_2026-09-28.txt (unsent).
+See CLIENT_CLOSURE_LEVEL_2026-09-28.md. Its superseded unsent reply was later
+removed during cleanup.
 
 ---
 
@@ -193,7 +226,7 @@ The dated handover below describes the prior version and its historical tests.
   about a disposable test instance was sent to the user; no answer yet.
 - `test/check_sept17_review.py` runs the actual fdba4d0 baseline and the new
   migration; it is phase 20 of `test/run_local_it.sh`.
-- Current candidate package: UPR_Corrections_2026-09-23_Review_Update.zip.
+- Current candidate package: archive/deliveries/UPR_Corrections_2026-09-23_Review_Update.zip.
   Do not call it database-validated until the updated integration suite passes.
 
 ---

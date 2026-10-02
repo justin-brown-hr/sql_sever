@@ -516,13 +516,15 @@ CREATE TABLE dbo.UPR_CLOSURE
     /* Parent-edge distance from AncestorUPRID to DescendantUPRID; self = 0. */
     [Level]        INT NOT NULL,
     CONSTRAINT CK_UPR_CLOSURE_Level CHECK ([Level] >= 0),
+    /* Composite uniqueness prevents duplicate paths and serves ancestor-first traversal. */
     CONSTRAINT PK_UPR_CLOSURE PRIMARY KEY CLUSTERED (AncestorUPRID, DescendantUPRID),
     CONSTRAINT FK_UPR_CLOSURE_Ancestor FOREIGN KEY (AncestorUPRID) REFERENCES dbo.UPR (UPRID),
     CONSTRAINT FK_UPR_CLOSURE_Descendant FOREIGN KEY (DescendantUPRID) REFERENCES dbo.UPR (UPRID)
 );
 GO
 
-CREATE INDEX IX_UPR_CLOSURE_Descendant ON dbo.UPR_CLOSURE (DescendantUPRID, AncestorUPRID);
+/* Reverse traversal by descendant; pair uniqueness is already enforced by the PK. */
+CREATE INDEX IX_UPR_CLOSURE_Descendant ON dbo.UPR_CLOSURE (DescendantUPRID, AncestorUPRID) INCLUDE ([Level]);
 CREATE INDEX IX_UPR_CLOSURE_Ancestor ON dbo.UPR_CLOSURE (AncestorUPRID) INCLUDE (DescendantUPRID);
 GO
 
