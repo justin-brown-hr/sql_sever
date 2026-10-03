@@ -115,7 +115,7 @@ if len(real_tables) < 20:
 
 # ---------------------------------------------------------------- INSERT check
 insert_pat = re.compile(
-    r"INSERT\s+INTO\s+(dbo\.\w+|#\w+)\s*\(([^;]*?)\)\s*(VALUES|SELECT)", re.I | re.S
+    r"INSERT\s+(?:INTO\s+)?(dbo\.\w+|#\w+)\s*\(([^;]*?)\)\s*(VALUES|SELECT)", re.I | re.S
 )
 checked = 0
 for m in insert_pat.finditer(LOAD_NC):
@@ -209,7 +209,7 @@ print(f"  OUTPUT INTO checked      : {outs}")
 
 # ------------------------------------------------ INSERT ... SELECT arity check
 arity_pat = re.compile(
-    r"INSERT\s+INTO\s+(dbo\.\w+|#\w+)\s*\(([^()]*?)\)\s*VALUES\s*\((.*?)\)\s*;",
+    r"INSERT\s+(?:INTO\s+)?(dbo\.\w+|#\w+)\s*\(([^()]*?)\)\s*VALUES\s*\((.*?)\)\s*;",
     re.I | re.S,
 )
 for m in arity_pat.finditer(LOAD_NC):
@@ -243,7 +243,7 @@ def find_depth0_from(sql: str, start: int):
     return -1
 
 
-sel_pat = re.compile(r"INSERT\s+INTO\s+(dbo\.\w+|#\w+)\s*\(([^()]*?)\)\s*SELECT\b", re.I | re.S)
+sel_pat = re.compile(r"INSERT\s+(?:INTO\s+)?(dbo\.\w+|#\w+)\s*\(([^()]*?)\)\s*SELECT\b", re.I | re.S)
 arity_checked = 0
 for m in sel_pat.finditer(LOAD_NC):
     cols = [c for c in m.group(2).split(",") if c.strip()]

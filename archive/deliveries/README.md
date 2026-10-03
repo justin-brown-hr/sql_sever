@@ -1,7 +1,8 @@
-# Historical release
+# Historical releases
 
-The September full-release ZIP is retained here for comparison with earlier
-client deliveries. It does not include the October closure-loader correction.
+These ZIPs preserve earlier deliveries for comparison. Do not send them for the
+current test: the original October 2 main-loader package assumed audit extensions
+that are absent in the client's database.
 
-Use the current [October 2 delivery guide](../../CLIENT_MAIN_LOADER_2026-10-02.md)
-and the main-loader ZIP at the project root for the current client test.
+Use the [October 2 R2 delivery guide](../../CLIENT_MAIN_LOADER_2026-10-02.md)
+and `UPR_Main_Loader_2026-10-02_R2.zip` at the project root.

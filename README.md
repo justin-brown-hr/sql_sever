@@ -5,8 +5,10 @@ SQL Server integration that loads **AddressMaster** and **SDAT** into the **hier
 **Model:** `docs/NewUPRTABLEUSED.docx` + `docs/Response.docx` (COMPLEX).  
 **Old flat model** archived under `legacy/` for reference only - do not run it.
 
-Latest delivery: [main loader with closure distances and indexes](CLIENT_MAIN_LOADER_2026-10-02.md).
-Send `UPR_Main_Loader_2026-10-02.zip`: the complete loader and read-only verification.
+Latest delivery: [R2 main loader with client AuditLog compatibility](CLIENT_MAIN_LOADER_2026-10-02.md).
+Send `UPR_Main_Loader_2026-10-02_R2.zip`: schema diagnostic, complete loader and
+closure verification. The loader supports the existing AuditLog without requiring
+optional audit-support tables; existing triggers remain in place.
 It calculates pair distances and ensures composite uniqueness plus reverse
 traversal indexes during the normal load. No separate repair or manual edits.
 

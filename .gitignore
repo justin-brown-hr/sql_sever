@@ -1,2 +1,4 @@
 docs
 *.zip
+test/tsql_parser/bin/
+test/tsql_parser/obj/

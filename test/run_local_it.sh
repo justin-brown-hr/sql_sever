@@ -97,3 +97,6 @@ CONTAINER="$CONTAINER" python3 "$ROOT/test/check_search_load.py"
 
 echo "### 22. Client AuditLog layout and normalized-history migration"
 CONTAINER="$CONTAINER" python3 "$ROOT/test/check_audit_layout.py"
+
+echo "### 23. Client AuditLog layout without optional support tables or audit migration"
+CONTAINER="$CONTAINER" python3 "$ROOT/test/check_client_schema_load.py"

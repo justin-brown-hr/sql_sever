@@ -1,14 +1,56 @@
-# Main loader with closure distances and indexes — October 2, 2026
+# Main loader R2 — client schema correction, October 2, 2026
 
-Send `UPR_Main_Loader_2026-10-02.zip` for the client's requested main-script test.
-It contains exactly two files, in run order:
+Send `UPR_Main_Loader_2026-10-02_R2.zip`. It replaces the earlier October 2 ZIP,
+which assumed audit-extension objects the client had not installed.
 
-1. `load_upr_master.sql` — the complete updated main loader.
-2. `check_upr_closure_distance.sql` — read-only hierarchy and index verification.
+The ZIP contains exactly three files, in run order:
 
-This supersedes the October 1 standalone repair delivery for the current request.
-No separate Level repair or manual Step 12 edits are needed with this loader.
-No API changes are packaged; the client reports fixing their API separately.
+1. `check_upr_client_schema.sql` — read-only diagnostic of 170 columns across 26
+   tables, plus actual layouts, constraints and triggers.
+2. `load_upr_master.sql` — complete corrected main loader.
+3. `check_upr_closure_distance.sql` — read-only hierarchy and index verification.
+
+The extra diagnostic file addresses the reported schema mismatch; no installer,
+fresh-schema DDL, search script or standalone repair is needed for this delivery.
+
+## Correction for the reported missing objects
+
+The screenshots show editor diagnostics around `UPR_CONDO_LEGACY`,
+`AUDIT_LOG_CONTEXT`, `UPR_LOAD_RUN` and the `AUDIT_LOG` compatibility view. They
+do not show the complete 46-item list or SQL Server execution Messages.
+
+The loader now supports the existing nine-column physical `dbo.AuditLog` and
+`dbo.REF_ENTITY_IDENTIFICATION` without those extensions. Optional archive,
+context and run-history objects are referenced through guarded dynamic SQL only
+when installed. The `AUDIT_LOG` view is no longer used. The loader creates no
+permanent audit-support tables and does not install, replace or disable triggers.
+An incomplete existing project audit-trigger installation causes a clear stop;
+the loader does not suppress its errors by disabling auditing.
+
+A batch summary, including counts and a generated run ID, is saved as JSON in
+`AuditLog.NewValues`. The existing entity dictionary's `UPR_HIER_LOAD` entry
+identifies that summary. If absent, the loader adds that one dictionary record
+only when other required fields have generated values/defaults; it never guesses
+an EntityID. `EntityRecordID = 0` denotes the batch summary, not a UPR row.
+These are recorded values in existing tables; no EntityKey or RunID column is
+added to AuditLog. ChangedBy is limited to the client's 100-character column.
+
+Existing row-audit triggers and audit history remain in place. Without optional
+context, run-scoped row-change details report NOT_AVAILABLE; they are not inferred
+from AuditID ranges or presented as zero changes. Without optional run history,
+failed runs return their error in Messages and roll back the load transaction;
+no separate failed-run history table is created. Batch insertion counts are not a
+replacement for complete row-level audit coverage.
+
+Condo reclassification checks existing live CondoName/Parcel values when those
+columns exist, plus archived names when the optional archive exists. Records with
+such values are protected from automatic Condo-to-Complex conversion, avoiding
+loss of legacy details merely because an archive was never installed.
+
+The existing loader still maintains its normalization functions, reference codes,
+and any previously supported missing CondoUnit/Level columns. This release does
+not claim the whole loader is free of schema changes: closure index creation is
+explicitly part of the client's request. AuditLog's layout remains unchanged.
 
 ## What is fixed in the main script
 
@@ -57,42 +99,79 @@ and stop the load. They are not silently deleted. New index creation occurs
 within the load transaction, after any legacy Level column backfill, and rolls
 back if that transaction fails. Equivalent indexes are reused on repeated loads.
 
+## Repeating local syntax validation
+
+With .NET 8 installed, run from the project root:
+
+```sh
+dotnet run --project test/tsql_parser/SqlSyntax.csproj -- ddl/03_new_upr_schema.sql scripts/*.sql test/*.sql
+python3 test/schema_contract_check.py
+python3 test/check_client_schema_dependencies.py
+```
+
+The first command restores the pinned Microsoft parser package. The validator and
+its build dependencies stay local and are not included in the client ZIP.
+
 ## Client run instructions
 
-1. Use a restored test database with the existing UPR schema, source tables and
-   audit prerequisites used by the main project loader. Change the loader's
-   `USE UPRXDB_TEST;` line to that database. Run the entire main file in SSMS using
-   a dedicated session with no open transaction. This performs a full source load.
-2. If the main script fails, share the first error and any duplicate-pair output.
-   Do not truncate closure or recreate the schema to bypass the error. Existing
-   audit prerequisites are checked by the loader; no new audit installer is
-   included in this delivery.
-3. After successful completion, select the same database and run the entire
-   verification file with `@UPRID = 207075` (or a known UPR in that test copy).
-   It checks indexes plus all closure paths/distances against ParentUPRID and
-   shows actual stored rows, tree levels, distances and UnitID mapping.
-4. Run the main loader again with unchanged input, followed by verification.
-   Paths, values and indexes should remain stable without duplicate pairs.
-5. Share both loader summaries and verification results. The API can then be
-   checked against those stored results using the client's corrected endpoints.
+1. Select the intended restored test database in SSMS. Run the entire
+   `check_upr_client_schema.sql` and save all results. Optional extensions marked
+   missing are supported; missing core tables/columns need comparison with the
+   actual client schema before loading. Continue only after resolving any
+   CORE_MISSING result. A names-only PASS is not certification of types, data,
+   permissions, custom constraints or trigger behavior.
+2. Change `USE UPRXDB_TEST;` in `load_upr_master.sql` to that same database.
+   Run the complete file in a dedicated session with no open transaction.
+   This is a full source load. Do not run the fresh-schema DDL or install an audit
+   migration to resolve the optional-table diagnostics.
+3. If execution fails, return the full Messages output and schema diagnostic
+   results. Do not truncate closure or recreate the database to bypass errors.
+4. After successful completion, run `check_upr_closure_distance.sql` in the same
+   database with `@UPRID = 207075` (or another known UPR). It verifies stored
+   relationships, distances and index definitions against ParentUPRID.
+5. Repeat the main load and verification with unchanged input. Business rows and
+   closure pairs should stay stable; each successful run adds a batch summary.
+   Return both summaries and verification results for review.
+
+No API code is included. The client reports fixing their API separately. A full
+property tree starting from a unit also requires endpoint logic to resolve its
+root and retrieve that root's subtree; closure distances alone do not implement
+that endpoint behavior.
 
 ## Validation performed here
 
-- Hierarchy static checks, schema-contract checks, runner-mode checks, Python
-  syntax and shell syntax checks passed.
-- Actual closure SELECTs and independent upward verification passed offline
-  fixtures containing 229 nodes and 6,068 paths, including 207075 and depth >100.
-- Actual index-selection predicates passed simulated catalog cases for valid PKs,
-  included columns, reverse indexes, and rejection of filtered/disabled/incorrect
-  keys. SQLite pair uniqueness rejected a duplicate with a different Level while
-  allowing repeated ancestors and descendants in different pairs.
-- SQL Server integration cases were added for existing-PK reuse, automatic
-  creation of missing indexes, stable repeated runs, duplicate insert rejection,
-  and stopping on pre-existing duplicates without retaining business changes.
-- SQL Server execution remains pending: docker/sqlcmd/SQL Server are unavailable
-  in this workspace. Offline tests do not validate SQL Server DDL, locks, triggers
-  or transaction rollback. No client database was accessed or changed.
+The additional review requested after packaging found no SQL syntax errors. It
+strengthened the diagnostic beyond the original audit-only checks and corrected
+the local INSERT checker to include statements that omit the optional INTO keyword.
+The loader itself did not need another change during this review.
 
-The client ZIP excludes fresh-schema DDL, audit/search installers, historical
-repair files and draft proposals. Local fresh DDL was aligned to include Level
-in a newly created reverse index; it is not needed for this existing-database run.
+- Microsoft's ScriptDom parser (161.9142.1, SQL Server 2019 grammar) passed all
+  22 current SQL files under ddl/scripts/test, plus 12 literal dynamic-SQL batches.
+  This includes the main loader's eight dynamic batches. Assembled SQL variables
+  are not covered by the literal-batch check. Parsing does not bind database names
+  or execute statements.
+- The client diagnostic covers every statically referenced core table and every
+  INSERT/MERGE target column. It checks 170 columns over 26 core/optional tables,
+  distinguishes optional absence from missing core columns, and returns full
+  physical types/defaults plus constraints/triggers for comparison.
+- The strengthened schema-contract check passed 51 INSERT statements, five
+  MERGEs, five OUTPUT mappings and 37 INSERT/SELECT column-count checks.
+
+- Static hierarchy, schema-contract, runner-mode, Python/shell syntax and diff
+  checks passed.
+- Dependency checks passed: no static references to the absent extension objects,
+  no permanent-table creation or trigger removal/disable statements in the loader.
+- Offline cases passed for live/archived Condo protection, including no archive.
+- Actual closure SELECTs and independent upward verification passed offline
+  fixtures containing 229 nodes and 6,068 paths, including the 207075 example,
+  deep trees, cycles and missing parents.
+- Index-selection and duplicate-pair checks passed offline catalog/SQLite cases.
+- A SQL Server regression was added for the native client layout without support
+  tables, preserved custom triggers/history, repeated loads and enhanced audit
+  operation without the compatibility view. It has not been executed here.
+- SQL Server execution remains pending: no SQL Server/docker/sqlcmd runtime is
+  available. Offline checks do not establish SQL Server compilation, trigger,
+  DDL, lock or rollback behavior. No client database was accessed or changed.
+
+The visible dependencies are corrected. Confirmation that every reported
+client diagnostic is resolved requires the actual schema and SQL Server test.

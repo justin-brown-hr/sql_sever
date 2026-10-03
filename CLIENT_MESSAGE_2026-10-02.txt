@@ -1,18 +1,15 @@
-Hello, I have updated the main load_upr_master.sql so the closure is populated correctly during the normal load. It uses the same distance rule as your CTE: self 0, parent 1, grandparent 2.
+Hello, the previous package assumed audit-support objects that are not present in your database. I have corrected the main loader to use your existing AuditLog layout without requiring those additional tables or the AUDIT_LOG view. Existing triggers are retained.
 
-The loader now also ensures:
-- Composite uniqueness on (AncestorUPRID, DescendantUPRID), reusing the existing primary key if it already provides this.
-- A reverse index on (DescendantUPRID, AncestorUPRID) for parent traversal.
-- Repeat loading without duplicate pairs. Existing duplicate pairs are reported and stop the load for review.
+The closure fix remains in the main load: self 0, parent 1, grandparent 2, with unique ancestor/descendant pairs and a reverse lookup index. Table and column names remain unchanged.
 
-The table and column names remain unchanged. Your API changes do not need to be replaced by this delivery.
+To explain the audit change: the batch summary is stored in AuditLog.NewValues. The loader reuses or adds the UPR_HIER_LOAD dictionary entry; EntityRecordID 0 identifies a batch summary. No new audit table or AuditLog column is added. Detailed row history continues to depend on your existing triggers.
 
-Please use the new UPR_Main_Loader_2026-10-02.zip on a restored test database:
-1. Set the database name and run the complete load_upr_master.sql.
-2. Run check_upr_closure_distance.sql in the same database with UPRID 207075.
-3. Repeat the load and verification with unchanged input, then share the results.
+Please use UPR_Main_Loader_2026-10-02_R2.zip on your test database:
+1. Run check_upr_client_schema.sql and save its results. It checks 170 columns across 26 tables; resolve any CORE_MISSING result before loading.
+2. Set the database name and run the complete load_upr_master.sql.
+3. Run check_upr_closure_distance.sql for UPRID 207075, then repeat the load and check.
 
-This version includes the permanent fix; no separate repair script or manual loader edits are needed. Local checks passed; SQL Server testing remains pending your run.
+Microsoft's SQL syntax parser and local checks passed; execution against your actual SQL Server schema still needs your test. Please return the results and full Messages output if any errors remain.
 
 Thanks,
 Ade

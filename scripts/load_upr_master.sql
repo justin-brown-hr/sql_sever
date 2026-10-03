@@ -30,7 +30,11 @@
        Never invent MA-<id>/SD-<id> unit labels.
    10) Missing/placeholder Parcel numbers stay NULL and do not cause Review_Q.
 
-  Prerequisites: create the schema once, then run scripts/install_upr_audit.sql.
+  Prerequisites: existing UPR/source schema and the client's nine-column AuditLog
+  with REF_ENTITY_IDENTIFICATION. No audit-extension installation is required.
+  Existing triggers are retained. Without extended audit context, batch summaries
+  are stored in AuditLog.NewValues; per-row auditing remains the responsibility
+  of the database's existing triggers. No audit support tables are created here.
   Re-runnable: unchanged incoming data inserts no business rows (batch audit remains).
 
   October 2 closure correction is included in this MAIN script:
@@ -40,6 +44,8 @@
     - Existing duplicate pairs stop the load with a diagnostic; no silent deletion.
   Run test/check_upr_closure_distance.sql after the load. No separate Level repair
   or manual edits to Step 12 are needed with this version.
+  October 2 R2: supports the client schema without UPR_CONDO_LEGACY,
+  AUDIT_LOG_CONTEXT, UPR_LOAD_RUN or the AUDIT_LOG compatibility view.
 
   EDIT USE database name to match your environment.
 ================================================================================
@@ -316,7 +322,7 @@ SET XACT_ABORT ON;
 DECLARE @ShowDetailResults BIT = 0;
 
 DECLARE @RunUser     NVARCHAR(100) = SUSER_SNAME();
-DECLARE @AuditUser   NVARCHAR(128) = COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(128), SUSER_SNAME()))), N''), N'SYSTEM');
+DECLARE @AuditUser   NVARCHAR(100) = LEFT(COALESCE(NULLIF(LTRIM(RTRIM(CONVERT(NVARCHAR(128), SUSER_SNAME()))), N''), N'SYSTEM'),100);
 /* Truncated to the second: assigning SYSDATETIME() to DATETIME2(0) ROUNDS,
    which can produce a timestamp in the future and trip <= SYSDATETIME() checks */
 DECLARE @Now         DATETIME2(0)  = CONVERT(DATETIME2(0), CONVERT(VARCHAR(19), SYSDATETIME(), 126));
@@ -324,6 +330,14 @@ DECLARE @BatchStart  DATETIME2(0)  = SYSDATETIME();
 DECLARE @AuditRunID UNIQUEIDENTIFIER = NEWID();
 DECLARE @PreviousAuditRun SQL_VARIANT = SESSION_CONTEXT(N'UPR_AuditRunID');
 DECLARE @RunRecorded BIT = 0;
+DECLARE @HasAuditContext BIT = CASE WHEN OBJECT_ID(N'dbo.AUDIT_LOG_CONTEXT',N'U') IS NOT NULL THEN 1 ELSE 0 END;
+DECLARE @HasRunHistory BIT = CASE WHEN OBJECT_ID(N'dbo.UPR_LOAD_RUN',N'U') IS NOT NULL THEN 1 ELSE 0 END;
+DECLARE @ManagedAudit BIT = CASE WHEN EXISTS(SELECT 1 FROM sys.triggers
+    WHERE OBJECT_SCHEMA_NAME(object_id)=N'dbo' AND name LIKE N'tr[_]UPR[_]Audit[_]%'
+      AND (OBJECT_DEFINITION(object_id) LIKE N'%AUDIT_LOG_CONTEXT%'
+        OR OBJECT_DEFINITION(object_id) LIKE N'%AUDIT_ENTITY_RECORD%'
+        OR OBJECT_DEFINITION(object_id) LIKE N'%UPR_LOAD_RUN%')) THEN 1 ELSE 0 END;
+DECLARE @SummaryEntityID INT;
 DECLARE @ErrorMessage NVARCHAR(500);
 DECLARE @PreflightErrors NVARCHAR(MAX) = N'';
 
@@ -346,21 +360,37 @@ BEGIN
 END;
 BEGIN TRY
 
-/* Install/upgrade audit support before the main load. Dynamic SQL gives a
-   useful prerequisite error even when the run-history table is absent. */
-IF OBJECT_ID(N'dbo.UPR_LOAD_RUN', N'U') IS NULL
-   OR OBJECT_ID(N'dbo.AuditLog', N'U') IS NULL
-   OR COL_LENGTH(N'dbo.AuditLog', N'EntityNameID') IS NULL
-   OR OBJECT_ID(N'dbo.AUDIT_LOG_CONTEXT', N'U') IS NULL
-   OR OBJECT_ID(N'dbo.AUDIT_LOG', N'V') IS NULL
-   OR COL_LENGTH(N'dbo.AUDIT_LOG', N'EntityRecordID') IS NULL
-   OR COL_LENGTH(N'dbo.UPR_CLOSURE', N'AncestorUPRID') IS NULL
-    THROW 50004, 'Run the updated scripts/install_upr_audit.sql before loading data.', 1;
-EXEC sys.sp_executesql N'
-    INSERT dbo.UPR_LOAD_RUN (RunID, StartedAt, RunStatus, StartedBy, SessionID)
-    VALUES (@id, SYSDATETIME(), ''RUNNING'', @who, @@SPID);',
-    N'@id UNIQUEIDENTIFIER, @who NVARCHAR(100)', @AuditRunID, @AuditUser;
-SET @RunRecorded = 1;
+/* Core client schema: optional support objects are never bound statically.
+   If an optional object is present but incomplete, report that condition rather
+   than treating corrupted installation metadata as an absent extension. */
+IF OBJECT_ID(N'dbo.AuditLog',N'U') IS NULL
+ OR EXISTS(SELECT 1 FROM (VALUES(N'AuditID'),(N'UPRID'),(N'EntityNameID'),(N'EntityRecordID'),
+    (N'OperationType'),(N'ChangedBy'),(N'ChangedDate'),(N'OldValues'),(N'NewValues')) v(ColumnName)
+    WHERE COL_LENGTH(N'dbo.AuditLog',v.ColumnName) IS NULL)
+ OR COL_LENGTH(N'dbo.REF_ENTITY_IDENTIFICATION',N'EntityID') IS NULL
+ OR COL_LENGTH(N'dbo.REF_ENTITY_IDENTIFICATION',N'EntityName') IS NULL
+ OR COL_LENGTH(N'dbo.UPR_CLOSURE',N'AncestorUPRID') IS NULL
+    THROW 50004,'Expected the client AuditLog columns, entity dictionary and original closure column names. Run check_upr_client_schema.sql for details.',1;
+IF @HasAuditContext=1 AND EXISTS(SELECT 1 FROM
+    (VALUES(N'AuditID'),(N'EntityKey'),(N'RunID'),(N'SessionID'),(N'ChangeSummary')) v(ColumnName)
+    WHERE COL_LENGTH(N'dbo.AUDIT_LOG_CONTEXT',v.ColumnName) IS NULL)
+    THROW 50004,'Existing AUDIT_LOG_CONTEXT has an incomplete layout. No audit migration was attempted.',1;
+IF @HasRunHistory=1 AND EXISTS(SELECT 1 FROM
+    (VALUES(N'RunID'),(N'StartedAt'),(N'FinishedAt'),(N'RunStatus'),(N'StartedBy'),
+     (N'SessionID'),(N'SourceRowsRead'),(N'RejectedRows'),(N'ErrorMessage')) v(ColumnName)
+    WHERE COL_LENGTH(N'dbo.UPR_LOAD_RUN',v.ColumnName) IS NULL)
+    THROW 50004,'Existing UPR_LOAD_RUN has an incomplete layout. No audit migration was attempted.',1;
+IF @ManagedAudit=1 AND (@HasAuditContext=0 OR @HasRunHistory=0
+    OR OBJECT_ID(N'dbo.AUDIT_ENTITY_RECORD',N'U') IS NULL)
+    THROW 50004,'Project audit triggers exist but their support tables are incomplete. Restore that installation; triggers were not disabled.',1;
+IF @HasRunHistory=1
+BEGIN
+    EXEC sys.sp_executesql N'
+        INSERT dbo.UPR_LOAD_RUN (RunID, StartedAt, RunStatus, StartedBy, SessionID)
+        VALUES (@id, SYSDATETIME(), ''RUNNING'', @who, @@SPID);',
+        N'@id UNIQUEIDENTIFIER, @who NVARCHAR(100)', @AuditRunID, @AuditUser;
+    SET @RunRecorded = 1;
+END;
 EXEC sys.sp_set_session_context @key = N'UPR_AuditRunID', @value = @AuditRunID;
 
 PRINT N'================================================================';
@@ -417,7 +447,7 @@ BEGIN
     THROW 50001, @ErrorMessage, 1;
 END;
 
-IF EXISTS (
+IF @ManagedAudit=1 AND EXISTS (
     SELECT 1 FROM sys.tables t
     WHERE t.schema_id = SCHEMA_ID(N'dbo')
       AND t.name IN (N'UPR', N'ADDRESS', N'COMPLEX', N'PROPERTY', N'CONDO',
@@ -433,9 +463,26 @@ IF EXISTS (
                  WHERE ev.object_id = tr.object_id AND ev.type_desc IN (N'INSERT', N'UPDATE', N'DELETE')) = 3
       )
 )
-    THROW 50004, 'Run scripts/install_upr_audit.sql before loading data.', 1;
+    THROW 50004, 'The existing project audit-trigger installation is incomplete. Restore it before loading; no triggers were replaced.', 1;
 
 BEGIN TRANSACTION;
+/* The summary entity is a dictionary entry, not a new table or a guessed ID.
+   Existing IDs remain unchanged. Custom dictionaries without generated IDs must
+   provide the agreed UPR_HIER_LOAD mapping before running the loader. */
+IF NOT EXISTS(SELECT 1 FROM dbo.REF_ENTITY_IDENTIFICATION WITH(UPDLOCK,HOLDLOCK)
+              WHERE EntityName=N'UPR_HIER_LOAD')
+BEGIN
+    IF EXISTS(SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID(N'dbo.REF_ENTITY_IDENTIFICATION')
+        AND name<>N'EntityName' AND is_nullable=0 AND is_identity=0 AND is_computed=0
+        AND default_object_id=0 AND system_type_id<>189)
+        THROW 50004,'Create the agreed UPR_HIER_LOAD entity mapping in the existing dictionary; required fields have no defaults. No ID was guessed.',1;
+    INSERT dbo.REF_ENTITY_IDENTIFICATION(EntityName) VALUES(N'UPR_HIER_LOAD');
+END;
+IF (SELECT COUNT(*) FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName=N'UPR_HIER_LOAD')<>1
+    THROW 50004,'UPR_HIER_LOAD must have one unambiguous entity dictionary mapping.',1;
+SELECT @SummaryEntityID=EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName=N'UPR_HIER_LOAD';
+IF @HasAuditContext=0
+    PRINT N'Client AuditLog mode: batch summary stored in NewValues. Per-row audit coverage depends on existing database triggers; run-scoped row counts are unavailable.';
 /* Reject existing duplicate pairs before loading business rows. Hold these locks
    through Step 12, which ensures pair uniqueness and both index directions after
    any legacy Level backfill. Individual ancestor/descendant IDs are not unique.
@@ -1140,6 +1187,26 @@ GROUP BY s.GroupKey, s.PathType;
 /* Repair a source-proven, single old Condo root in place when MA now proves
    this account is a Complex. Preserve UPR/building/unit IDs and XREFs. Named
    Condos, multiple existing roots, or incompatible Unit links need review. */
+IF OBJECT_ID('tempdb..#ProtectedCondoUPR') IS NOT NULL DROP TABLE #ProtectedCondoUPR;
+CREATE TABLE #ProtectedCondoUPR(UPRID BIGINT NOT NULL PRIMARY KEY);
+IF OBJECT_ID(N'dbo.UPR_CONDO_LEGACY',N'U') IS NOT NULL
+BEGIN
+    IF COL_LENGTH(N'dbo.UPR_CONDO_LEGACY',N'UPRID') IS NULL
+       OR COL_LENGTH(N'dbo.UPR_CONDO_LEGACY',N'CondoName') IS NULL
+        THROW 50004,'Existing Condo archive has an unfamiliar layout; review it before converting Condo roots.',1;
+    EXEC sys.sp_executesql N'INSERT #ProtectedCondoUPR(UPRID)
+        SELECT DISTINCT UPRID FROM dbo.UPR_CONDO_LEGACY WHERE CondoName IS NOT NULL AND UPRID IS NOT NULL;';
+END;
+IF COL_LENGTH(N'dbo.CONDO',N'CondoName') IS NOT NULL
+    EXEC sys.sp_executesql N'INSERT #ProtectedCondoUPR(UPRID)
+        SELECT DISTINCT c.UPRID FROM dbo.CONDO c WHERE c.CondoName IS NOT NULL
+        AND NOT EXISTS(SELECT 1 FROM #ProtectedCondoUPR n WHERE n.UPRID=c.UPRID);';
+/* Without a prior migration, a live Parcel value also needs preservation.
+   Do not delete that subtype row as part of automatic reclassification. */
+IF COL_LENGTH(N'dbo.CONDO',N'Parcel') IS NOT NULL
+    EXEC sys.sp_executesql N'INSERT #ProtectedCondoUPR(UPRID)
+        SELECT DISTINCT c.UPRID FROM dbo.CONDO c WHERE c.Parcel IS NOT NULL
+        AND NOT EXISTS(SELECT 1 FROM #ProtectedCondoUPR n WHERE n.UPRID=c.UPRID);';
 IF OBJECT_ID('tempdb..#CondoToComplex') IS NOT NULL DROP TABLE #CondoToComplex;
 SELECT g.GroupKey, u.UPRID
 INTO #CondoToComplex
@@ -1148,8 +1215,7 @@ INNER JOIN dbo.UPR u ON u.AccountNumber = g.AccountNumber
     AND u.ParentUPRID IS NULL AND u.EntityTypeID = @EtCondo
 INNER JOIN dbo.CONDO d ON d.UPRID = u.UPRID
 WHERE g.PathType = N'COMPLEX'
-  AND NOT EXISTS (SELECT 1 FROM dbo.UPR_CONDO_LEGACY old
-                  WHERE old.UPRID = u.UPRID AND old.CondoName IS NOT NULL)
+  AND NOT EXISTS (SELECT 1 FROM #ProtectedCondoUPR old WHERE old.UPRID = u.UPRID)
   AND (SELECT COUNT(*) FROM dbo.UPR other
        WHERE other.AccountNumber = g.AccountNumber AND other.ParentUPRID IS NULL) = 1
   AND EXISTS (SELECT 1 FROM dbo.EXTERNAL_IDENTIFIER_XREF x
@@ -1170,7 +1236,7 @@ FROM dbo.UPR child INNER JOIN #CondoToComplex r ON r.UPRID = child.ParentUPRID
 INNER JOIN dbo.UNIT un ON un.UPRID = child.UPRID
 INNER JOIN dbo.BUILDING b ON b.BuildingID = un.BuildingID;
 /* Step 7 fills COMPLEX for this reused UPR; Step 12 rebuilds closure/Level.
-   The old Condo subtype and entity/parent changes are retained by audit. */
+   Existing database triggers govern per-row audit retention. */
 
 INSERT INTO dbo.UPRMATCHREVIEW_Q
     (UPRID, IncomingSourceSystem, SDAT_NormalizedIncomingAddress, MA_NormalizedIncomingAddress,
@@ -2295,12 +2361,19 @@ PRINT N'Step 13 complete - status history: ' + CONVERT(NVARCHAR(20), @StatusHist
    ============================================================================ */
 PRINT N'Step 14: AuditLog...';
 
-INSERT INTO dbo.AuditLog (EntityNameID, EntityRecordID, OperationType, ChangedBy, ChangedDate)
-VALUES ((SELECT EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName = N'UPR_HIER_LOAD'),
-    0, N'INSERT', @AuditUser, @Now);
+DECLARE @LoadSummary NVARCHAR(MAX)=(SELECT @AuditRunID AS runId,@@SPID AS sessionId,
+    N'UPR_HIER_LOAD' AS eventType,@MARead+@SDATRead AS sourceRowsRead,@InvalidRows AS rejectedRows,
+    @ParentInserted AS parentsInserted,@ComplexInserted AS complexesInserted,
+    @PropertyInserted AS propertiesInserted,@CondoInserted AS condosInserted,
+    @BuildingInserted AS buildingsInserted,@UnitInserted AS unitsInserted,
+    @AddressInserted AS addressesInserted,@ContactInserted AS contactsInserted,
+    @XrefInserted AS identifiersInserted,@ReviewInserted AS reviewRowsInserted,@ClosureRows AS closureRows
+    FOR JSON PATH,WITHOUT_ARRAY_WRAPPER);
+INSERT INTO dbo.AuditLog (EntityNameID, EntityRecordID, OperationType, ChangedBy, ChangedDate, NewValues)
+VALUES (@SummaryEntityID,0,N'INSERT',@AuditUser,@Now,@LoadSummary);
+SET @AuditInserted = @@ROWCOUNT;
 DECLARE @SummaryAuditID INT = CONVERT(INT, SCOPE_IDENTITY());
-INSERT INTO dbo.AUDIT_LOG_CONTEXT (AuditID, EntityKey, ChangeSummary, RunID, SessionID)
-VALUES (@SummaryAuditID, N'BATCH',
+DECLARE @SummaryText NVARCHAR(2000) =
      N'Parents=' + CONVERT(NVARCHAR(20), @ParentInserted)
      + N'; Complex=' + CONVERT(NVARCHAR(20), @ComplexInserted)
      + N'; Property=' + CONVERT(NVARCHAR(20), @PropertyInserted)
@@ -2313,13 +2386,31 @@ VALUES (@SummaryAuditID, N'BATCH',
      + N'; ReviewQ=' + CONVERT(NVARCHAR(20), @ReviewInserted)
      + N'; Closure=' + CONVERT(NVARCHAR(20), @ClosureRows)
      + N'; Classification=MA-FIRST-2026-09-15; Parcel=OPTIONAL-PARCEL-2026-09-16'
-     + N'; Coordinates=SOURCE-PAIR-2026-09-16; Duplicates=MA-SDAT-OVERLAP-2026-09-23', @AuditRunID, @@SPID);
-SET @AuditInserted = @@ROWCOUNT;
-
-UPDATE dbo.UPR_LOAD_RUN
-SET RunStatus = 'COMPLETED', FinishedAt = SYSDATETIME(),
-    SourceRowsRead = @MARead + @SDATRead, RejectedRows = @InvalidRows
-WHERE RunID = @AuditRunID;
+     + N'; Coordinates=SOURCE-PAIR-2026-09-16; Duplicates=MA-SDAT-OVERLAP-2026-09-23';
+IF @HasAuditContext=1
+    EXEC sys.sp_executesql N'INSERT dbo.AUDIT_LOG_CONTEXT(AuditID,EntityKey,ChangeSummary,RunID,SessionID)
+        VALUES(@audit,N''BATCH'',@summary,@run,@@SPID);',
+        N'@audit INT,@summary NVARCHAR(2000),@run UNIQUEIDENTIFIER',@SummaryAuditID,@SummaryText,@AuditRunID;
+DECLARE @SourceRowsRead INT=@MARead+@SDATRead;
+IF @RunRecorded=1
+    EXEC sys.sp_executesql N'UPDATE dbo.UPR_LOAD_RUN
+        SET RunStatus=''COMPLETED'',FinishedAt=SYSDATETIME(),SourceRowsRead=@read,RejectedRows=@rejected
+        WHERE RunID=@id;',N'@read INT,@rejected INT,@id UNIQUEIDENTIFIER',
+        @read=@SourceRowsRead,@rejected=@InvalidRows,@id=@AuditRunID;
+/* Never infer run ownership from an AuditID range: other sessions can write
+   concurrently. Row attribution is available only through existing context. */
+IF OBJECT_ID('tempdb..#RunAuditRows') IS NOT NULL DROP TABLE #RunAuditRows;
+CREATE TABLE #RunAuditRows(AuditID INT NOT NULL PRIMARY KEY,RunID UNIQUEIDENTIFIER,
+    EntityName NVARCHAR(100),EntityKey NVARCHAR(200),OperationType NVARCHAR(20),
+    ChangedDate DATETIME2(7),ChangedBy NVARCHAR(100),OldValues NVARCHAR(MAX),NewValues NVARCHAR(MAX));
+IF @HasAuditContext=1
+BEGIN
+    EXEC sys.sp_executesql N'INSERT #RunAuditRows
+        SELECT a.AuditID,c.RunID,e.EntityName,c.EntityKey,a.OperationType,a.ChangedDate,a.ChangedBy,a.OldValues,a.NewValues
+        FROM dbo.AuditLog a JOIN dbo.AUDIT_LOG_CONTEXT c ON c.AuditID=a.AuditID
+        LEFT JOIN dbo.REF_ENTITY_IDENTIFICATION e ON e.EntityID=a.EntityNameID
+        WHERE c.RunID=@run;',N'@run UNIQUEIDENTIFIER',@AuditRunID;
+END;
 COMMIT TRANSACTION;
 EXEC sys.sp_set_session_context @key = N'UPR_AuditRunID', @value = @PreviousAuditRun;
 
@@ -2397,23 +2488,30 @@ FROM #Stage s
 GROUP BY s.SourceSystem, s.PathType, s.IsValid, s.ReviewReason
 ORDER BY s.SourceSystem, Outcome, s.PathType, ReviewReason;
 
-/* Row changes this run, one line per table (details: list_upr_audit.sql). */
+/* Row-change totals are available only with existing run context. */
+IF @HasAuditContext=1
+BEGIN
 SELECT TableName, RowsInserted, RowsUpdated, RowsDeleted
 FROM (
     SELECT SortGroup = 0, TableName = EntityName,
         RowsInserted = SUM(CASE WHEN OperationType = 'INSERT' THEN 1 ELSE 0 END),
         RowsUpdated = SUM(CASE WHEN OperationType = 'UPDATE' THEN 1 ELSE 0 END),
         RowsDeleted = SUM(CASE WHEN OperationType = 'DELETE' THEN 1 ELSE 0 END)
-    FROM dbo.AUDIT_LOG WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD'
+    FROM #RunAuditRows WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD'
     GROUP BY EntityName
     UNION ALL
     SELECT 1, N'TOTAL',
         COALESCE(SUM(CASE WHEN OperationType = 'INSERT' THEN 1 ELSE 0 END), 0),
         COALESCE(SUM(CASE WHEN OperationType = 'UPDATE' THEN 1 ELSE 0 END), 0),
         COALESCE(SUM(CASE WHEN OperationType = 'DELETE' THEN 1 ELSE 0 END), 0)
-    FROM dbo.AUDIT_LOG WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD'
+    FROM #RunAuditRows WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD'
 ) t
 ORDER BY SortGroup, TableName;
+
+END;
+ELSE
+    SELECT AuditDetailStatus=N'NOT_AVAILABLE',
+        Reason=N'No audit context installed. Batch summary is in AuditLog.NewValues; per-row history depends on existing client triggers.';
 
 IF @ShowDetailResults = 1
 BEGIN
@@ -2426,9 +2524,10 @@ BEGIN
     FROM #Stage s LEFT JOIN #AcctAddrCnt a ON a.AccountNumber = s.AccountNumber
     ORDER BY s.AccountNumber, s.SourceSystem, s.SourceRecordID;
 
+    IF @HasAuditContext=1
     SELECT AuditID, RunID, EntityName AS TableName, EntityKey AS RecordKey,
         OperationType AS Action, ChangedDate, ChangedBy, OldValues, NewValues
-    FROM dbo.AUDIT_LOG WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD'
+    FROM #RunAuditRows WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD'
     ORDER BY AuditID;
 END;
 

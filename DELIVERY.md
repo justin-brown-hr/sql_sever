@@ -1,6 +1,7 @@
-> Latest October 2 delivery: [main loader and closure indexes](CLIENT_MAIN_LOADER_2026-10-02.md).
-> Send `UPR_Main_Loader_2026-10-02.zip` for the requested full main-script test.
-> It contains exactly the main loader and read-only verification script.
+> Latest October 2 R2 delivery: [client schema correction and closure indexes](CLIENT_MAIN_LOADER_2026-10-02.md).
+> Send `UPR_Main_Loader_2026-10-02_R2.zip` for the requested full main-script test.
+> It contains the read-only schema diagnostic, corrected main loader and closure verification.
+> No optional audit-support installation is required. Existing triggers remain in place.
 
 The notes below describe historical deliveries. Obsolete closure-test ZIPs and
 superseded client messages were removed during cleanup. The earlier complete

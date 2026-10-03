@@ -1,4 +1,54 @@
-# Latest continuation — main loader and index delivery, October 2, 2026
+# Additional review — October 2 R2 package rechecked
+
+User requested a deeper review to prevent another schema-error delivery.
+Microsoft .NET8 SDK installed under /tmp/upr-dotnet and pinned ScriptDom
+161.9142.1 downloaded to /tmp/upr-scriptdom.nupkg. Approved network downloads;
+no DB installed/accessed. Reusable syntax validator in test/tsql_parser/, build
+outputs ignored. Microsoft parser passed 22 current SQL files and12 literal
+dynamic batches (eight in loader). This is parsing, NOT SQL Server execution or
+schema binding. Native/enhanced SQL Server integration still pending.
+
+Read-only schema diagnostic expanded to170 columns/26 tables (core+optional),
+all actual layouts/constraints/triggers. Dependency regression checks every core
+table and INSERT/MERGE target column is covered. INSERT checker fixed to include
+optional-INTO syntax:51 INSERTs,5 MERGEs,5 OUTPUTs,37 SELECT arities pass.
+No new loader change in this review. R2 ZIP rebuilt with stronger diagnostic;
+three files only and byte-verified. Guide/client message updated in place.
+New native-layout integration test also checks missing-source-column diagnostic
+and now substitutes all fixture DB references, avoiding a fixed-name extra DB.
+Offline closure/index/hierarchy/runner checks and syntax tests passed again.
+
+---
+
+# Latest continuation — native client schema correction, October 2 R2
+
+Client screenshots show 46 editor diagnostics, with missing UPR_CONDO_LEGACY,
+AUDIT_LOG_CONTEXT, UPR_LOAD_RUN and AUDIT_LOG view. Full diagnostics/execution
+Messages were requested but not received. Do not claim all 46 were reproduced.
+
+Main loader now supports the existing nine-column AuditLog/dictionary without
+these extensions. Guards/dynamic SQL handle optional archive/context/run history;
+no AUDIT_LOG view use. Preserves existing triggers/history; incomplete installed
+project audit triggers fail clearly. Native batch JSON goes into NewValues,
+UPR_HIER_LOAD dictionary entry reused/seeded with generated ID only, RecordID0
+means batch. No added permanent audit tables or AuditLog columns. No native
+run-scoped row totals are fabricated. Live CondoName/Parcel protects conversion
+when archive absent. Closure distances/index behavior remains as below.
+
+Current delivery: UPR_Main_Loader_2026-10-02_R2.zip, exactly schema diagnostic,
+main loader and closure verifier. Previous October2 ZIP archived unchanged.
+Existing October2 guide/client message rewritten for R2. No client message sent.
+
+Dependency/Condo-protection, schema, hierarchy, runner, syntax, diff and offline
+closure/index checks passed (229 nodes/6068 paths). New native-layout SQL Server
+integration test prepared and appended to run_local_it.sh, NOT executed: no
+SQL Server/docker/sqlcmd runtime. No client DB accessed. Actual schema/results
+still required to confirm all client diagnostics. Pending async request asks for
+Errors/Messages and AuditLog/dictionary/CONDO definitions; do not block packaging.
+
+---
+
+# Previous continuation — main loader and index delivery, October 2, 2026
 
 Cleanup requested by user: removed 16 obsolete draft snapshots, four superseded
 closure client messages, one obsolete test guide and two obsolete closure ZIPs

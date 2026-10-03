@@ -1,5 +1,9 @@
 # Client AuditLog layout — September 24, 2026
 
+> October 2 R2: the [current main loader](CLIENT_MAIN_LOADER_2026-10-02.md) supports
+> the existing nine-column AuditLog without this optional enhanced-audit installation.
+> The migration instructions below describe the earlier full release.
+
 This is work 3 in the combined delivery: (1) search specification update,
 (2) EntityKey explanation/readable report, and (3) the newly supplied AuditLog
 layout. None of this combined delivery has been sent to the client by this tool.
