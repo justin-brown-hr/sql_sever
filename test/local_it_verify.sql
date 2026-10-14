@@ -56,7 +56,7 @@ WHERE e.Description IN ('Complex', 'Property', 'Condo')
 INSERT #R VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
                   'Every parent UPR has a CONTACT', CONVERT(VARCHAR(20), @n) + ' without contact');
 
-/* ---- 5. every Unit is under a Building or Condo, with a BuildingID ------- */
+/* ---- 5. every Unit is under its linked Building, with a BuildingID ------- */
 SELECT @n = COUNT(*) FROM dbo.UNIT WHERE BuildingID IS NULL;
 INSERT #R VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
                   'Every UNIT has a BuildingID', CONVERT(VARCHAR(20), @n) + ' null');
@@ -66,9 +66,11 @@ FROM dbo.UNIT n
 INNER JOIN dbo.UPR u ON u.UPRID = n.UPRID
 LEFT JOIN dbo.UPR pu ON pu.UPRID = u.ParentUPRID
 LEFT JOIN dbo.REF_ENTITYTYPE pe ON pe.EntityTypeID = pu.EntityTypeID
-WHERE pe.Description NOT IN ('Building', 'Condo') OR pe.Description IS NULL;
+LEFT JOIN dbo.BUILDING linked ON linked.BuildingID=n.BuildingID
+WHERE pe.Description <> 'Building' OR pe.Description IS NULL
+   OR linked.UPRID IS NULL OR u.ParentUPRID<>linked.UPRID;
 INSERT #R VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
-                  'Unit parent is Building or Condo', CONVERT(VARCHAR(20), @n) + ' bad parents');
+                  'Unit parent matches its linked Building', CONVERT(VARCHAR(20), @n) + ' bad parents');
 
 /* ---- 6. Complex rule: MULTI/APT + account + 2+ addresses ----------------- */
 SELECT @n = COUNT(*) FROM dbo.COMPLEX;

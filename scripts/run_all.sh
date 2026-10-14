@@ -4,7 +4,8 @@
 # Usage:   ./scripts/run_all.sh [server] [user] [password] [--real-data|--sample-data]
 # Example: ./scripts/run_all.sh localhost sa 'YourStrong!Passw0rd'
 #
-# Default upgrades the existing schema without resetting tables.
+# Default loads the existing schema without resetting tables.
+# R8 captures row audit in the main loader; do not install legacy JSON triggers.
 # Use --sample-data only for a disposable database: it recreates the schema.
 # Load real incoming data into dbo.MAIncomingTableX1 / dbo.SDATIncomingTableX1 first.
 
@@ -41,9 +42,7 @@ if [[ "$MODE" == "--sample-data" ]]; then
     run "test/local_it_setup.sql"        # incoming tables + sample data
     run "ddl/03_new_upr_schema.sql"      # disposable schema (drop + create)
 fi
-run "scripts/install_upr_audit.sql"      # row auditing for UPR model writes
 run "scripts/load_upr_master.sql"        # the load
-run "scripts/list_upr_audit.sql"         # load history and row/field changes
 run "test/run_test_and_results.sql"      # validation report
 run "scripts/search_upr_master.sql"      # install search and Property360 procedures
 echo "Pipeline complete."

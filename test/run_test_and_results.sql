@@ -8,7 +8,7 @@
 
   Steps for a real-data test:
     1. Load YOUR data into dbo.MAIncomingTableX1 and dbo.SDATIncomingTableX1
-    2. Run scripts/install_upr_audit.sql (migrate existing schema/install auditing)
+    2. Run scripts/check_upr_client_schema.sql; review any missing columns or audit writers.
     3. Run scripts/load_upr_master.sql
     4. Run THIS script to review results
     For an empty disposable database only, create the DDL before step 2.
@@ -51,7 +51,7 @@ SELECT
     XREF_Links     = (SELECT COUNT(*) FROM dbo.EXTERNAL_IDENTIFIER_XREF),
     Review_Queue   = (SELECT COUNT(*) FROM dbo.UPRMATCHREVIEW_Q),
     StatusHistory  = (SELECT COUNT(*) FROM dbo.UPRSTATUSHISTORY),
-    AuditLog_Rows  = (SELECT COUNT(*) FROM dbo.AUDIT_LOG);
+    AuditLog_Rows  = (SELECT COUNT(*) FROM dbo.AuditLog);
 
 /* ============================================================
    SECTION 2 - RECORDS BY ENTITY AND PROPERTY TYPE
@@ -153,21 +153,22 @@ WHERE NOT EXISTS (
     INNER JOIN dbo.UPR parent ON parent.UPRID = u.ParentUPRID
     INNER JOIN dbo.REF_ENTITYTYPE pe ON pe.EntityTypeID = parent.EntityTypeID
     WHERE b.BuildingID = un.BuildingID AND be.Description = 'Building'
-      AND ((pe.Description = 'Building' AND parent.UPRID = bu.UPRID)
-        OR (pe.Description = 'Condo' AND parent.UPRID = bu.ParentUPRID))
+      AND pe.Description = 'Building' AND parent.UPRID = bu.UPRID
 );
 INSERT #V VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
     'Every Unit has the correct Building link', CONVERT(VARCHAR(20), @n) + ' invalid links');
 
-/* unit parent must be Building or Condo */
+/* unit parent must be its linked Building */
 SELECT @n = COUNT(*)
 FROM dbo.UNIT n
 INNER JOIN dbo.UPR u ON u.UPRID = n.UPRID
 LEFT JOIN dbo.UPR pu ON pu.UPRID = u.ParentUPRID
 LEFT JOIN dbo.REF_ENTITYTYPE pe ON pe.EntityTypeID = pu.EntityTypeID
-WHERE pe.Description NOT IN ('Building', 'Condo') OR pe.Description IS NULL;
+LEFT JOIN dbo.BUILDING linked ON linked.BuildingID=n.BuildingID
+WHERE pe.Description <> 'Building' OR pe.Description IS NULL
+   OR linked.UPRID IS NULL OR u.ParentUPRID<>linked.UPRID;
 INSERT #V VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
-    'Unit parents are Building or Condo', CONVERT(VARCHAR(20), @n) + ' bad parents');
+    'Unit parents match their linked Building', CONVERT(VARCHAR(20), @n) + ' bad parents');
 
 /* no duplicate building address under the same parent */
 SELECT @n = COUNT(*)
@@ -225,25 +226,16 @@ INSERT #V VALUES (CASE WHEN @n=9 AND COL_LENGTH(N'dbo.AuditLog',N'AuditID')=4
     AND COLUMNPROPERTY(OBJECT_ID(N'dbo.AuditLog'),N'AuditID','IsIdentity')=1
     THEN 'PASS' ELSE 'FAIL' END,
     'Client AuditLog physical layout', CONVERT(VARCHAR(20),@n)+' of 9 columns; INT identity AuditID');
-INSERT #V VALUES (CASE WHEN OBJECT_ID(N'dbo.AUDIT_LOG',N'V') IS NOT NULL
-    AND OBJECT_ID(N'dbo.AUDIT_LOG_CONTEXT',N'U') IS NOT NULL THEN 'PASS' ELSE 'FAIL' END,
-    'Audit context and read compatibility view', 'Technical metadata is separate from main AuditLog');
 SELECT @n=COUNT(*) FROM dbo.AuditLog a WHERE NOT EXISTS(
     SELECT 1 FROM dbo.REF_ENTITY_IDENTIFICATION e WHERE e.EntityID=a.EntityNameID);
 INSERT #V VALUES (CASE WHEN @n=0 THEN 'PASS' ELSE 'FAIL' END,
     'Audit entity IDs have name mappings', CONVERT(VARCHAR(20),@n)+' unmapped entity IDs');
 
-/* Auditing must cover writes outside the loader as well as batch summaries. */
-SELECT @n = COUNT(*) FROM sys.triggers tr
-WHERE tr.name = N'tr_UPR_Audit_' + OBJECT_NAME(tr.parent_id) AND tr.is_disabled = 0
-  AND OBJECT_DEFINITION(tr.object_id) LIKE N'%UPR_AuditRunID%'
-  AND (SELECT COUNT(*) FROM sys.trigger_events ev WHERE ev.object_id = tr.object_id
-       AND ev.type_desc IN (N'INSERT', N'UPDATE', N'DELETE')) = 3;
-INSERT #V VALUES (CASE WHEN @n = 23 THEN 'PASS' ELSE 'FAIL' END,
-    'Persistent row audit triggers installed', CONVERT(VARCHAR(20), @n) + ' of 23 UPR model/reference tables');
-SELECT @n = COUNT(*) FROM dbo.AUDIT_LOG WHERE EntityName <> 'UPR_HIER_LOAD';
-INSERT #V VALUES (CASE WHEN @n > 0 THEN 'PASS' ELSE 'N/A' END,
-    'Individual row audit events recorded', CONVERT(VARCHAR(20), @n) + ' events since audit installation');
+/* R8 records loader changes directly; no audit context/trigger installer is required. */
+SELECT @n=COUNT(*) FROM dbo.AuditLog a JOIN dbo.REF_ENTITY_IDENTIFICATION e ON e.EntityID=a.EntityNameID
+WHERE e.EntityName<>N'UPR_HIER_LOAD';
+INSERT #V VALUES(CASE WHEN @n>0 THEN 'PASS' ELSE 'N/A' END,
+    'Individual row audit events recorded',CONVERT(VARCHAR(20),@n)+' events; use check_upr_audit_result.sql for a specific run');
 
 SELECT Result, CheckName, Detail FROM #V ORDER BY Seq;
 

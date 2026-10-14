@@ -301,8 +301,8 @@ ALTER TABLE dbo.UPR_CLOSURE DROP COLUMN [Level];
     assert verify() == before, "Upgrade changed the existing hierarchy"
     sql(f"""
 IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID('dbo.UPR_CLOSURE')
-           AND name = 'Level' AND (is_nullable = 1 OR TYPE_NAME(user_type_id) <> 'int'))
-    THROW 51002, 'Upgrade did not enforce Level INT NOT NULL.', 1;
+           AND name = 'Level' AND (is_nullable <> 1 OR TYPE_NAME(user_type_id) <> 'int'))
+    THROW 51002, 'Legacy-added Level should retain its nullable INT definition.', 1;
 IF (SELECT COUNT(*) FROM dbo.AUDIT_LOG WHERE AuditID > {last}
     AND EntityName = 'UPR_CLOSURE' AND OperationType = 'UPDATE') <> {len(before)}
     THROW 51003, 'Existing closure level backfill was not fully audited.', 1;
@@ -355,6 +355,14 @@ IF (SELECT COUNT(DISTINCT OperationType) FROM dbo.AUDIT_LOG WHERE AuditID > {las
     sql("UPDATE dbo.UPR_CLOSURE SET [Level] = 99;")
     load()
     assert verify() == after
+    sql("UPDATE dbo.UPR_CLOSURE SET [Level] = -1;")
+    load()
+    assert verify() == after, 'Negative distances were not repaired'
+    # A client-installed constraint must be preserved, but not installed by load.
+    sql('ALTER TABLE dbo.UPR_CLOSURE ADD CONSTRAINT CK_UPR_CLOSURE_Level CHECK([Level]>=0);')
+    constraint_id=sql("SELECT OBJECT_ID(N'dbo.CK_UPR_CLOSURE_Level');")
+    load()
+    assert sql("SELECT OBJECT_ID(N'dbo.CK_UPR_CLOSURE_Level');")==constraint_id
     result = sql("UPDATE dbo.UPR_CLOSURE SET [Level] = -1;", expect_error=True)
     assert "CK_UPR_CLOSURE_Level" in result
     print("PASS: incorrect levels are repaired and negative levels are rejected")

@@ -1,3 +1,6 @@
+> Superseded by [October 6 R8](CLIENT_MAIN_LOADER_2026-10-06.md).
+> The latest client layout uses NewValue, singular; do not send the R2 ZIP.
+
 # Main loader R2 — client schema correction, October 2, 2026
 
 Send `UPR_Main_Loader_2026-10-02_R2.zip`. It replaces the earlier October 2 ZIP,

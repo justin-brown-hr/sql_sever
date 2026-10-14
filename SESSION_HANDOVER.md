@@ -1,3 +1,252 @@
+# Current — October 13 full-record listing
+
+Client wants the existing UPRID/account/owner/address/building/unit listing sent in
+Freelancer. Updated scripts/list_upr_hierarchy.sql and packaged its identical dated
+copy in UPR_Full_Records_2026-10-13.zip (one SQL file). Guide CLIENT_FULL_RECORDS_2026-10-13.md.
+No upload/message sent to Freelancer; user must attach file there.
+
+Report retains SSMS database selection, removes missing UPR_CONDO_LEGACY dependency,
+late-binds optional ADU/BuildingNumber columns, carries root account/ancestor owner
+with source UPRIDs, handles personal OWNER contacts separately from agent contacts,
+current address fallbacks with provenance, linked Building fields on Units, all
+address/contact associations in extra grids. No invented building number, no JSON,
+no permanent mutations. Default includes unresolved UPRs with unknown root/level.
+R9 hierarchy checks flag direct Condo units; report displays actual ParentUPRID depth.
+Existing closure is used for inheritance and must be consistent with ParentUPRID.
+
+New test/check_full_listing_offline.py tests actual SQL fragments with SQLite dialect
+translation. Parser and offline tests pass; no SQL Server runtime/performance test.
+Updated check_hierarchy_listing fixture for absent legacy/ADU, explicit database and
+R9 unit rules. check_sept17_review invokes report with database context now that USE
+is removed. Loader/search/demo unchanged. Earlier uncommitted changes preserved.
+Prior R9 source binding issue is separate and unresolved pending actual source names;
+scripts/check_r9_source_binding.sql remains the diagnostic. Do not claim it fixed.
+
+---
+
+# Current — October 8 R9 Condo unit hierarchy
+
+Client screenshots: first Condo24/account00118285, Building147901 parent24,
+Unit345168 parent24/level1; second Complex24/account02688618 with Units207074/5
+under Buildings88787/8. Different records despite same UPRID24. Archived R4 and R8
+BOTH have direct Condo->Unit rule; this is not demonstrated R8-only regression.
+Latest client requirement Unit at root level2 supersedes old Condo-specific rule.
+
+Main now R9: new units all parent=BuildingUPRID; duplicate repair uses Building
+parents too. Existing direct Condo units repaired after Step1 ref IDs, before source
+reuse, via UNIT.BuildingID. Guard exactlyoneUNIT, existsBuildingUPR/rightEntityType,
+same rootCondo, leafUnit. Wrong links return diagnostic+rollback, no ID guessing.
+UPRParent/UpdatedBy/UpdatedDate change only for repair; native IDs/XREFs preserved.
+Audited OUTPUT copies R8 text encoding. Added repair-count statistic. NormalStep12
+rebuilds true pairdistances, no closure schema/type alterations. Main63auditedwrites.
+
+New scripts/check_upr_unit_hierarchy.sql verifies ALL units match linked Building
+and root distances2, building1, self0. Root24 details show database/account/type.
+New test/check_condo_unit_parent.py executes actualcandidate/querychecker inSQLite;
+valid/invalid mappings/idempotency/IDs/links tested. Existing native SQLServerfixture
+extended for repairaudit/reruns but NOT RUN. Existing static/schema/dependency,
+closure/index, auditimage/batches, demo, runner, parserchecks PASS. AST comparison
+against transformedR8 confirms unchanged existingbusinessDML except intendedrule;
+newrepair separatelychecked. NoSQLServerruntime or throughputvalidation available.
+
+Delivery UPR_Main_Loader_2026-10-08_R9.zip EXACTLY TWO files: datedcomplete main plus
+unitchecker. R8ZIP archived unchanged. Guide CLIENT_MAIN_LOADER_2026-10-08.md.
+Existing R8audit/schema/fullclosurecheckscripts remainapplicable; not resent.
+Search/Property360demo unchanged, remainsseparatecurrentone-fileZIP. No commits.
+TemporarybeforeR9baseline /tmp/upr-r8-before-r9.sql; auditexport /tmp/upr-r9-outputs.json;
+renderedsql /tmp/upr-r9-sql. Do not rerun /tmp/upr_r9_edit.py one-shot edits.
+
+---
+
+# Current — October 8 Search Example / Property 360 demo
+
+Read /home/user/Downloads/Search Example.docx text and all three embedded diagrams.
+Client asks for demo searches by address/account/parcel/owner/unit/MPDU/loans/case/
+license, explicit UPRIDs and full property context. User answered missing-source
+question: use existing external identifiers and clearly mark details unavailable.
+
+Added scripts/demo_upr_property360.sql: standalone read-only SSMS script, modes
+SEARCH/360/SOURCES, no USE/installation/permanent DML/JSON. Exact core-column
+metadata checks before fixed parameterized dynamic batch compiles. Duplicate
+addresses remain separate by UPRID/type; current address and OWNER contact links;
+physical display priority; source/type pairs required for external-category search.
+MPDU/loans permit NULL value to list loaded links for confirmed pair. Missing
+regulatory/program details explicitly unavailable, no guessed statuses. Whole tree
+from root found by actual ParentUPRID upward traversal; selected unit remains
+labeled, cycle/orphan/node/depth guards. Core properties, addresses, contacts,
+external links, status history in readable numbered grids. No AuditLog reads.
+Authorized staff SSMS only, not a public API or new authorization mechanism.
+
+Client file demo_upr_property360_2026-10-08.sql in one-file ZIP
+UPR_Search_Property360_Demo_2026-10-08.zip. Guide CLIENT_SEARCH_DEMO_2026-10-08.md.
+R8 loader package remains current separately; no loader/search/API edits this turn.
+New test/check_demo_property360.py extracts actual dynamic SQL and tests actual
+search, address preparation and tree expansion in SQLite. All16tables/requiredcols
+match projectDDL. Microsoft ScriptDom outer+inner batch parse pass. SQL Server
+execution and performance NOT tested: no runtime/client connection available.
+
+---
+
+# Current — October 6 R8 native readable row auditing
+
+Client needs written AuditLog before a 200,000-record test, UPR written counts,
+and no new JSON table values. User explicitly answered: preserve historical audit
+values; new entries/results readable. This supersedes old trigger-install guidance.
+
+Main loader now captures all 62 business DML statements across 19 tables through
+OUTPUT into session temp tables and writes native AuditLog events in 10,000-row
+batches. Native numeric record keys and UPR associations are retained. Closure
+uses DescendantUPRID as EntityRecordID with complete pair in text. Inserts have
+new image, deletes old image, updates both; images cover loader-known columns.
+Readable RunID prefix and batch summary; history untouched. No permanent support
+tables, trigger install/disable, or closure type/nullability changes. Conflicting
+audit/JSON-writing or unreadable triggers are reported before business loading.
+Twenty dictionary mappings resolved/validated without renumbering existing IDs.
+UPR inserted/updated/deleted, distinct written and total database counts included.
+Audits and business DML share the main transaction. No auditing of future API writes.
+
+Current package: UPR_Main_Loader_2026-10-06_R8.zip, exactly four SQL files:
+schema diagnostic, dated complete loader, check_upr_audit_result.sql (paste printed
+RunID), closure check. R7 archived unchanged. CRC and source equality verified.
+Current guide: CLIENT_MAIN_LOADER_2026-10-06.md. Runner no longer installs legacy
+audit extensions. Earlier installer/context suites retained for history only.
+
+Validation PASS: dependencies/dictionary/audit metadata; schema contract; hierarchy
+static checks; closure paths/index predicates; runner modes; shell/Python syntax;
+git diff whitespace. Microsoft ScriptDom parsed 12 SQL files including rendered
+dynamic payload variants, 4 literal dynamic batches, zero errors. AST validates
+62 OUTPUT captures/19 tables and proves business DML unchanged from R7 after
+removing audit OUTPUT. Actual text expressions tested for NULL, quotes, backslashes,
+CR/LF, Unicode and long values. SQLite test wrote 200,000 synthetic audit events
+exactly once in 20 batches. This is NOT a SQL Server load/performance test.
+
+SQL Server integration/stress fixtures prepared but NOT RUN (no server/docker or
+client connection). Native fixture includes history preservation, IDs, repeats,
+trigger conflict, audit failure rollback, closure repair; optional
+UPR_STRESS_ROWS=200000 adds 200,000 MA rows and expects 222,000 new UPRs. Client test
+still required. Never claim zero runtime errors or 200k source benchmark passed.
+
+Offline commands: python3 test/check_client_schema_dependencies.py --audit-sql-dir
+/tmp/upr-r8-sql; test/tsql_parser supports --audit-coverage main DDL baseline export.
+Local .NET is /tmp/upr-dotnet/dotnet. ScriptDom build requires -p:ScriptDomPath=
+/tmp/upr-dml-inspect/bin/Debug/net8.0/Microsoft.SqlServer.TransactSql.ScriptDom.dll.
+R7 baseline /tmp/upr-r7-before.sql; export /tmp/upr-r8-outputs.json consumed by
+python3 test/check_readable_audit_offline.py. Do not rerun one-shot /tmp generation
+scripts. No commits made. Previous uncommitted corrections preserved.
+
+---
+
+# Latest — October 6 R7 repeat review
+
+User requested another review to prevent repeat failures. Reviewed dictionary,
+audit insert, closure, reference-ID guards and transactions. Added audit metadata
+preflight for omitted required no-default columns, INT IDENTITY AuditID and
+non-writable target columns. Added persisted-summary verification before marking
+audit insert successful/commit. No hierarchy/schema/index/trigger changes.
+Current package UPR_Main_Loader_2026-10-06_R7.zip, same 3 files; R6 archived.
+Guide CLIENT_MAIN_LOADER_2026-10-06.md updated in place. All local tests/parser
+pass. New actual SQLServer preflight/layout and deleted-summary rollback cases
+PREPARED NOT RUN; no SQLServer/database connection. Async question asks for
+client REF_ENTITY_IDENTIFICATION metadata and AuditMappingCheck results, pending.
+
+---
+
+# Latest — October 6 R6 NULL audit EntityNameID
+
+Client reaches Step14 and gets error515 for NULL AuditLog.EntityNameID after
+closure/status steps. Found real loader defect: manual nullable EntityID omitted
+by seed (old metadata predicate considered only NOT NULL), with no subsequent
+NULL check. Exact client dictionary/default/trigger state still unconfirmed.
+R6 supplies manual INT key regardless nullability; repairs only one existing
+UPR_HIER_LOAD NULL manual key (no default/identity/computed), preserving non-NULL
+IDs. Table lock/MAX+1 allocation retained. Generated/default NULL or ambiguous
+name/ID stops before business loading. Mapping rechecked before summary INSERT.
+CATCH now exposes ErrorProcedure/SummaryEntityID. Read-only diagnostic adds
+actual mapping, duplicate-ID report and nullable-key metadata. No closure changes.
+
+Current ZIP UPR_Main_Loader_2026-10-06_R6.zip; guide CLIENT_MAIN_LOADER_2026-10-06.md.
+R5 archived unchanged. ZIP only schema diagnostic, dated R6 main, closure checker.
+Local nullable-key/audit regression, schema/dependency/closure/index checks and
+Microsoft ScriptDom pass. Actual SQLServer tests for nullable keys/defaults/
+duplicates/key-clearing trigger are PREPARED NOT RUN; no server/docker/sqlcmd.
+Do not assert all client runtime errors fixed. Ask for dictionary diagnostic
+results/error procedure if failure persists, not another guessed schema change.
+
+---
+
+# Latest — October5 R5 indexed nullable closure Level
+
+Client now reachesStep12; errors5074/4922 at ALTER COLUMN Level INT NOT NULL,
+IX_UPR_CLOSURE_Ancestor depends on Level. Removed existing-column alteration and
+new closureCHECK creation from MAIN. Existing type/nullability/indexes/constraints
+preserved. Data sync stillfillsNULL/incorrect pairdistances; postcheck rejectsNULL
+ornegative values. Requested pair/reverseindexes stillensured. Legacy missingLevel
+ADD INT NULL remains (onlywhenabsent). Do notdropclientindex to workaround.
+
+MainCATCH rollsbackmaintransaction; helper/missing-columnprebatchesoutside it.
+Tellclient rerunwholecorrectedfile. R5 ZIP contains datedR5main andsame2checkers;
+R4archived. GuideOctober5updatedinplace. All earlieraudit/dictionaryfixesretained.
+Staticdependencytest now rejectsALTERCOLUMN/newclosureCHECK/DROPINDEXinmain.
+NativeclientSQLintegrationnowhasnullableLevel+ancestorINCLUDE(Level), asserts
+schema/indexmetadataunchanged andNULLrepaironsecondload. Legacytestexpectnullable
+addedLevel andrepairsnegativevalues/preservesclientCHECK. IntegrationUNEXECUTED.
+Local schema/dependency/index/closuretests andScriptDomsyntaxpassed; noDBaccess.
+
+---
+
+# Latest — October5 R4 dictionary seed error50004
+
+Client execution screenshot now reaches Step0 and throws our dictionary guard:
+UPR_HIER_LOAD absent + required fields without defaults. Exact missing fields
+not visible; async request asks for REF_ENTITY_IDENTIFICATION physical-layout
+results. R3 overly restricted known metadata fields. R4 corrects that logic.
+
+Seed now supplies required/no-default EntityDescription,IsActive1,CreatedDate,
+CreatedBy; honors existing defaults/identity. Manual required INT EntityID gets
+MAX+1 under TABLOCKX,HOLDLOCK (empty/nonpositive range->1). No existing mappings
+renumbered. Lock held to outer transaction end; dictionary writers may block.
+Unknown required fields returned by name; unsupported manual type or exhausted
+INT max stops. New behavior disclosed in guide/commentary; no new tables/DDL.
+
+Current ZIP UPR_Main_Loader_2026-10-05_R4.zip contains schema checker, dated
+load_upr_master_2026-10-05_R4.sql matchingcanonical, closure checker. R3 archived.
+Guide October5 updated in place. Original NewValue fix remains. Static schema
+49INSERT/5MERGE/5OUTPUT/37arity passes; actual generated dictionary INSERTs run
+underSQLite, parsedScriptDom. Actual seed-block SQLServer regression cases added
+(identity/defaults,no defaults,manual IDs,exhaustion,unknown fields,repeats).
+SQLServer/concurrency/rollback tests STILL UNEXECUTED. Do not claim server success.
+
+---
+
+# Latest — October5 R3 AuditLog spelling correction
+
+Client reports40 editor errors and supplies clear layout: NewValue singular,
+VARCHAR(MAX), OldValues VARCHAR(MAX), OperationType VARCHAR20, ChangedBy VARCHAR100.
+R2 NewValues assumption was wrong for this layout. Other screenshots show older
+static archive/context/run-table statements, absent from R2 outer SQL. Do not
+blame all40 on version; full diagnostics still not received. Async request made.
+
+Main now metadata-selects NewValue or previous NewValues; neither/both throws.
+Dynamic parameterized INSERT captures SCOPE_IDENTITY inside dynamic scope via
+OUTPUT; dynamic read selects actual payload into internal temp NewValues alias.
+No audit column rename/add/type change. Optional support guarded as R2, no required
+installer or added tables/triggers. Physical fresh-DDL/installer older layout left
+unchanged and EXCLUDED from client package. Do not install them on client's DB.
+
+New ZIP UPR_Main_Loader_2026-10-05_R3.zip: schema checker, uniquely named
+load_upr_master_2026-10-05_R3.sql (same bytes as canonical main), closure checker.
+Main first-line/PRINT marker UPR MAIN LOADER2026-10-05 R3 (spaces in actual marker).
+R2 archived unchanged. New guide CLIENT_MAIN_LOADER_2026-10-05.md; no message sent.
+
+Static dependency/schema/hierarchy/index checks pass; actual dynamic audit SQL
+runs offline under both spellings and payloads retained. ScriptDom passed delivery
+files+7 literal batches+4 rendered SQL statements+exact client fixture. Native
+SQLServer regression now builds exact client AuditLog independently of projectDDL,
+checks no supporttables, preserved history/triggers/layout, both/neither rejection,
+older plural compatibility. SQLServer execution STILL NOT RUN(no server access).
+
+---
+
 # Additional review — October 2 R2 package rechecked
 
 User requested a deeper review to prevent another schema-error delivery.

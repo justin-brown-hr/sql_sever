@@ -10,6 +10,13 @@ FROM sys.databases d WHERE d.database_id=DB_ID();
 
 DECLARE @Expected TABLE(TableName SYSNAME,ColumnName SYSNAME,Requirement VARCHAR(30));
 INSERT @Expected(TableName,ColumnName,Requirement) VALUES
+    (N'UPRSTATUSHISTORY',N'UPRStatusHistoryID',N'CORE'),
+    (N'UPRMATCHREVIEW_Q',N'UPRMatchReviewID',N'CORE'),
+    (N'UPR_CONTACT',N'UPRContactID',N'CORE'),
+    (N'UNIT',N'UnitID',N'CORE'),
+    (N'CONDO',N'CondoID',N'CORE'),
+    (N'PROPERTY',N'PropertyID',N'CORE'),
+    (N'COMPLEX',N'ComplexID',N'CORE'),
     (N'REF_ENTITYTYPE',N'EntityTypeID',N'CORE'),
     (N'REF_ENTITYTYPE',N'Description',N'CORE'),
     (N'REF_PROPERTYTYPE',N'PropertyTypeID',N'CORE'),
@@ -161,7 +168,7 @@ INSERT @Expected(TableName,ColumnName,Requirement) VALUES
     (N'AuditLog',N'ChangedBy',N'CORE'),
     (N'AuditLog',N'ChangedDate',N'CORE'),
     (N'AuditLog',N'OldValues',N'CORE'),
-    (N'AuditLog',N'NewValues',N'CORE'),
+    (N'AuditLog',N'NewValue',N'AUDIT_PAYLOAD'),
     (N'REF_ENTITY_IDENTIFICATION',N'EntityID',N'CORE'),
     (N'REF_ENTITY_IDENTIFICATION',N'EntityName',N'CORE'),
     (N'AUDIT_LOG_CONTEXT',N'AuditID',N'OPTIONAL_EXTENSION'),
@@ -181,7 +188,7 @@ INSERT @Expected(TableName,ColumnName,Requirement) VALUES
     (N'UPR_LOAD_RUN',N'RejectedRows',N'OPTIONAL_EXTENSION'),
     (N'UPR_LOAD_RUN',N'ErrorMessage',N'OPTIONAL_EXTENSION');
 
-SELECT e.TableName,e.ColumnName,e.Requirement,
+SELECT e.TableName,e.ColumnName,e.Requirement,c.name AS ActualColumnName,
     CASE WHEN c.column_id IS NOT NULL THEN N'PRESENT'
          WHEN e.Requirement='LOADER_ADDS_IF_ABSENT' AND t.object_id IS NOT NULL
               THEN N'ADDED BY COMPLETE LOADER'
@@ -192,7 +199,8 @@ SELECT e.TableName,e.ColumnName,e.Requirement,
     TYPE_NAME(c.user_type_id) AS DataType,c.is_nullable AS IsNullable
 FROM @Expected e
 LEFT JOIN sys.tables t ON t.schema_id=SCHEMA_ID(N'dbo') AND t.name=e.TableName
-LEFT JOIN sys.columns c ON c.object_id=t.object_id AND c.name=e.ColumnName
+LEFT JOIN sys.columns c ON c.object_id=t.object_id AND (c.name=e.ColumnName OR (e.Requirement='AUDIT_PAYLOAD' AND c.name=N'NewValues'
+    AND COL_LENGTH(N'dbo.AuditLog',N'NewValue') IS NULL))
 ORDER BY e.Requirement,e.TableName,e.ColumnName;
 
 SELECT SchemaNameCheck=CASE WHEN COUNT(*)=0 THEN N'PASS: required names visible'
@@ -200,9 +208,17 @@ SELECT SchemaNameCheck=CASE WHEN COUNT(*)=0 THEN N'PASS: required names visible'
     MissingCoreColumns=COUNT(*)
 FROM @Expected e
 LEFT JOIN sys.tables t ON t.schema_id=SCHEMA_ID(N'dbo') AND t.name=e.TableName
-LEFT JOIN sys.columns c ON c.object_id=t.object_id AND c.name=e.ColumnName
-WHERE (e.Requirement='CORE' AND c.column_id IS NULL)
+LEFT JOIN sys.columns c ON c.object_id=t.object_id AND (c.name=e.ColumnName OR (e.Requirement='AUDIT_PAYLOAD' AND c.name=N'NewValues'
+    AND COL_LENGTH(N'dbo.AuditLog',N'NewValue') IS NULL))
+WHERE (e.Requirement IN('CORE','AUDIT_PAYLOAD') AND c.column_id IS NULL)
    OR (e.Requirement='LOADER_ADDS_IF_ABSENT' AND t.object_id IS NULL);
+
+SELECT AuditPayloadCheck=CASE
+    WHEN COL_LENGTH(N'dbo.AuditLog',N'NewValue') IS NOT NULL
+     AND COL_LENGTH(N'dbo.AuditLog',N'NewValues') IS NOT NULL THEN N'STOP: both payload names exist; confirm intended column'
+    WHEN COL_LENGTH(N'dbo.AuditLog',N'NewValue') IS NOT NULL THEN N'CLIENT LAYOUT: NewValue'
+    WHEN COL_LENGTH(N'dbo.AuditLog',N'NewValues') IS NOT NULL THEN N'PRIOR PROJECT LAYOUT: NewValues'
+    ELSE N'STOP: audit payload column missing or not visible' END;
 
 -- Return all actual columns, including additional required columns/defaults.
 SELECT t.name AS TableName,c.column_id,c.name AS ColumnName,TYPE_NAME(c.system_type_id) AS DataType,
@@ -225,3 +241,62 @@ ORDER BY TableName,TriggerName;
 SELECT OBJECT_NAME(parent_object_id) AS TableName,name,[definition],is_disabled,is_not_trusted
 FROM sys.check_constraints
 WHERE EXISTS(SELECT 1 FROM @Expected e WHERE OBJECT_ID(N'dbo.'+e.TableName)=parent_object_id);
+
+-- Preflight for the summary dictionary seed (required fields with no defaults).
+SELECT c.name AS RequiredDictionaryColumn,TYPE_NAME(c.system_type_id) AS DataType,
+    CASE WHEN c.name=N'EntityID' AND c.system_type_id=56 THEN N'LOADER ALLOCATES NEXT INT UNDER TABLE LOCK'
+         WHEN c.name IN(N'EntityName',N'EntityDescription',N'IsActive',N'CreatedDate',N'CreatedBy') THEN N'LOADER SUPPLIES VALUE'
+         ELSE N'REVIEW: UNMAPPED REQUIRED COLUMN OR UNSUPPORTED KEY TYPE' END AS SeedHandling
+FROM sys.columns c WHERE c.object_id=OBJECT_ID(N'dbo.REF_ENTITY_IDENTIFICATION')
+    AND (c.is_nullable=0 OR c.name=N'EntityID') AND c.is_identity=0 AND c.is_computed=0
+    AND c.default_object_id=0 AND c.system_type_id<>189
+ORDER BY c.column_id;
+
+-- Inspect the audit mapping itself, not only whether its column names exist.
+-- Dynamic SQL avoids binding missing dictionary columns in this diagnostic.
+IF COL_LENGTH(N'dbo.REF_ENTITY_IDENTIFICATION',N'EntityID') IS NOT NULL
+ AND COL_LENGTH(N'dbo.REF_ENTITY_IDENTIFICATION',N'EntityName') IS NOT NULL
+BEGIN
+    EXEC sys.sp_executesql N'
+        SELECT EntityID,EntityName FROM dbo.REF_ENTITY_IDENTIFICATION
+        WHERE EntityName=N''UPR_HIER_LOAD'';
+        SELECT AuditMappingCheck=CASE
+            WHEN COUNT(*)=0 THEN N''ABSENT: loader will seed the summary mapping''
+            WHEN COUNT(*)>1 THEN N''STOP: duplicate summary entity names''
+            WHEN COUNT(EntityID)=0 THEN N''NULL KEY: loader repairs only a writable manual INT key with no default; other definitions stop before business loading''
+            ELSE N''NON-NULL SUMMARY KEY: also check duplicate IDs below'' END
+        FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName=N''UPR_HIER_LOAD'';
+        SELECT EntityID,COUNT_BIG(*) AS DictionaryRowsSharingID
+        FROM dbo.REF_ENTITY_IDENTIFICATION
+        WHERE EntityID IN(SELECT EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName=N''UPR_HIER_LOAD'')
+        GROUP BY EntityID HAVING COUNT_BIG(*)>1;';
+END;
+
+-- Audit INSERT requirements beyond column-name presence (same predicate as loader).
+DECLARE @AuditNewColumn SYSNAME=CASE
+    WHEN COL_LENGTH(N'dbo.AuditLog',N'NewValue') IS NOT NULL THEN N'NewValue'
+    WHEN COL_LENGTH(N'dbo.AuditLog',N'NewValues') IS NOT NULL THEN N'NewValues' END;
+SELECT c.name AS UnsuppliedRequiredAuditColumn,TYPE_NAME(c.system_type_id) AS DataType
+FROM sys.columns c
+WHERE c.object_id=OBJECT_ID(N'dbo.AuditLog') AND c.is_nullable=0
+  AND c.is_identity=0 AND c.is_computed=0 AND c.default_object_id=0
+  AND c.system_type_id<>189 AND c.generated_always_type=0
+  AND c.name NOT IN(N'EntityNameID',N'EntityRecordID',N'OperationType',N'ChangedBy',N'ChangedDate',@AuditNewColumn);
+SELECT AuditIdentityCheck=CASE WHEN EXISTS(SELECT 1 FROM sys.columns c
+    WHERE c.object_id=OBJECT_ID(N'dbo.AuditLog') AND c.name=N'AuditID'
+      AND c.is_identity=1 AND c.system_type_id=56)
+    THEN N'PASS: INT IDENTITY AuditID' ELSE N'STOP: AuditID differs from supplied INT IDENTITY layout' END;
+SELECT c.name AS NonWritableAuditTarget
+FROM sys.columns c WHERE c.object_id=OBJECT_ID(N'dbo.AuditLog')
+  AND c.name IN(N'UPRID',N'OldValues',N'EntityNameID',N'EntityRecordID',N'OperationType',N'ChangedBy',N'ChangedDate',@AuditNewColumn)
+  AND (c.is_identity=1 OR c.is_computed=1 OR c.system_type_id=189 OR c.generated_always_type<>0);
+
+-- R8 uses loader-owned row audit. Review active audit writers before loading;
+-- they are preserved rather than disabled or rewritten by the loader.
+SELECT tr.name AS AuditTriggerToReview,OBJECT_NAME(tr.parent_id) AS TableName
+FROM sys.triggers tr
+WHERE tr.is_disabled=0 AND tr.parent_class=1 AND OBJECT_SCHEMA_NAME(tr.parent_id)=N'dbo'
+  AND EXISTS(SELECT 1 FROM @Expected e WHERE OBJECT_ID(N'dbo.'+e.TableName)=tr.parent_id
+      AND e.Requirement=N'CORE' AND e.TableName NOT IN(N'MAIncomingTableX1',N'SDATIncomingTableX1'))
+  AND (OBJECT_DEFINITION(tr.object_id) IS NULL OR OBJECT_DEFINITION(tr.object_id) LIKE N'%FOR JSON%'
+    OR OBJECT_DEFINITION(tr.object_id) LIKE N'%AuditLog%' OR OBJECT_DEFINITION(tr.object_id) LIKE N'%AUDIT_LOG%');

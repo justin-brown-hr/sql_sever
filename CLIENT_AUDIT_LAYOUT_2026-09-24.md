@@ -1,3 +1,8 @@
+> October 5: the latest client screenshot uses **NewValue VARCHAR(MAX)**,
+> **OldValues VARCHAR(MAX)** and VARCHAR for OperationType/ChangedBy. See the
+> [R8 client guide](CLIENT_MAIN_LOADER_2026-10-06.md); earlier layout notes below
+> describe the previous project schema, not the current client table.
+
 # Client AuditLog layout — September 24, 2026
 
 > October 2 R2: the [current main loader](CLIENT_MAIN_LOADER_2026-10-02.md) supports

@@ -272,7 +272,7 @@ IF NOT EXISTS (SELECT 1 FROM dbo.UPR_CONDO_LEGACY WHERE CondoName = 'KEEP MANUAL
             query("IF NOT EXISTS (SELECT 1 FROM dbo.UPRMATCHREVIEW_Q WHERE Decision LIKE 'MA/SDAT blank-unit overlap%' AND SDAT_AccountNumber = '00050037') THROW 51713, 'Unsafe overlap was not queued.', 1;")
         sql(script('scripts/list_upr_audit.sql'))
         sql(script('scripts/search_upr_master.sql'))
-        sql(script('scripts/list_upr_hierarchy.sql'))
+        query(script('scripts/list_upr_hierarchy.sql'))
         acceptance = sql(script('scripts/check_sept17_acceptance.sql'))
         assert acceptance.count('MATCHES SCREENSHOT COUNTS') == (3 if guarded else 4), acceptance
         assert acceptance.count('SHARED UNIT') == (1 if guarded else 2), acceptance

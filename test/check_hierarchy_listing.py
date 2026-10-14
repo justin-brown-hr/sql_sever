@@ -27,8 +27,7 @@ def sql(text, expect_error=False):
     return result.stdout + result.stderr
 
 
-listing = (ROOT / "scripts/list_upr_hierarchy.sql").read_text().replace(
-    "USE UPRXDB_TEST;", f"USE [{DATABASE}];")
+listing = f"USE [{DATABASE}];\nGO\n" + (ROOT / "scripts/list_upr_hierarchy.sql").read_text()
 
 
 def report(account=None, limit=None):
@@ -56,6 +55,8 @@ try:
 SET QUOTED_IDENTIFIER ON;
 SET ANSI_NULLS ON;
 SET NOCOUNT ON;
+DROP TABLE dbo.UPR_CONDO_LEGACY;
+DROP TABLE dbo.ADU;
 DECLARE @Condo INT = (SELECT EntityTypeID FROM dbo.REF_ENTITYTYPE WHERE Description = 'Condo');
 DECLARE @Building INT = (SELECT EntityTypeID FROM dbo.REF_ENTITYTYPE WHERE Description = 'Building');
 DECLARE @Unit INT = (SELECT EntityTypeID FROM dbo.REF_ENTITYTYPE WHERE Description = 'Unit');
@@ -83,7 +84,7 @@ DECLARE @B2 BIGINT = SCOPE_IDENTITY();
 INSERT dbo.UPR (EntityTypeID, ParentUPRID) VALUES (@Unit, @BU1);
 INSERT dbo.UNIT (UPRID, BuildingID, UnitNumber) VALUES (SCOPE_IDENTITY(), @B1, 'VALID_BUILDING');
 INSERT dbo.UPR (EntityTypeID, ParentUPRID) VALUES (@Unit, @Root1);
-INSERT dbo.UNIT (UPRID, BuildingID, UnitNumber) VALUES (SCOPE_IDENTITY(), @B1, 'VALID_CONDO');
+INSERT dbo.UNIT (UPRID, BuildingID, UnitNumber) VALUES (SCOPE_IDENTITY(), @B1, 'DIRECT_CONDO');
 INSERT dbo.UPR (EntityTypeID, ParentUPRID) VALUES (@Unit, @BU1);
 INSERT dbo.UNIT (UPRID, BuildingID, UnitNumber) VALUES (SCOPE_IDENTITY(), @B2, 'WRONG_BUILDING');
 INSERT dbo.UPR (EntityTypeID, ParentUPRID) VALUES (@Unit, @Root1);
@@ -130,14 +131,16 @@ FROM Closure cl;
     filtered = report("123456789")
     issues = [line for line in filtered.splitlines()
               if line.startswith("Unit has invalid Building link|")]
-    assert len(issues) == 2
+    assert len(issues) == 3
+    assert any("DIRECT_CONDO" in line for line in issues)
     assert any("WRONG_BUILDING" in line for line in issues)
     assert any("WRONG_CONDO" in line for line in issues)
     assert all("VALID_" not in line for line in issues)
     units = [r for r in tree(filtered) if r[7] == "Unit"]
     assert len(units) == 4 and all(r[-2] != "NULL" for r in units)
     assert len(tree(filtered)) == 6
-    print("PASS: valid Building/Condo units accepted; wrong links flagged; BuildingID displayed")
+    assert all(r[6] == "123456789" for r in units), "Units need root account context"
+    print("PASS: Building units accepted; direct Condo/wrong links flagged; BuildingID and account displayed")
 finally:
     sql(f"USE master; ALTER DATABASE [{DATABASE}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; "
         f"DROP DATABASE [{DATABASE}];")

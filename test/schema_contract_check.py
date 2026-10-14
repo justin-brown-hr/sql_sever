@@ -115,13 +115,13 @@ if len(real_tables) < 20:
 
 # ---------------------------------------------------------------- INSERT check
 insert_pat = re.compile(
-    r"INSERT\s+(?:INTO\s+)?(dbo\.\w+|#\w+)\s*\(([^;]*?)\)\s*(VALUES|SELECT)", re.I | re.S
+    r"INSERT\s+(?:INTO\s+)?(dbo\.\w+|#\w+)\s*\(([^()]*?)\)\s*(?:OUTPUT\s+.*?\s+INTO\s+#\w+\s*\([^)]*\)\s*)?(VALUES|SELECT)", re.I | re.S
 )
 checked = 0
 for m in insert_pat.finditer(LOAD_NC):
     target = m.group(1).lower()
     collist = m.group(2)
-    if "(" in collist:  # not a plain column list
+    if "(" in collist or "'" in collist:  # not a plain column list (assembled SQL is tested separately)
         continue
     cols = [c.strip().strip("[]").lower() for c in collist.split(",") if c.strip()]
     tname = target[4:] if target.startswith("dbo.") else target
@@ -188,7 +188,7 @@ print(f"  MERGE statements checked : {merges}")
 out_pat = re.compile(r"OUTPUT\s+(.*?)\s+INTO\s+(#\w+)\s*\(([^)]*)\)", re.I | re.S)
 outs = 0
 for m in out_pat.finditer(LOAD_NC):
-    src = [c.strip() for c in m.group(1).split(",") if c.strip()]
+    src = [c.strip() for c in split_top_level(m.group(1)) if c.strip()]
     tname = m.group(2).lower()
     dest = [c.strip().strip("[]").lower() for c in m.group(3).split(",") if c.strip()]
     table = temp_tables.get(tname)

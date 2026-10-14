@@ -28,6 +28,7 @@ with tempfile.TemporaryDirectory(prefix='upr-runner-') as tmp:
         else:
             assert result.returncode == 0, result.stderr
             assert any(p.endswith('scripts/load_upr_master.sql') for p in calls), calls
+            assert not any(p.endswith(('install_upr_audit.sql','list_upr_audit.sql')) for p in calls), calls
             destructive = [p for p in calls if '/ddl/' in p or p.endswith('local_it_setup.sql')]
             assert len(destructive) == (2 if mode == '--sample-data' else 0), (mode, calls)
         print('PASS: runner mode', mode or '(default)')

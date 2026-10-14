@@ -22,7 +22,7 @@ run_sql() {
 
 for f in test/local_it_setup.sql test/local_it_verify.sql test/local_it_counts.sql \
          test/local_it_search.sql test/local_it_search_v2.sql test/run_test_and_results.sql \
-         ddl/03_new_upr_schema.sql scripts/load_upr_master.sql scripts/search_upr_master.sql scripts/install_upr_audit.sql; do
+         ddl/03_new_upr_schema.sql scripts/load_upr_master.sql scripts/search_upr_master.sql; do
     docker cp "$ROOT/$f" "$CONTAINER:$DEST/"
 done
 
@@ -30,8 +30,6 @@ echo "### 1. seed incoming data"
 run_sql local_it_setup.sql | tail -3
 echo "### 2. create hierarchical schema"
 run_sql 03_new_upr_schema.sql | tail -2
-echo "### 2b. install persistent row audit triggers"
-run_sql install_upr_audit.sql | tail -2
 echo "### 3. first load"
 run_sql load_upr_master.sql | tail -22
 echo "### 4. verify"
@@ -62,41 +60,8 @@ run_sql search_upr_master.sql | tail -3
 run_sql local_it_search.sql | tail -25
 run_sql local_it_search_v2.sql | tail -5
 
-echo "### 11. hierarchy listing regression checks (separate disposable database)"
-CONTAINER="$CONTAINER" python3 "$ROOT/test/check_hierarchy_listing.py"
-
-echo "### 12. source-only data, legacy repair and persistent audit regressions"
-CONTAINER="$CONTAINER" python3 "$ROOT/test/check_source_audit.py"
-
-echo "### 13. exact client-supplied MasterAddress row 20977 (separate database)"
-CONTAINER="$CONTAINER" python3 "$ROOT/test/check_client_sample.py"
-
-echo "### 14. closure levels, existing-schema upgrade, reparenting and audit idempotency"
-CONTAINER="$CONTAINER" python3 "$ROOT/test/check_closure_levels.py"
-
-echo "### 15. audit run history, upgrade and readable row/field report"
-CONTAINER="$CONTAINER" python3 "$ROOT/test/check_audit_runs.py"
-
-echo "### 16. MA-first shared-account staging and existing Condo repair"
-CONTAINER="$CONTAINER" python3 "$ROOT/test/check_ma_precedence.py"
-
-echo "### 17. visible client spreadsheet rows for account 00255115"
-CONTAINER="$CONTAINER" python3 "$ROOT/test/check_client_00255115.py"
-
-echo "### 18. optional parcels and independent review reasons"
-CONTAINER="$CONTAINER" python3 "$ROOT/test/check_optional_parcel.py"
-
-echo "### 19. source coordinate pairs and legacy repair"
-CONTAINER="$CONTAINER" python3 "$ROOT/test/check_address_coordinates.py"
-
-echo "### 20. September 17 review, prior-loader reproduction and schema migration"
-CONTAINER="$CONTAINER" python3 "$ROOT/test/check_sept17_review.py"
-
-echo "### 21. Search specification loader support and long-account migration guard"
-CONTAINER="$CONTAINER" python3 "$ROOT/test/check_search_load.py"
-
-echo "### 22. Client AuditLog layout and normalized-history migration"
-CONTAINER="$CONTAINER" python3 "$ROOT/test/check_audit_layout.py"
-
-echo "### 23. Client AuditLog layout without optional support tables or audit migration"
+echo "### 11. native client audit layout, row audit, readable values and rollback"
 CONTAINER="$CONTAINER" python3 "$ROOT/test/check_client_schema_load.py"
+
+# Earlier trigger/context-specific regression scripts are retained for historical
+# migrations. They require the legacy JSON audit architecture and are not R8 tests.

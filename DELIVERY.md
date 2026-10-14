@@ -1,7 +1,16 @@
-> Latest October 2 R2 delivery: [client schema correction and closure indexes](CLIENT_MAIN_LOADER_2026-10-02.md).
-> Send `UPR_Main_Loader_2026-10-02_R2.zip` for the requested full main-script test.
-> It contains the read-only schema diagnostic, corrected main loader and closure verification.
-> No optional audit-support installation is required. Existing triggers remain in place.
+> October 13 full-record listing: [run guide](CLIENT_FULL_RECORDS_2026-10-13.md).
+> Send `UPR_Full_Records_2026-10-13.zip` for the client's latest listing request.
+> One read-only SQL file; all UPRs by default, optional account filter, readable grids.
+> Syntax/offline checks passed; client SQL Server execution remains pending.
+
+> October 8 demo: [Search and Property 360 run guide](CLIENT_SEARCH_DEMO_2026-10-08.md).
+> Send `UPR_Search_Property360_Demo_2026-10-08.zip` for the new demo request.
+> One read-only SQL script; existing load/search/API objects are unchanged.
+
+> Latest main loader: [October 8 R9 Condo unit parent correction](CLIENT_MAIN_LOADER_2026-10-08.md).
+> Send `UPR_Main_Loader_2026-10-08_R9.zip` for the hierarchy correction.
+> Two SQL files: complete main loader and read-only unit hierarchy verification.
+> R8 readable row auditing remains included. SQL Server execution is pending.
 
 The notes below describe historical deliveries. Obsolete closure-test ZIPs and
 superseded client messages were removed during cleanup. The earlier complete

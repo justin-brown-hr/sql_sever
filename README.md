@@ -5,12 +5,21 @@ SQL Server integration that loads **AddressMaster** and **SDAT** into the **hier
 **Model:** `docs/NewUPRTABLEUSED.docx` + `docs/Response.docx` (COMPLEX).  
 **Old flat model** archived under `legacy/` for reference only - do not run it.
 
-Latest delivery: [R2 main loader with client AuditLog compatibility](CLIENT_MAIN_LOADER_2026-10-02.md).
-Send `UPR_Main_Loader_2026-10-02_R2.zip`: schema diagnostic, complete loader and
-closure verification. The loader supports the existing AuditLog without requiring
-optional audit-support tables; existing triggers remain in place.
-It calculates pair distances and ensures composite uniqueness plus reverse
-traversal indexes during the normal load. No separate repair or manual edits.
+Latest full-record report: [October 13 UPR listing](CLIENT_FULL_RECORDS_2026-10-13.md).
+Send `UPR_Full_Records_2026-10-13.zip` for UPRID, account, owner, address, building
+and unit details. One read-only SQL file; select the loaded database in SSMS.
+No loader rerun or audit installation is required. SQL Server execution is pending.
+
+Latest demo: [October 8 search and Property 360](CLIENT_SEARCH_DEMO_2026-10-08.md).
+`UPR_Search_Property360_Demo_2026-10-08.zip` contains one read-only SSMS script.
+It shows readable grids, resolves a selected unit to its full property tree, and
+marks regulatory/program details unavailable while supporting loaded external links.
+
+Latest loader: [October 8 R9 Condo unit parent correction](CLIENT_MAIN_LOADER_2026-10-08.md).
+Send `UPR_Main_Loader_2026-10-08_R9.zip`: complete loader and read-only unit hierarchy
+check. Condo units now attach to their linked buildings; existing direct links are
+validated and repaired before source reuse. R8 readable auditing and UPR counts
+remain included. Historical values and closure column definitions are preserved.
 
 Previous correction: [October 1 standalone data repair](CLIENT_CLOSURE_DISTANCE_FIX_2026-10-01.md).
 
@@ -37,7 +46,7 @@ repair, Condo column removal, original `AncestorUPRID` API compatibility, and no
 
 ## Requirements
 
-- SQL Server 2016 SP1 or later; database compatibility level 130+ for audit migration/JSON
+- SQL Server 2016 SP1 or later; database compatibility level 130+ for STRING_SPLIT in verification
 - Target test DB (edit `USE` in scripts): e.g. `UPRXDB_TEST`
 
 ## Project Structure
@@ -49,8 +58,10 @@ SQL/
 ├── ddl/
 │   └── 03_new_upr_schema.sql      # Hierarchical schema (run first)
 ├── scripts/
-│   ├── install_upr_audit.sql      # Persistent INSERT/UPDATE/DELETE auditing
-│   ├── list_upr_audit.sql         # Run history, row events and changed fields
+│   ├── check_upr_client_schema.sql # Read-only schema/audit-writer diagnostic
+│   ├── check_upr_audit_result.sql # Read-only reconciliation by RunID
+│   ├── install_upr_audit.sql      # Historical trigger installer; not for R8
+│   ├── list_upr_audit.sql         # Historical extension-based audit report
 │   ├── diagnose_upr_accounts.sql  # Read-only client account diagnostics
 │   ├── load_upr_master.sql        # Hierarchical load (main deliverable)
 │   ├── search_upr_master.sql      # dbo.usp_UPR_Search
@@ -66,16 +77,13 @@ SQL/
 └── docs/                          # Client specs (NewUPRTABLEUSED, Response, Program Spec)
 ```
 
-For the latest corrections on an existing database, follow
-[CLIENT_UPDATE_2026-09-23.md](CLIENT_UPDATE_2026-09-23.md),
-then [the latest AuditLog migration order](CLIENT_AUDIT_LAYOUT_2026-09-24.md),
-including MA-first shared-account classification, guarded existing-Condo repair,
-per-run audit history and the automatic `UPR_CLOSURE.Level` upgrade. The client's source-only
-requirement supersedes the older generated-name conventions.
+For an existing client database, follow the [R9 run order](CLIENT_MAIN_LOADER_2026-10-08.md).
+Do not recreate the schema or install the historical audit extensions for this update.
+The client's source-only requirements supersede older generated-name conventions.
 
 ## Run Steps
 
-Everything at once (default upgrades an existing schema; `--sample-data` explicitly
+Everything at once (default loads an existing schema; `--sample-data` explicitly
 recreates a disposable schema and seeds test data):
 
 ```bash
@@ -85,7 +93,9 @@ chmod +x scripts/run_all.sh
 
 Or step by step:
 
-### 1. Create hierarchical schema (drops + recreates UPR tables)
+### 1. Create a disposable test schema only (drops + recreates UPR tables)
+
+Skip this step for an existing client database.
 
 ```bash
 sqlcmd -S localhost -E -i ddl/03_new_upr_schema.sql
@@ -100,13 +110,15 @@ your own process. Sample data instead:
 sqlcmd -S localhost -E -i test/local_it_setup.sql
 ```
 
-### 3. Install auditing and run the UPR load
+### 3. Check the schema and run the UPR load
 
 ```bash
-sqlcmd -S localhost -E -i scripts/install_upr_audit.sql
-sqlcmd -S localhost -E -i scripts/load_upr_master.sql
-sqlcmd -S localhost -E -i scripts/list_upr_audit.sql
+sqlcmd -S localhost -E -b -i scripts/check_upr_client_schema.sql
+sqlcmd -S localhost -E -b -i scripts/load_upr_master.sql
 ```
+
+After success, paste the printed RunID into `scripts/check_upr_audit_result.sql`
+and run it in the same database. Audit writes are part of the main load.
 
 ### 4. View the validation report
 
@@ -150,13 +162,13 @@ docker run -d --name uprtest -e ACCEPT_EULA=Y -e 'MSSQL_SA_PASSWORD=<pw>' \
 test/run_local_it.sh
 ```
 
-`run_local_it.sh` seeds deliberately hostile data (long street names, YearBuilt
-0 and 9999, bad street numbers, missing zips, one account on several addresses,
-MA/SDAT overlaps), creates the schema and audit triggers, runs the load twice,
-and checks 43 hierarchy invariants plus identical business counts. It also tests
-50,001-root listings, source-only fields, targeted legacy repairs, and audit
-INSERT/UPDATE/DELETE/MERGE events and rollback behavior. Closure regressions cover
-the existing-table Level upgrade, reparenting, level repair, and cycle rollback.
+`run_local_it.sh` prepares hostile source data, loads twice, and checks hierarchy,
+idempotency and search. Its native client-schema fixture checks row auditing,
+readable values, preserved historical audit data, dictionary variants, closure
+repair, trigger conflicts and audit-failure rollback. Set `UPR_STRESS_ROWS=200000`
+to add the optional large-source fixture. These SQL Server checks have not run in
+the current environment. Older trigger/context-specific tests remain historical
+and are not evidence for R8.
 
 ## Source Specifications
 
@@ -180,16 +192,16 @@ Each load step is commented in `scripts/load_upr_master.sql` (Steps 0-14).
 | Complex rule | MA MultiFamily/Apartments + Account# + 2+ distinct MA street addresses -> COMPLEX. All valid rows on that account share its MA-derived type and Complex group, including mixed MA types and SDAT rows |
 | Shared MA/SDAT accounts | Classify MA first. Shared SDAT rows inherit a unique matching MA group; unmatched/ambiguous rows go to Review_Q. SDAT-only accounts retain their Condo path. No blanket deletion of SDAT source data |
 | Existing Condo correction | A single source-linked Condo with no archived manually maintained name can be reclassified to Complex with UPR/Building/Unit IDs preserved. Competing or incompatible existing roots are queued for review without adding another hierarchy |
-| Condo rule | Condo parent (ParentUPRID NULL); Buildings and numbered Units are its children; Units link to their Building by BuildingID |
+| Condo rule | Condo root -> Building -> Unit. Unit ParentUPRID matches the UPR of UNIT.BuildingID; existing valid direct Condo-to-Unit links are repaired in R9 |
 | Unit numbers | One unambiguous blank MA/SDAT pair at the same account/address shares one Unit (MA wins); both source links remain. Otherwise, real incoming `CondoUnit` / MA `Unit` value when given. Every MULTI/APT/CONDO record still gets a Unit row even when blank: a Condo/SDAT record keeps `NULL` (the source column exists, just empty); an MA record with no unit-number field gets literal `N/A`. Never an invented `MA-<id>`/`SD-<id>` label - any leftover legacy one is repaired to the same convention |
 | Record type | Blank `LUCategory` -> `UNKNWN` property type; never invented as SF |
 | Building names | NULL when the incoming tables supply no building name |
 | Complex name | NULL when the incoming tables supply no complex name |
 | Owner data | Incoming owner or NULL; account numbers are not substituted for names. Required Contact links share the source contact across each tree |
 | Addresses | Source street number/name create Building + Address regardless of record type; blank street type/city/ZIP do not block. Missing State/ZIP stay NULL. Direct Address links are added to parents and Units |
-| Closure Level | Descendant's depth from the root, matching report `LevelNo` (root 0, child 1, grandchild 2). All ancestor paths and self-links remain; the loader upgrades existing tables and repairs levels after reparenting |
+| Closure Level | Distance between the ancestor and descendant: self 0, direct parent 1, grandparent 2. Existing Level type/nullability and indexes are retained; incorrect pair distances are repaired |
 | Idempotency | Safe to re-run - existing UPR/XREF/contact rows are reused, not duplicated |
-| Audit | AuditLog is the client's nine-column physical table with EntityNameID / EntityRecordID. AUDIT_LOG_CONTEXT retains raw keys and run/session details; AUDIT_LOG is the read compatibility view. REF_ENTITY_IDENTIFICATION stores entity names. Run the updated `install_upr_audit.sql` first: row auditing on 23 UPR model/reference tables, full before/after values, RunID and session. `UPR_LOAD_RUN` retains completed/failed/empty runs; `list_upr_audit.sql` shows run history and row/field changes, including edits outside loads |
+| Audit | Main-loader OUTPUT captures changes to 19 tables and writes native AuditLog rows with validated dictionary IDs, native record keys and readable before/after values. Existing history is preserved; no support tables or trigger installer are required. Scope is this loader, not future API/manual writes |
 
 ## Address Normalization
 
@@ -203,7 +215,7 @@ Per client spec example:
 ## Rollback
 
 Business writes and their row audit events run inside a **single transaction**
-and roll back on error. The separate `UPR_LOAD_RUN` record retains the failure.
+and roll back on error. Retain Messages for failures; there is no separate run-history table.
 Schema-ensure changes can persist for the next retry. Run the loader outside an
 existing transaction.
 
@@ -230,9 +242,7 @@ DELETE FROM dbo.PROPERTY;
 DELETE FROM dbo.COMPLEX;
 DELETE FROM dbo.ADU;
 DELETE FROM dbo.UPR;
--- Disposable reset only: deleting main events cascades to their context.
-DELETE FROM dbo.AuditLog;
-DELETE FROM dbo.UPR_LOAD_RUN;
+-- Historical AuditLog entries are preserved.
 ```
 
 Then re-run the load script.

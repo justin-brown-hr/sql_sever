@@ -1,7 +1,7 @@
 /*
 ================================================================================
-  UPR Hierarchy Listing
-  Run AFTER scripts/load_upr_master.sql
+  UPR Full Records / Hierarchy Listing - 2026-10-13
+  Read existing loaded UPR data; no loader rerun or audit installation required.
 
   Lists every UPR record as Parent followed by its children, so you can confirm
   complete records were written (Complex/Property/Condo -> Building -> Unit).
@@ -12,13 +12,11 @@
   within an ancestor/descendant pair; they match only for a root ancestor. ParentUPRID is the immediate parent; UPRID is the child.
 
   EDIT:
-    - USE database name if yours differs
+    - Select the intended database in SSMS; this file does not switch databases
     - @FilterAccount  = NULL for ALL records, or set one Account# to drill down
     - @MaxRows        = NULL for all root trees, or a positive root-tree cap
 ================================================================================
 */
-USE UPRXDB_TEST;
-GO
 
 SET QUOTED_IDENTIFIER ON;
 SET ANSI_NULLS ON;
@@ -27,6 +25,20 @@ GO
 
 DECLARE @FilterAccount NVARCHAR(50) = NULL;   -- e.g. N'00272531'  |  NULL = all
 DECLARE @MaxRows       INT          = NULL;  -- optional cap on roots, not children
+DECLARE @AsOfDate DATE=CONVERT(DATE,GETDATE());
+DECLARE @ShowAllAssociations BIT=1;          -- all direct address/contact links
+/* BuildingID is the model key, not a street number or invented building number.
+   Display a separate BuildingNumber only if that column actually exists. */
+IF OBJECT_ID('tempdb..#ReportBuildingNumber') IS NOT NULL DROP TABLE #ReportBuildingNumber;
+CREATE TABLE #ReportBuildingNumber(BuildingID BIGINT PRIMARY KEY,BuildingNumber NVARCHAR(200) NULL);
+IF COL_LENGTH(N'dbo.BUILDING',N'BuildingNumber') IS NOT NULL
+    EXEC sys.sp_executesql N'INSERT #ReportBuildingNumber(BuildingID,BuildingNumber)
+        SELECT BuildingID,CONVERT(NVARCHAR(200),BuildingNumber) FROM dbo.BUILDING;';
+IF OBJECT_ID('tempdb..#ReportADU') IS NOT NULL DROP TABLE #ReportADU;
+CREATE TABLE #ReportADU(UPRID BIGINT,UnitNumber NVARCHAR(50));
+IF COL_LENGTH(N'dbo.ADU',N'UPRID') IS NOT NULL AND COL_LENGTH(N'dbo.ADU',N'UnitNumber') IS NOT NULL
+    EXEC sys.sp_executesql N'INSERT #ReportADU(UPRID,UnitNumber) SELECT UPRID,UnitNumber FROM dbo.ADU;';
+
 
 IF @MaxRows IS NOT NULL AND @MaxRows <= 0
     THROW 50001, '@MaxRows must be NULL (all roots) or a positive integer.', 1;
@@ -113,6 +125,7 @@ BEGIN
         OmittedRoots = @MatchingRoots - @RootLimit;
 END;
 
+IF OBJECT_ID('tempdb..#ReportTree') IS NOT NULL DROP TABLE #ReportTree;
 ;WITH Roots AS
 (
     SELECT TOP (@RootLimit)
@@ -138,7 +151,7 @@ Tree AS
         u.StatusCode,
         LevelNo = 0,
         SortPath = CONVERT(VARCHAR(8000),
-            RIGHT(REPLICATE('0', 12) + CONVERT(VARCHAR(12), u.UPRID), 12))
+            RIGHT(REPLICATE('0', 20) + CONVERT(VARCHAR(20), u.UPRID), 20))
     FROM Roots r
     INNER JOIN dbo.UPR u ON u.UPRID = r.RootUPRID
 
@@ -156,13 +169,23 @@ Tree AS
         LevelNo = t.LevelNo + 1,
         SortPath = CONVERT(VARCHAR(8000),
             t.SortPath + N'.'
-            + RIGHT(REPLICATE('0', 12) + CONVERT(VARCHAR(12), c.UPRID), 12))
+            + RIGHT(REPLICATE('0', 20) + CONVERT(VARCHAR(20), c.UPRID), 20))
     FROM Tree t
     INNER JOIN dbo.UPR c ON c.ParentUPRID = t.UPRID
 )
+SELECT * INTO #ReportTree FROM Tree OPTION(MAXRECURSION 100);
+CREATE UNIQUE CLUSTERED INDEX IX_ReportTree ON #ReportTree(UPRID);
+/* Default all-records mode also includes rows with no reachable property root.
+   Their level/root are unknown; do not silently omit or invent their hierarchy. */
+IF @NormAccount IS NULL AND @MaxRows IS NULL
+    INSERT #ReportTree(RootUPRID,RootAccount,UPRID,ParentUPRID,EntityTypeID,AccountNumber,StatusCode,LevelNo,SortPath)
+    SELECT u.UPRID,u.AccountNumber,u.UPRID,u.ParentUPRID,u.EntityTypeID,u.AccountNumber,u.StatusCode,-1,
+        CONVERT(VARCHAR(8000),N'~'+CONVERT(VARCHAR(20),u.UPRID))
+    FROM dbo.UPR u WHERE NOT EXISTS(SELECT 1 FROM #ReportTree t WHERE t.UPRID=u.UPRID);
+
 SELECT
-    LevelNo,
-    Hierarchy = REPLICATE(N'  ', LevelNo)
+    LevelNo=CASE WHEN t.LevelNo>=0 THEN t.LevelNo END,
+    Hierarchy = CASE WHEN t.LevelNo<0 THEN N'[UNRESOLVED HIERARCHY] ' ELSE REPLICATE(N'  ',t.LevelNo) END
                 + CASE e.Description
                       WHEN N'Complex'  THEN N'[COMPLEX]  '
                       WHEN N'Property' THEN N'[PROPERTY] '
@@ -186,82 +209,129 @@ SELECT
                   END,
     t.UPRID,
     t.ParentUPRID,
-    RootUPRID     = t.RootUPRID,
+    RootUPRID     = CASE WHEN t.LevelNo>=0 THEN t.RootUPRID END,
     RootAccount   = t.RootAccount,
-    AccountNumber = t.AccountNumber,
+    AccountNumber = COALESCE(t.AccountNumber,t.RootAccount),
     EntityType    = e.Description,
     StatusCode    = t.StatusCode,
     CommunityName = cx.CommunityName,
     PropertyName  = p.PropertyName,
-    BuildingName  = b.BuildingName,
+    BuildingName  = COALESCE(b.BuildingName,linkedBuilding.BuildingName),
     UnitNumber    = COALESCE(un.UnitNumber, ad.UnitNumber),
     PropertyType  = COALESCE(pt.PropertyTypeCode, cxt.PropertyTypeCode),
-    Parcel        = COALESCE(p.Parcel, condoParcel.Parcel),
+    Parcel        = COALESCE(p.Parcel,condoHistory.ParcelID),
     ParcelSource  = CASE WHEN p.Parcel IS NOT NULL THEN N'PROPERTY'
-                        WHEN condoLegacy.Parcel IS NOT NULL THEN N'Archived CONDO value'
-                        WHEN condoLegacy.CondoID IS NULL AND condoHistory.ParcelID IS NOT NULL THEN N'Load history' END,
-    YearBuilt     = b.YearBuilt,
-    Address       = a.NormalizedAddress,
+                        WHEN condoHistory.ParcelID IS NOT NULL THEN N'Condo load status history' END,
+    YearBuilt     = COALESCE(b.YearBuilt,linkedBuilding.YearBuilt),
+    Address       = CASE WHEN a.AddressID IS NOT NULL THEN COALESCE(NULLIF(a.NormalizedAddress,N''),LTRIM(RTRIM(CONCAT(a.StreetNumber,N' ',a.StreetDirection,N' ',a.StreetName,N' ',a.StreetType,N' ',a.StreetSuffix)))) END,
     StreetNumber  = a.StreetNumber,
     StreetName    = a.StreetName,
     City          = a.City,
     ZipCode       = a.ZipCode,
-    OwnerName     = COALESCE(p.OwnerName, d.OwnerName, ct.OrganizationName),
-    ContactName   = ct.OrganizationName,
+    OwnerName     = owner.OwnerName,
+    ContactName   = ct.ContactName,
+    RecordAccountNumber = t.AccountNumber,
+    AccountSourceUPRID = CASE WHEN t.AccountNumber IS NOT NULL THEN t.UPRID
+                             WHEN t.RootAccount IS NOT NULL THEN t.RootUPRID END,
+    OwnerSourceUPRID = owner.OwnerUPRID,
+    OwnerSource = owner.OwnerSource,
+    OwnerIsInherited = CONVERT(BIT,CASE WHEN owner.OwnerUPRID<>t.UPRID THEN 1 ELSE 0 END),
+    OwnerContactID = owner.ContactID,
+    ContactRole = ct.ContactRole,
+    AddressSourceUPRID = a.AddressUPRID,
+    AddressIsInherited = CONVERT(BIT,CASE WHEN a.AddressUPRID<>t.UPRID THEN 1 ELSE 0 END),
+    AddressRole = a.AddressRole,
+    StreetDirection=a.StreetDirection,StreetType=a.StreetType,StreetSuffix=a.StreetSuffix,State=a.State,
+    FullAddress = CASE WHEN a.AddressID IS NOT NULL THEN LTRIM(RTRIM(CONCAT(a.StreetNumber,N' ',a.StreetDirection,N' ',a.StreetName,N' ',a.StreetType,N' ',a.StreetSuffix,N', ',a.City,N', ',a.State,N' ',a.ZipCode))) END,
+    BuildingUPRID = COALESCE(b.UPRID,linkedBuilding.UPRID),
+    BuildingNumber = bn.BuildingNumber,
+    BuildingNumberAvailability = CASE WHEN COL_LENGTH(N'dbo.BUILDING',N'BuildingNumber') IS NULL
+        THEN N'No separate BuildingNumber column; BuildingID is shown separately'
+        WHEN bn.BuildingNumber IS NULL THEN N'Not recorded' ELSE N'Recorded value' END,
     BuildingID    = COALESCE(b.BuildingID, un.BuildingID),
     UnitID        = un.UnitID
-FROM Tree t
+FROM #ReportTree t
 INNER JOIN dbo.REF_ENTITYTYPE e ON e.EntityTypeID = t.EntityTypeID
 LEFT JOIN dbo.COMPLEX  cx ON cx.UPRID = t.UPRID
 LEFT JOIN dbo.PROPERTY p  ON p.UPRID  = t.UPRID
 LEFT JOIN dbo.CONDO    d  ON d.UPRID  = t.UPRID
-LEFT JOIN dbo.UPR_CONDO_LEGACY condoLegacy ON condoLegacy.CondoID = d.CondoID AND condoLegacy.UPRID = t.UPRID
 OUTER APPLY (
     SELECT TOP (1) h.ParcelID
     FROM dbo.UPRSTATUSHISTORY h
     WHERE d.CondoID IS NOT NULL AND h.UPRID = t.UPRID AND h.ChangeSource = N'HIER_LOAD'
     ORDER BY h.ChangedDate DESC, h.UPRStatusHistoryID DESC
 ) condoHistory
-CROSS APPLY (SELECT Parcel = CASE WHEN condoLegacy.CondoID IS NOT NULL
-    THEN CONVERT(NVARCHAR(50), condoLegacy.Parcel) ELSE condoHistory.ParcelID END) condoParcel
 LEFT JOIN dbo.BUILDING b  ON b.UPRID  = t.UPRID
 LEFT JOIN dbo.UNIT     un ON un.UPRID = t.UPRID
-LEFT JOIN dbo.ADU      ad ON ad.UPRID = t.UPRID
+LEFT JOIN #ReportADU ad ON ad.UPRID=t.UPRID
+LEFT JOIN dbo.BUILDING linkedBuilding ON linkedBuilding.BuildingID=un.BuildingID
+LEFT JOIN #ReportBuildingNumber bn ON bn.BuildingID=COALESCE(b.BuildingID,un.BuildingID)
 LEFT JOIN dbo.REF_PROPERTYTYPE pt  ON pt.PropertyTypeID  = p.PropertyTypeID
 LEFT JOIN dbo.REF_PROPERTYTYPE cxt ON cxt.PropertyTypeID = cx.PropertyTypeID
 OUTER APPLY (
-    /* Own address, else first building descendant address, else ancestor address */
-    SELECT TOP 1 addr.NormalizedAddress, addr.StreetNumber, addr.StreetName,
-                 addr.City, addr.ZipCode
+    /* Prefer own current address; otherwise a related Building/ancestor address.
+       Keep its source UPRID visible so a fallback is never presented as direct. */
+    SELECT TOP(1) addr.AddressID,addr.NormalizedAddress,addr.StreetNumber,addr.StreetName,
+        addr.StreetDirection,addr.StreetType,addr.StreetSuffix,addr.City,addr.State,addr.ZipCode,
+        rel.AddressUPRID,ar.AddressRoleCode AS AddressRole
     FROM (
-        SELECT ua.AddressID, ua.IsPrimary, ua.UPRAddressID, Pri = 0
-        FROM dbo.UPR_ADDRESS ua
-        WHERE ua.UPRID = t.UPRID
+        SELECT ua.UPRID AS AddressUPRID,ua.AddressID,ua.AddressRoleID,ua.IsPrimary,ua.UPRAddressID,
+            ua.EffectiveDate,ua.EndDate,Pri=0,Distance=0
+        FROM dbo.UPR_ADDRESS ua WHERE ua.UPRID=t.UPRID
         UNION ALL
-        SELECT ua.AddressID, ua.IsPrimary, ua.UPRAddressID, Pri = 1
-        FROM dbo.UPR_CLOSURE cl
-        INNER JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = cl.DescendantUPRID
-        WHERE cl.AncestorUPRID = t.UPRID
-          AND cl.DescendantUPRID <> t.UPRID
+        SELECT ua.UPRID,ua.AddressID,ua.AddressRoleID,ua.IsPrimary,ua.UPRAddressID,
+            ua.EffectiveDate,ua.EndDate,1,cl.[Level]
+        FROM dbo.UPR_CLOSURE cl JOIN dbo.BUILDING childBuilding ON childBuilding.UPRID=cl.DescendantUPRID
+        JOIN dbo.UPR_ADDRESS ua ON ua.UPRID=childBuilding.UPRID
+        WHERE cl.AncestorUPRID=t.UPRID AND cl.DescendantUPRID<>t.UPRID
         UNION ALL
-        SELECT ua.AddressID, ua.IsPrimary, ua.UPRAddressID, Pri = 2
-        FROM dbo.UPR_CLOSURE cl
-        INNER JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = cl.AncestorUPRID
-        WHERE cl.DescendantUPRID = t.UPRID
-          AND cl.AncestorUPRID <> t.UPRID
-    ) rel
-    INNER JOIN dbo.ADDRESS addr ON addr.AddressID = rel.AddressID
-    ORDER BY rel.Pri, rel.IsPrimary DESC, rel.UPRAddressID
+        SELECT ua.UPRID,ua.AddressID,ua.AddressRoleID,ua.IsPrimary,ua.UPRAddressID,
+            ua.EffectiveDate,ua.EndDate,2,cl.[Level]
+        FROM dbo.UPR_CLOSURE cl JOIN dbo.UPR_ADDRESS ua ON ua.UPRID=cl.AncestorUPRID
+        WHERE cl.DescendantUPRID=t.UPRID AND cl.AncestorUPRID<>t.UPRID
+    ) rel JOIN dbo.ADDRESS addr ON addr.AddressID=rel.AddressID
+    JOIN dbo.REF_ADDRESSROLE ar ON ar.AddressRoleID=rel.AddressRoleID
+    WHERE (rel.EffectiveDate IS NULL OR rel.EffectiveDate<=@AsOfDate)
+      AND (rel.EndDate IS NULL OR rel.EndDate>=@AsOfDate)
+    ORDER BY rel.Pri,CASE WHEN ar.AddressRoleCode=N'PHYSICAL' THEN 0 ELSE 1 END,
+        rel.Distance,rel.IsPrimary DESC,rel.UPRAddressID
 ) a
 OUTER APPLY (
-    SELECT TOP 1 c.OrganizationName
-    FROM dbo.UPR_CONTACT uc
-    INNER JOIN dbo.CONTACT c ON c.ContactID = uc.ContactID
-    WHERE uc.UPRID = t.UPRID
-    ORDER BY uc.UPRContactID
+    SELECT TOP(1) oc.OwnerUPRID,oc.OwnerName,oc.OwnerSource,oc.ContactID
+    FROM (
+        /* OWNER_CANDIDATES_BEGIN */
+        SELECT p.UPRID AS OwnerUPRID,NULLIF(LTRIM(RTRIM(p.OwnerName)),N'') AS OwnerName,
+            N'PROPERTY.OwnerName' AS OwnerSource,CAST(NULL AS BIGINT) AS ContactID,0 AS SourcePriority
+        FROM dbo.PROPERTY p
+        UNION ALL
+        SELECT d.UPRID,NULLIF(LTRIM(RTRIM(d.OwnerName)),N''),N'CONDO.OwnerName',NULL,0 FROM dbo.CONDO d
+        UNION ALL
+        SELECT uc.UPRID,COALESCE(NULLIF(LTRIM(RTRIM(c.OrganizationName)),N''),
+            NULLIF(LTRIM(RTRIM(CONCAT(c.FirstName,N' ',c.LastName))),N'')),N'OWNER contact',c.ContactID,1
+        FROM dbo.UPR_CONTACT uc JOIN dbo.CONTACT c ON c.ContactID=uc.ContactID
+        JOIN dbo.REF_ROLETYPE r ON r.RoleTypeID=uc.RoleTypeID
+        WHERE r.RoleTypeCode=N'OWNER' AND c.StatusCode=N'ACTIVE'
+          AND (uc.EffectiveDate IS NULL OR uc.EffectiveDate<=@AsOfDate)
+          AND (uc.EndDate IS NULL OR uc.EndDate>=@AsOfDate)
+        /* OWNER_CANDIDATES_END */
+    ) oc
+    WHERE oc.OwnerName IS NOT NULL AND (oc.OwnerUPRID=t.UPRID OR EXISTS(
+        SELECT 1 FROM dbo.UPR_CLOSURE cl WHERE cl.DescendantUPRID=t.UPRID AND cl.AncestorUPRID=oc.OwnerUPRID))
+    ORDER BY CASE WHEN oc.OwnerUPRID=t.UPRID THEN 0 ELSE 1 END,
+        (SELECT MIN(cl.[Level]) FROM dbo.UPR_CLOSURE cl WHERE cl.DescendantUPRID=t.UPRID AND cl.AncestorUPRID=oc.OwnerUPRID),
+        oc.SourcePriority,oc.OwnerUPRID,oc.ContactID,oc.OwnerName
+) owner
+OUTER APPLY (
+    /* General contact is separate from ownership; never label an agent as owner. */
+    SELECT TOP(1) ContactName=COALESCE(NULLIF(c.OrganizationName,N''),NULLIF(LTRIM(RTRIM(CONCAT(c.FirstName,N' ',c.LastName))),N'')),
+        r.RoleTypeCode AS ContactRole
+    FROM dbo.UPR_CONTACT uc JOIN dbo.CONTACT c ON c.ContactID=uc.ContactID
+    JOIN dbo.REF_ROLETYPE r ON r.RoleTypeID=uc.RoleTypeID
+    WHERE uc.UPRID=t.UPRID AND c.StatusCode=N'ACTIVE'
+      AND (uc.EffectiveDate IS NULL OR uc.EffectiveDate<=@AsOfDate) AND (uc.EndDate IS NULL OR uc.EndDate>=@AsOfDate)
+    ORDER BY CASE WHEN r.RoleTypeCode=N'OWNER' THEN 0 ELSE 1 END,uc.UPRContactID
 ) ct
-ORDER BY t.SortPath
-OPTION (MAXRECURSION 100);
+ORDER BY t.SortPath;
 
 /* ------------------------------------------------------------
    SECTION 3 - Completeness flags (parents missing expected children)
@@ -337,13 +407,12 @@ FROM (
 
     UNION ALL
 
-    /* A Unit may be under its Building, or directly under a Condo with
-       its linked Building under that same Condo (the loader's condo model). */
+    /* R9: a Unit parent must be the Building referenced by UNIT.BuildingID. */
     SELECT
         Issue  = N'Unit has invalid Building link',
         un.UPRID,
         Detail = N'Unit ' + COALESCE(un.UnitNumber, N'(no unit number)')
-               + N': BuildingID must match its Building parent or a Building under its Condo parent'
+               + N': BuildingID must identify the immediate Building parent'
     FROM dbo.UNIT un
     INNER JOIN dbo.UPR u ON u.UPRID = un.UPRID
     WHERE NOT EXISTS (
@@ -355,10 +424,7 @@ FROM (
             INNER JOIN dbo.REF_ENTITYTYPE pe ON pe.EntityTypeID = parent.EntityTypeID
             WHERE linked.BuildingID = un.BuildingID
               AND be.Description = N'Building'
-              AND (
-                    (pe.Description = N'Building' AND parent.UPRID = linked.UPRID)
-                 OR (pe.Description = N'Condo' AND bu.ParentUPRID = parent.UPRID)
-                  )
+              AND pe.Description=N'Building' AND parent.UPRID=linked.UPRID
           )
       AND (@NormAccount IS NULL
            OR u.AccountNumber = @NormAccount
@@ -375,6 +441,27 @@ INNER JOIN dbo.REF_ENTITYTYPE e ON e.EntityTypeID = u.EntityTypeID
 ORDER BY Issue, u.AccountNumber, u.UPRID;
 
 PRINT N'';
+IF @ShowAllAssociations=1
+BEGIN
+    SELECT N'All address links' AS RecordSection,ua.UPRID,ua.AddressID,ar.AddressRoleCode,ua.IsPrimary,
+        a.StreetNumber,a.StreetDirection,a.StreetName,a.StreetType,a.StreetSuffix,a.City,a.State,a.ZipCode,
+        ua.EffectiveDate,ua.EndDate,
+        CASE WHEN ua.EffectiveDate>@AsOfDate THEN N'Future' WHEN ua.EndDate<@AsOfDate THEN N'Ended' ELSE N'Current' END AS AssociationStatus
+    FROM #ReportTree t JOIN dbo.UPR_ADDRESS ua ON ua.UPRID=t.UPRID
+    JOIN dbo.ADDRESS a ON a.AddressID=ua.AddressID JOIN dbo.REF_ADDRESSROLE ar ON ar.AddressRoleID=ua.AddressRoleID
+    ORDER BY ua.UPRID,ua.AddressID,ua.UPRAddressID;
+    SELECT N'All contact links' AS RecordSection,uc.UPRID,c.ContactID,r.RoleTypeCode,
+        c.FirstName,c.MiddleName,c.LastName,c.OrganizationName,c.Phone,c.Email,c.StatusCode,
+        uc.EffectiveDate,uc.EndDate,
+        CASE WHEN uc.EffectiveDate>@AsOfDate THEN N'Future' WHEN uc.EndDate<@AsOfDate THEN N'Ended' ELSE N'Current' END AS AssociationStatus
+    FROM #ReportTree t JOIN dbo.UPR_CONTACT uc ON uc.UPRID=t.UPRID
+    JOIN dbo.CONTACT c ON c.ContactID=uc.ContactID JOIN dbo.REF_ROLETYPE r ON r.RoleTypeID=uc.RoleTypeID
+    ORDER BY uc.UPRID,c.ContactID,r.RoleTypeCode;
+END;
+IF EXISTS(SELECT 1 FROM #ReportTree WHERE LevelNo<0)
+    SELECT N'Unresolved hierarchy: records included with unknown LevelNo/RootUPRID' AS Issue,UPRID,ParentUPRID
+    FROM #ReportTree WHERE LevelNo<0;
+
 PRINT N'HIERARCHY LISTING COMPLETE';
 PRINT N'  Section 2 = parent/child trees within the selected root limit (Results grid).';
 PRINT N'  Section 3 empty = no issues found by these checks; not a full integrity audit.';

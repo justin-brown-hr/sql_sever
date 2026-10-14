@@ -3,6 +3,8 @@ using System.Text.RegularExpressions;
 
 // Syntax validation only: a parser cannot bind names to the client's database,
 // execute triggers, validate data-dependent conversions, or prove rollback.
+if(args.Length>0 && args[0]=="--audit-coverage")
+    return AuditCoverage.Run(args[1],args[2],args.Length>3 && args[3]!="-"?args[3]:null,args.Length>4?args[4]:null);
 var parser = new TSql150Parser(initialQuotedIdentifiers: true);
 int failures = 0, files = 0, dynamicBatches = 0;
 var execLiteral = new Regex(@"\bEXEC(?:UTE)?\s+sys\.sp_executesql\s+N?'((?:[^']|'')*)'",

@@ -1,4 +1,4 @@
-/*
+/* RELEASE: UPR MAIN LOADER 2026-10-08 R9
 ================================================================================
   UPR Master Load Script - Hierarchical model (v2)
 
@@ -14,7 +14,7 @@
        Every incoming row for that account - including SDAT / condo-typed rows -
        stays inside the one Complex. The account never also becomes a Condo.
     3) MultiFamily with 1 address -> Property -> Building -> Unit
-    4) SDAT-only account: Condo (Parent NULL) -> Unit; account on Condo UPR.
+    4) SDAT-only account: Condo -> Building -> Unit; account on Condo UPR.
        Shared accounts follow MA's Complex or uniquely matched MA group;
        unmatched/ambiguous shared SDAT rows go to Review_Q, never default Condo.
     5) SF / Warehouse / Office / Park / etc -> Property -> Building only, no Unit
@@ -32,9 +32,10 @@
 
   Prerequisites: existing UPR/source schema and the client's nine-column AuditLog
   with REF_ENTITY_IDENTIFICATION. No audit-extension installation is required.
-  Existing triggers are retained. Without extended audit context, batch summaries
-  are stored in AuditLog.NewValues; per-row auditing remains the responsibility
-  of the database's existing triggers. No audit support tables are created here.
+  Loader INSERT/UPDATE/DELETE changes are captured and written to AuditLog with
+  readable text values. No audit support tables or trigger installer is required.
+  Existing audit-writing triggers require review to avoid duplicate/JSON events.
+  Historical audit rows are preserved; row auditing covers loader statements.
   Re-runnable: unchanged incoming data inserts no business rows (batch audit remains).
 
   October 2 closure correction is included in this MAIN script:
@@ -47,10 +48,35 @@
   October 2 R2: supports the client schema without UPR_CONDO_LEGACY,
   AUDIT_LOG_CONTEXT, UPR_LOAD_RUN or the AUDIT_LOG compatibility view.
 
+  October 5 R3: detects NewValue (client) or NewValues (prior project layout),
+  preserves existing VARCHAR/NVARCHAR types, and never renames the audit column.
+
+  October 5 R4: seeds required standard dictionary metadata; supports identity,
+  default-generated and serialized manual INT entity IDs without renumbering.
+
+  October 5 R5: preserves existing Level type/nullability and dependent indexes;
+  no ALTER COLUMN or new closure CHECK constraint during loading.
+
+  October 6 R6: supplies nullable manual audit IDs and validates the mapping
+  before business loading and immediately before the audit INSERT.
+  October 6 R7: checks audit INSERT metadata before business loading and verifies
+  that the summary row was persisted before commit.
+
+  October 6 R8: loader-owned row audit, readable before/after values, explicit UPR
+  write statistics, and batched audit INSERTs. Existing history is not rewritten.
+
+  October 8 R9: Condo Units now use their linked Building as ParentUPRID.
+  Existing direct Condo -> Unit links are repaired only when UNIT.BuildingID
+  identifies a Building under that same root Condo. IDs are preserved, repair
+  is audited, and Step 12 recalculates pair distances. Inconsistent links stop
+  with a diagnostic; no building is guessed from an address or example ID.
+
   EDIT USE database name to match your environment.
 ================================================================================
 */
 USE UPRXDB_TEST;
+GO
+PRINT N'UPR MAIN LOADER 2026-10-08 R9';
 GO
 
 /* Required for filtered indexes. SSMS sets these ON, sqlcmd does not:
@@ -62,8 +88,8 @@ SET ANSI_WARNINGS ON;
 SET CONCAT_NULL_YIELDS_NULL ON;
 SET ARITHABORT ON;
 SET NUMERIC_ROUNDABORT OFF;
-/* Run status must survive a rolled-back load, so use a dedicated connection
-   without a caller-owned transaction. Never roll back a caller's work. */
+/* Use a dedicated connection without a caller-owned transaction.
+   Never roll back a caller's work. Failure details remain in Messages. */
 IF @@TRANCOUNT <> 0
 BEGIN
     /* RAISERROR leaves a caller transaction intact even with XACT_ABORT ON. */
@@ -302,7 +328,7 @@ BEGIN
 END;
 
 /* Existing databases: add without a guessed default. Step 12 backfills the
-   actual pair distances and enforces NOT NULL inside the load transaction. */
+   actual pair distances without changing the column definition afterward. */
 IF OBJECT_ID(N'dbo.UPR_CLOSURE', N'U') IS NOT NULL
    AND COL_LENGTH(N'dbo.UPR_CLOSURE', N'Level') IS NULL
 BEGIN
@@ -329,15 +355,11 @@ DECLARE @Now         DATETIME2(0)  = CONVERT(DATETIME2(0), CONVERT(VARCHAR(19), 
 DECLARE @BatchStart  DATETIME2(0)  = SYSDATETIME();
 DECLARE @AuditRunID UNIQUEIDENTIFIER = NEWID();
 DECLARE @PreviousAuditRun SQL_VARIANT = SESSION_CONTEXT(N'UPR_AuditRunID');
-DECLARE @RunRecorded BIT = 0;
-DECLARE @HasAuditContext BIT = CASE WHEN OBJECT_ID(N'dbo.AUDIT_LOG_CONTEXT',N'U') IS NOT NULL THEN 1 ELSE 0 END;
-DECLARE @HasRunHistory BIT = CASE WHEN OBJECT_ID(N'dbo.UPR_LOAD_RUN',N'U') IS NOT NULL THEN 1 ELSE 0 END;
-DECLARE @ManagedAudit BIT = CASE WHEN EXISTS(SELECT 1 FROM sys.triggers
-    WHERE OBJECT_SCHEMA_NAME(object_id)=N'dbo' AND name LIKE N'tr[_]UPR[_]Audit[_]%'
-      AND (OBJECT_DEFINITION(object_id) LIKE N'%AUDIT_LOG_CONTEXT%'
-        OR OBJECT_DEFINITION(object_id) LIKE N'%AUDIT_ENTITY_RECORD%'
-        OR OBJECT_DEFINITION(object_id) LIKE N'%UPR_LOAD_RUN%')) THEN 1 ELSE 0 END;
 DECLARE @SummaryEntityID INT;
+/* Use only these two known column names. No schema migration is performed. */
+DECLARE @AuditNewColumn SYSNAME = CASE
+    WHEN COL_LENGTH(N'dbo.AuditLog',N'NewValue') IS NOT NULL THEN N'NewValue'
+    WHEN COL_LENGTH(N'dbo.AuditLog',N'NewValues') IS NOT NULL THEN N'NewValues' END;
 DECLARE @ErrorMessage NVARCHAR(500);
 DECLARE @PreflightErrors NVARCHAR(MAX) = N'';
 
@@ -365,31 +387,62 @@ BEGIN TRY
    than treating corrupted installation metadata as an absent extension. */
 IF OBJECT_ID(N'dbo.AuditLog',N'U') IS NULL
  OR EXISTS(SELECT 1 FROM (VALUES(N'AuditID'),(N'UPRID'),(N'EntityNameID'),(N'EntityRecordID'),
-    (N'OperationType'),(N'ChangedBy'),(N'ChangedDate'),(N'OldValues'),(N'NewValues')) v(ColumnName)
+    (N'OperationType'),(N'ChangedBy'),(N'ChangedDate'),(N'OldValues')) v(ColumnName)
     WHERE COL_LENGTH(N'dbo.AuditLog',v.ColumnName) IS NULL)
+ OR @AuditNewColumn IS NULL
  OR COL_LENGTH(N'dbo.REF_ENTITY_IDENTIFICATION',N'EntityID') IS NULL
  OR COL_LENGTH(N'dbo.REF_ENTITY_IDENTIFICATION',N'EntityName') IS NULL
  OR COL_LENGTH(N'dbo.UPR_CLOSURE',N'AncestorUPRID') IS NULL
     THROW 50004,'Expected the client AuditLog columns, entity dictionary and original closure column names. Run check_upr_client_schema.sql for details.',1;
-IF @HasAuditContext=1 AND EXISTS(SELECT 1 FROM
-    (VALUES(N'AuditID'),(N'EntityKey'),(N'RunID'),(N'SessionID'),(N'ChangeSummary')) v(ColumnName)
-    WHERE COL_LENGTH(N'dbo.AUDIT_LOG_CONTEXT',v.ColumnName) IS NULL)
-    THROW 50004,'Existing AUDIT_LOG_CONTEXT has an incomplete layout. No audit migration was attempted.',1;
-IF @HasRunHistory=1 AND EXISTS(SELECT 1 FROM
-    (VALUES(N'RunID'),(N'StartedAt'),(N'FinishedAt'),(N'RunStatus'),(N'StartedBy'),
-     (N'SessionID'),(N'SourceRowsRead'),(N'RejectedRows'),(N'ErrorMessage')) v(ColumnName)
-    WHERE COL_LENGTH(N'dbo.UPR_LOAD_RUN',v.ColumnName) IS NULL)
-    THROW 50004,'Existing UPR_LOAD_RUN has an incomplete layout. No audit migration was attempted.',1;
-IF @ManagedAudit=1 AND (@HasAuditContext=0 OR @HasRunHistory=0
-    OR OBJECT_ID(N'dbo.AUDIT_ENTITY_RECORD',N'U') IS NULL)
-    THROW 50004,'Project audit triggers exist but their support tables are incomplete. Restore that installation; triggers were not disabled.',1;
-IF @HasRunHistory=1
+IF COL_LENGTH(N'dbo.AuditLog',N'NewValue') IS NOT NULL
+ AND COL_LENGTH(N'dbo.AuditLog',N'NewValues') IS NOT NULL
+    THROW 50004,'AuditLog contains both NewValue and NewValues. Confirm the intended payload column before loading; no column was changed.',1;
+PRINT N'Audit payload column: dbo.AuditLog.' + QUOTENAME(@AuditNewColumn);
+/* AUDIT_INSERT_PREFLIGHT_BEGIN
+   An omitted NOT NULL column without a default would fail only at Step14.
+   Check the real table, including client-added columns, before loading rows. */
+IF EXISTS(SELECT 1 FROM sys.columns c
+    WHERE c.object_id=OBJECT_ID(N'dbo.AuditLog') AND c.is_nullable=0
+      AND c.is_identity=0 AND c.is_computed=0 AND c.default_object_id=0
+      AND c.system_type_id<>189 AND c.generated_always_type=0
+      AND c.name NOT IN(N'EntityNameID',N'EntityRecordID',N'OperationType',N'ChangedBy',N'ChangedDate',@AuditNewColumn))
 BEGIN
-    EXEC sys.sp_executesql N'
-        INSERT dbo.UPR_LOAD_RUN (RunID, StartedAt, RunStatus, StartedBy, SessionID)
-        VALUES (@id, SYSDATETIME(), ''RUNNING'', @who, @@SPID);',
-        N'@id UNIQUEIDENTIFIER, @who NVARCHAR(100)', @AuditRunID, @AuditUser;
-    SET @RunRecorded = 1;
+    SELECT c.name AS UnsuppliedRequiredAuditColumn,TYPE_NAME(c.system_type_id) AS DataType
+    FROM sys.columns c
+    WHERE c.object_id=OBJECT_ID(N'dbo.AuditLog') AND c.is_nullable=0
+      AND c.is_identity=0 AND c.is_computed=0 AND c.default_object_id=0
+      AND c.system_type_id<>189 AND c.generated_always_type=0
+      AND c.name NOT IN(N'EntityNameID',N'EntityRecordID',N'OperationType',N'ChangedBy',N'ChangedDate',@AuditNewColumn);
+    THROW 50004,'AuditLog has a required column the summary INSERT cannot supply. See UnsuppliedRequiredAuditColumn; business loading has not started.',1;
+END;
+IF NOT EXISTS(SELECT 1 FROM sys.columns c
+    WHERE c.object_id=OBJECT_ID(N'dbo.AuditLog') AND c.name=N'AuditID'
+      AND c.is_identity=1 AND c.system_type_id=56)
+    THROW 50004,'AuditLog.AuditID must use the supplied INT IDENTITY layout. Business loading has not started.',1;
+IF EXISTS(SELECT 1 FROM sys.columns c
+    WHERE c.object_id=OBJECT_ID(N'dbo.AuditLog')
+      AND c.name IN(N'UPRID',N'OldValues',N'EntityNameID',N'EntityRecordID',N'OperationType',N'ChangedBy',N'ChangedDate',@AuditNewColumn)
+      AND (c.is_identity=1 OR c.is_computed=1 OR c.system_type_id=189 OR c.generated_always_type<>0))
+    THROW 50004,'AuditLog summary target includes a generated or computed column; business loading has not started.',1;
+/* AUDIT_INSERT_PREFLIGHT_END */
+
+/* Loader-owned auditing must not duplicate an existing audit writer or allow
+   an older JSON-producing trigger to add unreadable events. Retain every trigger;
+   report conflicts before any business writes instead of disabling client code. */
+IF EXISTS(SELECT 1 FROM sys.triggers tr
+    WHERE tr.is_disabled=0 AND tr.parent_class=1 AND OBJECT_SCHEMA_NAME(tr.parent_id)=N'dbo'
+      AND OBJECT_NAME(tr.parent_id) IN (N'REF_ENTITYTYPE',N'REF_PROPERTYTYPE',N'REF_ROLETYPE',N'REF_ADDRESSROLE',N'REF_CONTACTTYPE',N'UPR',N'ADDRESS',N'COMPLEX',N'PROPERTY',N'CONDO',N'BUILDING',N'UNIT',N'CONTACT',N'UPR_ADDRESS',N'UPR_CONTACT',N'EXTERNAL_IDENTIFIER_XREF',N'UPR_CLOSURE',N'UPRMATCHREVIEW_Q',N'UPRSTATUSHISTORY',N'AuditLog',N'REF_ENTITY_IDENTIFICATION')
+      AND (OBJECT_DEFINITION(tr.object_id) IS NULL OR OBJECT_DEFINITION(tr.object_id) LIKE N'%FOR JSON%'
+        OR OBJECT_DEFINITION(tr.object_id) LIKE N'%AuditLog%' OR OBJECT_DEFINITION(tr.object_id) LIKE N'%AUDIT_LOG%'))
+BEGIN
+    SELECT tr.name AS AuditTriggerToReview,OBJECT_NAME(tr.parent_id) AS TableName,
+        OBJECT_DEFINITION(tr.object_id) AS TriggerDefinition
+    FROM sys.triggers tr
+    WHERE tr.is_disabled=0 AND tr.parent_class=1 AND OBJECT_SCHEMA_NAME(tr.parent_id)=N'dbo'
+      AND OBJECT_NAME(tr.parent_id) IN (N'REF_ENTITYTYPE',N'REF_PROPERTYTYPE',N'REF_ROLETYPE',N'REF_ADDRESSROLE',N'REF_CONTACTTYPE',N'UPR',N'ADDRESS',N'COMPLEX',N'PROPERTY',N'CONDO',N'BUILDING',N'UNIT',N'CONTACT',N'UPR_ADDRESS',N'UPR_CONTACT',N'EXTERNAL_IDENTIFIER_XREF',N'UPR_CLOSURE',N'UPRMATCHREVIEW_Q',N'UPRSTATUSHISTORY',N'AuditLog',N'REF_ENTITY_IDENTIFICATION')
+      AND (OBJECT_DEFINITION(tr.object_id) IS NULL OR OBJECT_DEFINITION(tr.object_id) LIKE N'%FOR JSON%'
+        OR OBJECT_DEFINITION(tr.object_id) LIKE N'%AuditLog%' OR OBJECT_DEFINITION(tr.object_id) LIKE N'%AUDIT_LOG%');
+    THROW 50004,'Existing audit-writing or unreadable triggers require review before loader-owned auditing. No trigger was changed.',1;
 END;
 EXEC sys.sp_set_session_context @key = N'UPR_AuditRunID', @value = @AuditRunID;
 
@@ -447,42 +500,143 @@ BEGIN
     THROW 50001, @ErrorMessage, 1;
 END;
 
-IF @ManagedAudit=1 AND EXISTS (
-    SELECT 1 FROM sys.tables t
-    WHERE t.schema_id = SCHEMA_ID(N'dbo')
-      AND t.name IN (N'UPR', N'ADDRESS', N'COMPLEX', N'PROPERTY', N'CONDO',
-          N'BUILDING', N'UNIT', N'ADU', N'CONTACT', N'UPR_ADDRESS', N'UPR_CONTACT',
-          N'EXTERNAL_IDENTIFIER_XREF', N'UPR_CLOSURE', N'UPRMATCHREVIEW_Q', N'UPRSTATUSHISTORY',
-          N'REF_ENTITYTYPE', N'REF_PROPERTYTYPE', N'REF_PROPERTY_STATUSCODE',
-          N'REF_CONTACTTYPE', N'REF_ROLETYPE', N'REF_ADDRESSROLE', N'REF_UNITTYPECODE')
-      AND NOT EXISTS (
-          SELECT 1 FROM sys.triggers tr WHERE tr.parent_id = t.object_id
-            AND tr.name = N'tr_UPR_Audit_' + t.name AND tr.is_disabled = 0
-            AND OBJECT_DEFINITION(tr.object_id) LIKE N'%UPR_AuditRunID%'
-            AND (SELECT COUNT(*) FROM sys.trigger_events ev
-                 WHERE ev.object_id = tr.object_id AND ev.type_desc IN (N'INSERT', N'UPDATE', N'DELETE')) = 3
-      )
-)
-    THROW 50004, 'The existing project audit-trigger installation is incomplete. Restore it before loading; no triggers were replaced.', 1;
-
 BEGIN TRANSACTION;
-/* The summary entity is a dictionary entry, not a new table or a guessed ID.
-   Existing IDs remain unchanged. Custom dictionaries without generated IDs must
-   provide the agreed UPR_HIER_LOAD mapping before running the loader. */
-IF NOT EXISTS(SELECT 1 FROM dbo.REF_ENTITY_IDENTIFICATION WITH(UPDLOCK,HOLDLOCK)
-              WHERE EntityName=N'UPR_HIER_LOAD')
+/* Create the batch-summary dictionary entry using the client's actual defaults.
+   Hold the small dictionary exclusively through this transaction so manual INT
+   key allocation and the name check cannot race with another writer. Never
+   renumber existing entities or change dictionary columns/defaults. */
+IF OBJECT_ID('tempdb..#AuditEntityMap') IS NOT NULL DROP TABLE #AuditEntityMap;
+CREATE TABLE #AuditEntityMap(EntityName SYSNAME NOT NULL PRIMARY KEY,EntityID INT NULL);
+INSERT #AuditEntityMap(EntityName) VALUES
+    (N'UPR_HIER_LOAD'),
+    (N'REF_ENTITYTYPE'),
+    (N'REF_PROPERTYTYPE'),
+    (N'REF_ROLETYPE'),
+    (N'REF_ADDRESSROLE'),
+    (N'REF_CONTACTTYPE'),
+    (N'UPR'),
+    (N'ADDRESS'),
+    (N'COMPLEX'),
+    (N'PROPERTY'),
+    (N'CONDO'),
+    (N'BUILDING'),
+    (N'UNIT'),
+    (N'CONTACT'),
+    (N'UPR_ADDRESS'),
+    (N'UPR_CONTACT'),
+    (N'EXTERNAL_IDENTIFIER_XREF'),
+    (N'UPR_CLOSURE'),
+    (N'UPRMATCHREVIEW_Q'),
+    (N'UPRSTATUSHISTORY');
+DECLARE @DictionaryRequired TABLE(ColumnName SYSNAME PRIMARY KEY,TypeID INT);
+DECLARE @AuditEntityName SYSNAME,@AuditEntityDescription VARCHAR(250),@ResolvedAuditEntityID INT;
+DECLARE AuditEntityNames CURSOR LOCAL FAST_FORWARD FOR SELECT EntityName FROM #AuditEntityMap ORDER BY EntityName;
+OPEN AuditEntityNames;
+FETCH NEXT FROM AuditEntityNames INTO @AuditEntityName;
+WHILE @@FETCH_STATUS=0
 BEGIN
-    IF EXISTS(SELECT 1 FROM sys.columns WHERE object_id=OBJECT_ID(N'dbo.REF_ENTITY_IDENTIFICATION')
-        AND name<>N'EntityName' AND is_nullable=0 AND is_identity=0 AND is_computed=0
-        AND default_object_id=0 AND system_type_id<>189)
-        THROW 50004,'Create the agreed UPR_HIER_LOAD entity mapping in the existing dictionary; required fields have no defaults. No ID was guessed.',1;
-    INSERT dbo.REF_ENTITY_IDENTIFICATION(EntityName) VALUES(N'UPR_HIER_LOAD');
+    PRINT N'Resolving audit entity: '+@AuditEntityName;
+    SET @ResolvedAuditEntityID=NULL;
+    SET @AuditEntityDescription=CASE WHEN @AuditEntityName=N'UPR_HIER_LOAD'
+        THEN 'Load batch summary; EntityRecordID 0' ELSE 'Loader row changes; readable before and after values' END;
+DECLARE @SummaryMappingRows INT;
+SELECT @SummaryMappingRows=COUNT(*)
+FROM dbo.REF_ENTITY_IDENTIFICATION WITH(TABLOCKX,HOLDLOCK)
+WHERE EntityName=@AuditEntityName;
+IF @SummaryMappingRows>1
+    THROW 50004,'Audit entity has duplicate entity dictionary names. Resolve the mapping before loading.',1;
+IF NOT EXISTS(SELECT 1 FROM sys.columns
+    WHERE object_id=OBJECT_ID(N'dbo.REF_ENTITY_IDENTIFICATION') AND name=N'EntityID' AND system_type_id=56)
+    THROW 50004,'Audit entity dictionary EntityID must be INT. Return its actual layout before loading.',1;
+DECLARE @ManualDictionaryID BIT=CASE WHEN EXISTS(SELECT 1 FROM sys.columns
+    WHERE object_id=OBJECT_ID(N'dbo.REF_ENTITY_IDENTIFICATION') AND name=N'EntityID'
+      AND is_identity=0 AND is_computed=0 AND default_object_id=0) THEN 1 ELSE 0 END;
+DECLARE @NextEntityID INT=NULL;
+DECLARE @LargestEntityID BIGINT;
+/* A nullable manual key still needs a value: AuditLog.EntityNameID is NOT NULL.
+   Repair only this loader's single NULL mapping; never renumber a non-NULL ID. */
+IF @ManualDictionaryID=1 AND (@SummaryMappingRows=0 OR EXISTS(
+    SELECT 1 FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName=@AuditEntityName AND EntityID IS NULL))
+BEGIN
+    SELECT @LargestEntityID=MAX(CONVERT(BIGINT,EntityID))
+    FROM dbo.REF_ENTITY_IDENTIFICATION WITH(TABLOCKX,HOLDLOCK);
+    IF @LargestEntityID>=2147483647
+        THROW 50004,'Entity dictionary has no higher available INT ID. Existing IDs were preserved.',1;
+    SET @NextEntityID=CONVERT(INT,CASE WHEN ISNULL(@LargestEntityID,0)<1 THEN 1 ELSE @LargestEntityID+1 END);
+    IF @SummaryMappingRows=1
+    BEGIN
+        UPDATE dbo.REF_ENTITY_IDENTIFICATION SET EntityID=@NextEntityID
+        WHERE EntityName=@AuditEntityName AND EntityID IS NULL;
+        PRINT N'Repaired NULL EntityID on the single Audit entity mapping; existing non-NULL IDs were preserved.';
+    END;
 END;
-IF (SELECT COUNT(*) FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName=N'UPR_HIER_LOAD')<>1
-    THROW 50004,'UPR_HIER_LOAD must have one unambiguous entity dictionary mapping.',1;
-SELECT @SummaryEntityID=EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName=N'UPR_HIER_LOAD';
-IF @HasAuditContext=0
-    PRINT N'Client AuditLog mode: batch summary stored in NewValues. Per-row audit coverage depends on existing database triggers; run-scoped row counts are unavailable.';
+IF @SummaryMappingRows=0
+BEGIN
+    DELETE FROM @DictionaryRequired;
+    INSERT @DictionaryRequired(ColumnName,TypeID)
+    SELECT name,system_type_id FROM sys.columns
+    WHERE object_id=OBJECT_ID(N'dbo.REF_ENTITY_IDENTIFICATION')
+      AND name<>N'EntityName' AND (is_nullable=0 OR name=N'EntityID') AND is_identity=0 AND is_computed=0
+      AND default_object_id=0 AND system_type_id<>189;
+    IF EXISTS(SELECT 1 FROM @DictionaryRequired
+        WHERE ColumnName NOT IN(N'EntityID',N'EntityDescription',N'IsActive',N'CreatedDate',N'CreatedBy'))
+    BEGIN
+        SELECT ColumnName AS UnmappedRequiredDictionaryColumn,TYPE_NAME(TypeID) AS DataType
+        FROM @DictionaryRequired
+        WHERE ColumnName NOT IN(N'EntityID',N'EntityDescription',N'IsActive',N'CreatedDate',N'CreatedBy');
+        THROW 50004,'Entity dictionary has unfamiliar required fields. See UnmappedRequiredDictionaryColumn results; no dictionary row was inserted.',1;
+    END;
+    DECLARE @DictionaryInsertColumns NVARCHAR(MAX)=N'[EntityName]';
+    DECLARE @DictionaryInsertValues NVARCHAR(MAX)=N'@name';
+    IF @ManualDictionaryID=1
+    BEGIN
+        SET @DictionaryInsertColumns+=N',[EntityID]';
+        SET @DictionaryInsertValues+=N',@id';
+    END;
+    IF EXISTS(SELECT 1 FROM @DictionaryRequired WHERE ColumnName=N'EntityDescription')
+    BEGIN
+        SET @DictionaryInsertColumns+=N',[EntityDescription]';
+        SET @DictionaryInsertValues+=N',@description';
+    END;
+    IF EXISTS(SELECT 1 FROM @DictionaryRequired WHERE ColumnName=N'IsActive')
+    BEGIN
+        SET @DictionaryInsertColumns+=N',[IsActive]';
+        SET @DictionaryInsertValues+=N',@active';
+    END;
+    IF EXISTS(SELECT 1 FROM @DictionaryRequired WHERE ColumnName=N'CreatedDate')
+    BEGIN
+        SET @DictionaryInsertColumns+=N',[CreatedDate]';
+        SET @DictionaryInsertValues+=N',@created';
+    END;
+    IF EXISTS(SELECT 1 FROM @DictionaryRequired WHERE ColumnName=N'CreatedBy')
+    BEGIN
+        SET @DictionaryInsertColumns+=N',[CreatedBy]';
+        SET @DictionaryInsertValues+=N',@creator';
+    END;
+    DECLARE @DictionaryInsertSql NVARCHAR(MAX)=N'INSERT INTO dbo.REF_ENTITY_IDENTIFICATION ('
+        +@DictionaryInsertColumns+N') VALUES ('+@DictionaryInsertValues+N');';
+    EXEC sys.sp_executesql @DictionaryInsertSql,
+        N'@name VARCHAR(100),@id INT,@description VARCHAR(250),@active BIT,@created DATETIME2(0),@creator NVARCHAR(100)',
+        @name=@AuditEntityName,@id=@NextEntityID,@description=@AuditEntityDescription,
+        @active=1,@created=@Now,@creator=@AuditUser;
+    PRINT N'Created the Audit entity dictionary entry; existing entity IDs were preserved.';
+END;
+IF (SELECT COUNT(*) FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName=@AuditEntityName)<>1
+    THROW 50004,'Audit entity must have one unambiguous entity dictionary mapping.',1;
+SELECT @ResolvedAuditEntityID=EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName=@AuditEntityName;
+IF @ResolvedAuditEntityID IS NULL
+    THROW 50004,'Audit entity EntityID is NULL after dictionary resolution. Check its default/computed definition and triggers; business loading has not started.',1;
+IF (SELECT COUNT(*) FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityID=@ResolvedAuditEntityID)<>1
+    THROW 50004,'Audit entity EntityID is shared by multiple dictionary rows. Resolve the mapping before loading.',1;
+PRINT N'Audit mapping verified: ' + @AuditEntityName + N' EntityID=' + CONVERT(NVARCHAR(20),@ResolvedAuditEntityID);
+
+    UPDATE #AuditEntityMap SET EntityID=@ResolvedAuditEntityID WHERE EntityName=@AuditEntityName;
+    FETCH NEXT FROM AuditEntityNames INTO @AuditEntityName;
+END;
+CLOSE AuditEntityNames;
+DEALLOCATE AuditEntityNames;
+SELECT @SummaryEntityID=EntityID FROM #AuditEntityMap WHERE EntityName=N'UPR_HIER_LOAD';
+PRINT N'Loader audit mode: row changes and batch summary are written directly to the existing AuditLog as readable text.';
 /* Reject existing duplicate pairs before loading business rows. Hold these locks
    through Step 12, which ensures pair uniqueness and both index directions after
    any legacy Level backfill. Individual ancestor/descendant IDs are not unique.
@@ -502,29 +656,95 @@ PRINT N'Step 0 complete - required tables/functions present.';
 /* ============================================================================
    1. SEED / ENSURE REF codes used by load
    ============================================================================ */
+/* Statement OUTPUT captures changes without assuming audit triggers exist.
+   Values are readable labeled text; the closure pair is retained in both images. */
+IF OBJECT_ID('tempdb..#AuditEvents') IS NOT NULL DROP TABLE #AuditEvents;
+CREATE TABLE #AuditEvents(
+    EventID BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+    EntityName SYSNAME NOT NULL,UPRID BIGINT NULL,EntityRecordID BIGINT NOT NULL,
+    OperationType VARCHAR(20) NOT NULL,OldValues NVARCHAR(MAX) NULL,NewValue NVARCHAR(MAX) NULL
+);
+DECLARE @AuditDmlRows INT=0;
 PRINT N'Step 1: Ensure REF entity / role / address / contact / property types...';
 
 IF NOT EXISTS (SELECT 1 FROM dbo.REF_ENTITYTYPE WHERE Description = N'Complex')
-    INSERT INTO dbo.REF_ENTITYTYPE (Description) VALUES (N'Complex');
+    INSERT INTO dbo.REF_ENTITYTYPE (Description)
+OUTPUT N'REF_ENTITYTYPE',CAST(NULL AS BIGINT),inserted.[EntityTypeID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'EntityTypeID = ' + CASE WHEN inserted.[EntityTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EntityTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Description = ' + CASE WHEN inserted.[Description] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Description],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+VALUES (N'Complex');
 IF NOT EXISTS (SELECT 1 FROM dbo.REF_ENTITYTYPE WHERE Description = N'Property')
-    INSERT INTO dbo.REF_ENTITYTYPE (Description) VALUES (N'Property');
+    INSERT INTO dbo.REF_ENTITYTYPE (Description)
+OUTPUT N'REF_ENTITYTYPE',CAST(NULL AS BIGINT),inserted.[EntityTypeID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'EntityTypeID = ' + CASE WHEN inserted.[EntityTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EntityTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Description = ' + CASE WHEN inserted.[Description] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Description],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+VALUES (N'Property');
 IF NOT EXISTS (SELECT 1 FROM dbo.REF_ENTITYTYPE WHERE Description = N'Building')
-    INSERT INTO dbo.REF_ENTITYTYPE (Description) VALUES (N'Building');
+    INSERT INTO dbo.REF_ENTITYTYPE (Description)
+OUTPUT N'REF_ENTITYTYPE',CAST(NULL AS BIGINT),inserted.[EntityTypeID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'EntityTypeID = ' + CASE WHEN inserted.[EntityTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EntityTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Description = ' + CASE WHEN inserted.[Description] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Description],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+VALUES (N'Building');
 IF NOT EXISTS (SELECT 1 FROM dbo.REF_ENTITYTYPE WHERE Description = N'Unit')
-    INSERT INTO dbo.REF_ENTITYTYPE (Description) VALUES (N'Unit');
+    INSERT INTO dbo.REF_ENTITYTYPE (Description)
+OUTPUT N'REF_ENTITYTYPE',CAST(NULL AS BIGINT),inserted.[EntityTypeID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'EntityTypeID = ' + CASE WHEN inserted.[EntityTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EntityTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Description = ' + CASE WHEN inserted.[Description] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Description],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+VALUES (N'Unit');
 IF NOT EXISTS (SELECT 1 FROM dbo.REF_ENTITYTYPE WHERE Description = N'Condo')
-    INSERT INTO dbo.REF_ENTITYTYPE (Description) VALUES (N'Condo');
+    INSERT INTO dbo.REF_ENTITYTYPE (Description)
+OUTPUT N'REF_ENTITYTYPE',CAST(NULL AS BIGINT),inserted.[EntityTypeID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'EntityTypeID = ' + CASE WHEN inserted.[EntityTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EntityTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Description = ' + CASE WHEN inserted.[Description] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Description],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+VALUES (N'Condo');
 IF NOT EXISTS (SELECT 1 FROM dbo.REF_ENTITYTYPE WHERE Description = N'ADU')
-    INSERT INTO dbo.REF_ENTITYTYPE (Description) VALUES (N'ADU');
+    INSERT INTO dbo.REF_ENTITYTYPE (Description)
+OUTPUT N'REF_ENTITYTYPE',CAST(NULL AS BIGINT),inserted.[EntityTypeID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'EntityTypeID = ' + CASE WHEN inserted.[EntityTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EntityTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Description = ' + CASE WHEN inserted.[Description] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Description],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+VALUES (N'ADU');
 
 IF NOT EXISTS (SELECT 1 FROM dbo.REF_ROLETYPE WHERE RoleTypeCode = N'OWNER')
-    INSERT INTO dbo.REF_ROLETYPE (RoleTypeCode, Description) VALUES (N'OWNER', N'Owner');
+    INSERT INTO dbo.REF_ROLETYPE (RoleTypeCode, Description)
+OUTPUT N'REF_ROLETYPE',CAST(NULL AS BIGINT),inserted.[RoleTypeID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'RoleTypeID = ' + CASE WHEN inserted.[RoleTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[RoleTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'RoleTypeCode = ' + CASE WHEN inserted.[RoleTypeCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[RoleTypeCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Description = ' + CASE WHEN inserted.[Description] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Description],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+VALUES (N'OWNER', N'Owner');
 
 IF NOT EXISTS (SELECT 1 FROM dbo.REF_ADDRESSROLE WHERE AddressRoleCode = N'PHYSICAL')
-    INSERT INTO dbo.REF_ADDRESSROLE (AddressRoleCode, Description) VALUES (N'PHYSICAL', N'Physical Address');
+    INSERT INTO dbo.REF_ADDRESSROLE (AddressRoleCode, Description)
+OUTPUT N'REF_ADDRESSROLE',CAST(NULL AS BIGINT),inserted.[AddressRoleID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'AddressRoleID = ' + CASE WHEN inserted.[AddressRoleID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AddressRoleID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressRoleCode = ' + CASE WHEN inserted.[AddressRoleCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AddressRoleCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Description = ' + CASE WHEN inserted.[Description] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Description],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+VALUES (N'PHYSICAL', N'Physical Address');
 
 IF NOT EXISTS (SELECT 1 FROM dbo.REF_CONTACTTYPE WHERE ContactTypeCode = N'ORGANIZATION')
-    INSERT INTO dbo.REF_CONTACTTYPE (ContactTypeCode, Description) VALUES (N'ORGANIZATION', N'Organization');
+    INSERT INTO dbo.REF_CONTACTTYPE (ContactTypeCode, Description)
+OUTPUT N'REF_CONTACTTYPE',CAST(NULL AS BIGINT),inserted.[ContactTypeID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'ContactTypeID = ' + CASE WHEN inserted.[ContactTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ContactTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ContactTypeCode = ' + CASE WHEN inserted.[ContactTypeCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ContactTypeCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Description = ' + CASE WHEN inserted.[Description] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Description],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+VALUES (N'ORGANIZATION', N'Organization');
 
 /* Ensure core property-type short codes (incl. INSTCF used by MA mapping) */
 IF OBJECT_ID('tempdb..#SeedPT') IS NOT NULL DROP TABLE #SeedPT;
@@ -551,6 +771,20 @@ INSERT INTO #SeedPT (Code, Name, AllowBldg, AllowUnit) VALUES
 INSERT INTO dbo.REF_PROPERTYTYPE
     (PropertyTypeCode, PropertyTypeName, AllowsBuildings, AllowsUnits, DeletedInd,
      CreationUserID, CreationDate, LastUpdatedUserID, LastUpdatedDate)
+
+OUTPUT N'REF_PROPERTYTYPE',CAST(NULL AS BIGINT),inserted.[PropertyTypeID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'PropertyTypeID = ' + CASE WHEN inserted.[PropertyTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[PropertyTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'PropertyTypeCode = ' + CASE WHEN inserted.[PropertyTypeCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[PropertyTypeCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'PropertyTypeName = ' + CASE WHEN inserted.[PropertyTypeName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[PropertyTypeName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AllowsBuildings = ' + CASE WHEN inserted.[AllowsBuildings] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AllowsBuildings],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AllowsUnits = ' + CASE WHEN inserted.[AllowsUnits] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AllowsUnits],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'DeletedInd = ' + CASE WHEN inserted.[DeletedInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DeletedInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'CreationUserID = ' + CASE WHEN inserted.[CreationUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'CreationDate = ' + CASE WHEN inserted.[CreationDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'LastUpdatedUserID = ' + CASE WHEN inserted.[LastUpdatedUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[LastUpdatedUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'LastUpdatedDate = ' + CASE WHEN inserted.[LastUpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[LastUpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
 SELECT
     s.Code, s.Name, s.AllowBldg, s.AllowUnit, 0,
     @AuditUser, @Now, @AuditUser, @Now
@@ -574,6 +808,63 @@ IF @RoleOwner IS NULL OR @AddrPhysical IS NULL OR @CtOrg IS NULL
     THROW 50003, N'REF OWNER / PHYSICAL / ORGANIZATION missing.', 1;
 
 PRINT N'Step 1 complete.';
+
+/* CONDO_UNIT_REPAIR_BEGIN
+   October 8: normalize existing direct Condo -> Unit links BEFORE source reuse
+   and duplicate matching. UNIT.BuildingID is the only mapping authority here.
+   This runs inside the main load/audit transaction; errors roll it back. */
+IF OBJECT_ID('tempdb..#CondoUnitParentRepair') IS NOT NULL DROP TABLE #CondoUnitParentRepair;
+/* CONDO_UNIT_CANDIDATES_BEGIN */
+SELECT u.UPRID AS UnitUPRID,u.ParentUPRID AS OldParentUPRID,un.BuildingID,
+    b.UPRID AS BuildingUPRID,bu.ParentUPRID AS BuildingParentUPRID,
+    Issue=CASE
+        WHEN (SELECT COUNT(*) FROM dbo.UNIT n WHERE n.UPRID=u.UPRID)<>1
+            THEN N'Unit must have exactly one UNIT record'
+        WHEN b.UPRID IS NULL OR bu.UPRID IS NULL THEN N'UNIT.BuildingID has no linked Building UPR'
+        WHEN bu.EntityTypeID<>@EtBuilding THEN N'Linked Building UPR has the wrong entity type'
+        WHEN co.ParentUPRID IS NOT NULL THEN N'Condo is not a root; review hierarchy before repair'
+        WHEN bu.ParentUPRID IS NULL OR bu.ParentUPRID<>co.UPRID THEN N'Linked Building is not under the same Condo'
+        WHEN EXISTS(SELECT 1 FROM dbo.UPR child WHERE child.ParentUPRID=u.UPRID)
+            THEN N'Unit has children; review before reparenting'
+        ELSE NULL END
+INTO #CondoUnitParentRepair
+FROM dbo.UPR u JOIN dbo.UPR co ON co.UPRID=u.ParentUPRID AND co.EntityTypeID=@EtCondo
+LEFT JOIN dbo.UNIT un ON un.UPRID=u.UPRID
+LEFT JOIN dbo.BUILDING b ON b.BuildingID=un.BuildingID
+LEFT JOIN dbo.UPR bu ON bu.UPRID=b.UPRID
+WHERE u.EntityTypeID=@EtUnit;
+/* CONDO_UNIT_CANDIDATES_END */
+IF EXISTS(SELECT 1 FROM #CondoUnitParentRepair WHERE Issue IS NOT NULL)
+BEGIN
+    SELECT UnitUPRID,OldParentUPRID,BuildingID,BuildingUPRID,BuildingParentUPRID,Issue
+    FROM #CondoUnitParentRepair WHERE Issue IS NOT NULL ORDER BY UnitUPRID;
+    THROW 50008,'Cannot safely repair a direct Condo-to-Unit parent. Review the Unit/Building diagnostic; the transaction is rolled back.',1;
+END;
+CREATE UNIQUE CLUSTERED INDEX IX_CondoUnitParentRepair ON #CondoUnitParentRepair(UnitUPRID);
+UPDATE u SET ParentUPRID=r.BuildingUPRID,UpdatedBy=@RunUser,UpdatedDate=@Now
+OUTPUT N'UPR',inserted.[UPRID],inserted.[UPRID],'UPDATE',
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ParentUPRID = ' + CASE WHEN deleted.[ParentUPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ParentUPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EntityTypeID = ' + CASE WHEN deleted.[EntityTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[EntityTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AccountNumber = ' + CASE WHEN deleted.[AccountNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[AccountNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN deleted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'CreatedBy = ' + CASE WHEN deleted.[CreatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[CreatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedDate = ' + CASE WHEN deleted.[UpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedBy = ' + CASE WHEN deleted.[UpdatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UpdatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ParentUPRID = ' + CASE WHEN inserted.[ParentUPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ParentUPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EntityTypeID = ' + CASE WHEN inserted.[EntityTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EntityTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AccountNumber = ' + CASE WHEN inserted.[AccountNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AccountNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'CreatedBy = ' + CASE WHEN inserted.[CreatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedDate = ' + CASE WHEN inserted.[UpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedBy = ' + CASE WHEN inserted.[UpdatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UpdatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+FROM dbo.UPR u JOIN #CondoUnitParentRepair r ON r.UnitUPRID=u.UPRID
+WHERE u.ParentUPRID=r.OldParentUPRID;
+DECLARE @CondoUnitsReparented INT=@@ROWCOUNT;
+PRINT N'Existing Condo units moved under their linked Building: '+CONVERT(NVARCHAR(20),@CondoUnitsReparented);
+/* CONDO_UNIT_REPAIR_END */
 
 /* ============================================================================
    2. READ MA -> #MA
@@ -699,6 +990,20 @@ GROUP BY PropertyType;
 INSERT INTO dbo.REF_PROPERTYTYPE
     (PropertyTypeCode, PropertyTypeName, AllowsBuildings, AllowsUnits, DeletedInd,
      CreationUserID, CreationDate, LastUpdatedUserID, LastUpdatedDate)
+
+OUTPUT N'REF_PROPERTYTYPE',CAST(NULL AS BIGINT),inserted.[PropertyTypeID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'PropertyTypeID = ' + CASE WHEN inserted.[PropertyTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[PropertyTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'PropertyTypeCode = ' + CASE WHEN inserted.[PropertyTypeCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[PropertyTypeCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'PropertyTypeName = ' + CASE WHEN inserted.[PropertyTypeName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[PropertyTypeName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AllowsBuildings = ' + CASE WHEN inserted.[AllowsBuildings] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AllowsBuildings],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AllowsUnits = ' + CASE WHEN inserted.[AllowsUnits] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AllowsUnits],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'DeletedInd = ' + CASE WHEN inserted.[DeletedInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DeletedInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'CreationUserID = ' + CASE WHEN inserted.[CreationUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'CreationDate = ' + CASE WHEN inserted.[CreationDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'LastUpdatedUserID = ' + CASE WHEN inserted.[LastUpdatedUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[LastUpdatedUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'LastUpdatedDate = ' + CASE WHEN inserted.[LastUpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[LastUpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
 SELECT
     m.Code,
     LEFT(m.TypeName, 128),
@@ -905,6 +1210,31 @@ IF EXISTS (
    linked source record proves a real unit value for this same Unit. */
 UPDATE un
 SET UnitNumber = CASE x.SourceSystem WHEN N'KDAT' THEN NULL ELSE N'N/A' END
+OUTPUT N'UNIT',inserted.[UPRID],inserted.[UnitID],'UPDATE',
+    CONVERT(NVARCHAR(MAX),N'') + N'UnitID = ' + CASE WHEN deleted.[UnitID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UnitID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BuildingID = ' + CASE WHEN deleted.[BuildingID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[BuildingID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UnitNumber = ' + CASE WHEN deleted.[UnitNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UnitNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UnitTypeCode = ' + CASE WHEN deleted.[UnitTypeCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UnitTypeCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'FloorNumber = ' + CASE WHEN deleted.[FloorNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[FloorNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BedroomCount = ' + CASE WHEN deleted.[BedroomCount] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[BedroomCount],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BathroomCount = ' + CASE WHEN deleted.[BathroomCount] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[BathroomCount],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'HasLegalIdentity = ' + CASE WHEN deleted.[HasLegalIdentity] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[HasLegalIdentity],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN deleted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedDate = ' + CASE WHEN deleted.[UpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CONVERT(NVARCHAR(MAX),N'') + N'UnitID = ' + CASE WHEN inserted.[UnitID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UnitID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BuildingID = ' + CASE WHEN inserted.[BuildingID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[BuildingID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UnitNumber = ' + CASE WHEN inserted.[UnitNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UnitNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UnitTypeCode = ' + CASE WHEN inserted.[UnitTypeCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UnitTypeCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'FloorNumber = ' + CASE WHEN inserted.[FloorNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[FloorNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BedroomCount = ' + CASE WHEN inserted.[BedroomCount] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[BedroomCount],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BathroomCount = ' + CASE WHEN inserted.[BathroomCount] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[BathroomCount],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'HasLegalIdentity = ' + CASE WHEN inserted.[HasLegalIdentity] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[HasLegalIdentity],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedDate = ' + CASE WHEN inserted.[UpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+
 FROM dbo.UNIT un
 INNER JOIN dbo.EXTERNAL_IDENTIFIER_XREF x ON x.UPRID = un.UPRID
     AND x.IdentifierType = N'SOURCE_RECORD_ID'
@@ -1111,6 +1441,23 @@ INSERT INTO dbo.UPRMATCHREVIEW_Q (
     ProcessingTimestamp,
     ReviewStatus
 )
+
+OUTPUT N'UPRMATCHREVIEW_Q',inserted.[UPRID],inserted.[UPRMatchReviewID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRMatchReviewID = ' + CASE WHEN inserted.[UPRMatchReviewID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRMatchReviewID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IncomingSourceSystem = ' + CASE WHEN inserted.[IncomingSourceSystem] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[IncomingSourceSystem],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SDAT_NormalizedIncomingAddress = ' + CASE WHEN inserted.[SDAT_NormalizedIncomingAddress] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[SDAT_NormalizedIncomingAddress],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'MA_NormalizedIncomingAddress = ' + CASE WHEN inserted.[MA_NormalizedIncomingAddress] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[MA_NormalizedIncomingAddress],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SDAT_ParcelID = ' + CASE WHEN inserted.[SDAT_ParcelID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[SDAT_ParcelID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'MA_ParcelID = ' + CASE WHEN inserted.[MA_ParcelID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[MA_ParcelID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SDAT_AccountNumber = ' + CASE WHEN inserted.[SDAT_AccountNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[SDAT_AccountNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'MA_Account = ' + CASE WHEN inserted.[MA_Account] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[MA_Account],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ReasonForNoMatch = ' + CASE WHEN inserted.[ReasonForNoMatch] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ReasonForNoMatch],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ProcessingTimestamp = ' + CASE WHEN inserted.[ProcessingTimestamp] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ProcessingTimestamp],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ReviewStatus = ' + CASE WHEN inserted.[ReviewStatus] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ReviewStatus],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Decision = ' + CASE WHEN inserted.[Decision] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Decision],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
 SELECT
     NULL,
     r.SourceSystem,
@@ -1229,18 +1576,81 @@ WHERE g.PathType = N'COMPLEX'
         AND (bu.UPRID IS NULL OR bu.ParentUPRID IS NULL OR bu.ParentUPRID <> u.UPRID)
   );
 UPDATE u SET EntityTypeID = @EtComplex, UpdatedBy = @RunUser, UpdatedDate = @Now
+OUTPUT N'UPR',inserted.[UPRID],inserted.[UPRID],'UPDATE',
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ParentUPRID = ' + CASE WHEN deleted.[ParentUPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ParentUPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EntityTypeID = ' + CASE WHEN deleted.[EntityTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[EntityTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AccountNumber = ' + CASE WHEN deleted.[AccountNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[AccountNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN deleted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'CreatedBy = ' + CASE WHEN deleted.[CreatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[CreatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedDate = ' + CASE WHEN deleted.[UpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedBy = ' + CASE WHEN deleted.[UpdatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UpdatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ParentUPRID = ' + CASE WHEN inserted.[ParentUPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ParentUPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EntityTypeID = ' + CASE WHEN inserted.[EntityTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EntityTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AccountNumber = ' + CASE WHEN inserted.[AccountNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AccountNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'CreatedBy = ' + CASE WHEN inserted.[CreatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedDate = ' + CASE WHEN inserted.[UpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedBy = ' + CASE WHEN inserted.[UpdatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UpdatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+
 FROM dbo.UPR u INNER JOIN #CondoToComplex r ON r.UPRID = u.UPRID;
-DELETE d FROM dbo.CONDO d INNER JOIN #CondoToComplex r ON r.UPRID = d.UPRID;
+DELETE d
+OUTPUT N'CONDO',deleted.[UPRID],deleted.[CondoID],'DELETE',
+    CONVERT(NVARCHAR(MAX),N'') + N'CondoID = ' + CASE WHEN deleted.[CondoID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[CondoID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'OwnerName = ' + CASE WHEN deleted.[OwnerName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[OwnerName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN deleted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CAST(NULL AS NVARCHAR(MAX))
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+ FROM dbo.CONDO d INNER JOIN #CondoToComplex r ON r.UPRID = d.UPRID;
 UPDATE child SET ParentUPRID = b.UPRID, UpdatedBy = @RunUser, UpdatedDate = @Now
+OUTPUT N'UPR',inserted.[UPRID],inserted.[UPRID],'UPDATE',
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ParentUPRID = ' + CASE WHEN deleted.[ParentUPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ParentUPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EntityTypeID = ' + CASE WHEN deleted.[EntityTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[EntityTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AccountNumber = ' + CASE WHEN deleted.[AccountNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[AccountNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN deleted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'CreatedBy = ' + CASE WHEN deleted.[CreatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[CreatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedDate = ' + CASE WHEN deleted.[UpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedBy = ' + CASE WHEN deleted.[UpdatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UpdatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ParentUPRID = ' + CASE WHEN inserted.[ParentUPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ParentUPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EntityTypeID = ' + CASE WHEN inserted.[EntityTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EntityTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AccountNumber = ' + CASE WHEN inserted.[AccountNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AccountNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'CreatedBy = ' + CASE WHEN inserted.[CreatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedDate = ' + CASE WHEN inserted.[UpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedBy = ' + CASE WHEN inserted.[UpdatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UpdatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+
 FROM dbo.UPR child INNER JOIN #CondoToComplex r ON r.UPRID = child.ParentUPRID
 INNER JOIN dbo.UNIT un ON un.UPRID = child.UPRID
 INNER JOIN dbo.BUILDING b ON b.BuildingID = un.BuildingID;
 /* Step 7 fills COMPLEX for this reused UPR; Step 12 rebuilds closure/Level.
-   Existing database triggers govern per-row audit retention. */
+   Statement OUTPUT retains these changes for the audit write in Step 14. */
 
 INSERT INTO dbo.UPRMATCHREVIEW_Q
     (UPRID, IncomingSourceSystem, SDAT_NormalizedIncomingAddress, MA_NormalizedIncomingAddress,
      SDAT_AccountNumber, MA_Account, ReasonForNoMatch, ProcessingTimestamp, ReviewStatus, Decision)
+
+OUTPUT N'UPRMATCHREVIEW_Q',inserted.[UPRID],inserted.[UPRMatchReviewID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRMatchReviewID = ' + CASE WHEN inserted.[UPRMatchReviewID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRMatchReviewID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IncomingSourceSystem = ' + CASE WHEN inserted.[IncomingSourceSystem] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[IncomingSourceSystem],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SDAT_NormalizedIncomingAddress = ' + CASE WHEN inserted.[SDAT_NormalizedIncomingAddress] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[SDAT_NormalizedIncomingAddress],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'MA_NormalizedIncomingAddress = ' + CASE WHEN inserted.[MA_NormalizedIncomingAddress] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[MA_NormalizedIncomingAddress],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SDAT_ParcelID = ' + CASE WHEN inserted.[SDAT_ParcelID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[SDAT_ParcelID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'MA_ParcelID = ' + CASE WHEN inserted.[MA_ParcelID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[MA_ParcelID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SDAT_AccountNumber = ' + CASE WHEN inserted.[SDAT_AccountNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[SDAT_AccountNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'MA_Account = ' + CASE WHEN inserted.[MA_Account] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[MA_Account],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ReasonForNoMatch = ' + CASE WHEN inserted.[ReasonForNoMatch] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ReasonForNoMatch],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ProcessingTimestamp = ' + CASE WHEN inserted.[ProcessingTimestamp] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ProcessingTimestamp],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ReviewStatus = ' + CASE WHEN inserted.[ReviewStatus] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ReviewStatus],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Decision = ' + CASE WHEN inserted.[Decision] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Decision],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
 SELECT u.UPRID, CASE WHEN u.EntityTypeID = @EtCondo THEN N'KDAT' ELSE N'ADDRESS_MASTER' END, N'', N'',
     CASE WHEN u.EntityTypeID = @EtCondo THEN LEFT(g.AccountNumber, 30) END,
     CASE WHEN u.EntityTypeID = @EtProperty THEN LEFT(g.AccountNumber, 30) END, N'AMBIGUOUS_CANDIDATES',
@@ -1313,6 +1723,7 @@ PRINT N'Step 7: Insert parent UPR + COMPLEX/PROPERTY/CONDO...';
 
 IF OBJECT_ID('tempdb..#ParentMap') IS NOT NULL DROP TABLE #ParentMap;
 CREATE TABLE #ParentMap (
+    AuditNewValue NVARCHAR(MAX) NULL,
     GroupKey NVARCHAR(450) NOT NULL PRIMARY KEY,
     UPRID BIGINT NOT NULL,
     PathType VARCHAR(20) NOT NULL,
@@ -1348,8 +1759,21 @@ OUTPUT
     s.PropertyType,
     s.OwnerName,
     s.CommunityName,
-    s.ParcelID
-INTO #ParentMap (GroupKey, UPRID, PathType, AccountNumber, PropertyType, OwnerName, CommunityName, ParcelID);
+    s.ParcelID,
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ParentUPRID = ' + CASE WHEN inserted.[ParentUPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ParentUPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EntityTypeID = ' + CASE WHEN inserted.[EntityTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EntityTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AccountNumber = ' + CASE WHEN inserted.[AccountNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AccountNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'CreatedBy = ' + CASE WHEN inserted.[CreatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedDate = ' + CASE WHEN inserted.[UpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedBy = ' + CASE WHEN inserted.[UpdatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UpdatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #ParentMap (GroupKey, UPRID, PathType, AccountNumber, PropertyType, OwnerName, CommunityName, ParcelID, AuditNewValue);
+SET @AuditDmlRows=@@ROWCOUNT;
+INSERT #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+SELECT N'UPR',m.UPRID,m.UPRID,'INSERT',NULL,m.AuditNewValue
+FROM #ParentMap m WHERE m.AuditNewValue IS NOT NULL;
+
 
 SET @ParentInserted = (
     SELECT COUNT(*) FROM #ParentMap pm
@@ -1357,6 +1781,16 @@ SET @ParentInserted = (
 );
 
 INSERT INTO dbo.COMPLEX (UPRID, CommunityName, PropertyTypeID, StatusCode, CreatedBy)
+
+OUTPUT N'COMPLEX',inserted.[UPRID],inserted.[ComplexID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'ComplexID = ' + CASE WHEN inserted.[ComplexID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ComplexID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'CommunityName = ' + CASE WHEN inserted.[CommunityName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CommunityName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'PropertyTypeID = ' + CASE WHEN inserted.[PropertyTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[PropertyTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'CreatedBy = ' + CASE WHEN inserted.[CreatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
 SELECT
     pm.UPRID,
     pm.CommunityName,
@@ -1370,6 +1804,17 @@ WHERE pm.PathType = N'COMPLEX'
 SET @ComplexInserted = @@ROWCOUNT;
 
 INSERT INTO dbo.PROPERTY (UPRID, PropertyTypeID, PropertyName, OwnerName, Parcel, StatusCode)
+
+OUTPUT N'PROPERTY',inserted.[UPRID],inserted.[PropertyID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'PropertyID = ' + CASE WHEN inserted.[PropertyID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[PropertyID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'PropertyTypeID = ' + CASE WHEN inserted.[PropertyTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[PropertyTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'PropertyName = ' + CASE WHEN inserted.[PropertyName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[PropertyName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'OwnerName = ' + CASE WHEN inserted.[OwnerName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[OwnerName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Parcel = ' + CASE WHEN inserted.[Parcel] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Parcel],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
 SELECT
     pm.UPRID,
     COALESCE(pt.PropertyTypeID, (SELECT TOP 1 PropertyTypeID FROM dbo.REF_PROPERTYTYPE WHERE PropertyTypeCode = N'UNKNWN')),
@@ -1384,6 +1829,14 @@ WHERE pm.PathType = N'PROPERTY'
 SET @PropertyInserted = @@ROWCOUNT;
 
 INSERT INTO dbo.CONDO (UPRID, OwnerName, StatusCode)
+
+OUTPUT N'CONDO',inserted.[UPRID],inserted.[CondoID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'CondoID = ' + CASE WHEN inserted.[CondoID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CondoID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'OwnerName = ' + CASE WHEN inserted.[OwnerName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[OwnerName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
 SELECT
     pm.UPRID,
     pm.OwnerName,
@@ -1442,8 +1895,8 @@ JOIN dbo.UPR mbp ON mbp.UPRID = mb.UPRID AND mbp.ParentUPRID = pm.UPRID
 JOIN dbo.UPR sbp ON sbp.UPRID = sb.UPRID AND sbp.ParentUPRID = pm.UPRID
 WHERE (mu.UnitNumber IS NULL OR mu.UnitNumber = N'N/A')
   AND (su.UnitNumber IS NULL OR su.UnitNumber = N'N/A')
-  AND sup.ParentUPRID = CASE WHEN pm.PathType = N'CONDO' THEN pm.UPRID ELSE sb.UPRID END
-  AND mup.ParentUPRID = CASE WHEN pm.PathType = N'CONDO' THEN pm.UPRID ELSE mb.UPRID END
+  AND sup.ParentUPRID = sb.UPRID
+  AND mup.ParentUPRID = mb.UPRID
   AND sup.AccountNumber IS NULL AND sup.StatusCode = N'ACTIVE'
   AND sup.EntityTypeID = @EtUnit AND mup.EntityTypeID = @EtUnit
   AND sbp.EntityTypeID = @EtBuilding AND mbp.EntityTypeID = @EtBuilding
@@ -1482,39 +1935,301 @@ INSERT INTO #MergeUPR (OldUPRID, NewUPRID) SELECT DropUnit, KeepUnit FROM #Overl
 INSERT INTO #MergeUPR (OldUPRID, NewUPRID)
 SELECT DISTINCT DropBuilding, KeepBuilding FROM #OverlapRepair WHERE DropBuilding <> KeepBuilding;
 
-/* Move links before removing the redundant nodes. Old/new JSON audit events
+/* Move links before removing the redundant nodes. Readable old/new audit events
    retain every removed row, including the donor Unit and Building IDs. */
-UPDATE x SET UPRID = m.NewUPRID FROM dbo.EXTERNAL_IDENTIFIER_XREF x JOIN #MergeUPR m ON m.OldUPRID = x.UPRID;
-DELETE d FROM dbo.UPR_CONTACT d JOIN #MergeUPR m ON m.OldUPRID = d.UPRID
+UPDATE x SET UPRID = m.NewUPRID
+OUTPUT N'EXTERNAL_IDENTIFIER_XREF',inserted.[UPRID],inserted.[ExternalIdentifierID],'UPDATE',
+    CONVERT(NVARCHAR(MAX),N'') + N'ExternalIdentifierID = ' + CASE WHEN deleted.[ExternalIdentifierID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ExternalIdentifierID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SourceSystem = ' + CASE WHEN deleted.[SourceSystem] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[SourceSystem],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IdentifierType = ' + CASE WHEN deleted.[IdentifierType] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[IdentifierType],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IdentifierValue = ' + CASE WHEN deleted.[IdentifierValue] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[IdentifierValue],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CONVERT(NVARCHAR(MAX),N'') + N'ExternalIdentifierID = ' + CASE WHEN inserted.[ExternalIdentifierID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ExternalIdentifierID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SourceSystem = ' + CASE WHEN inserted.[SourceSystem] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[SourceSystem],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IdentifierType = ' + CASE WHEN inserted.[IdentifierType] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[IdentifierType],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IdentifierValue = ' + CASE WHEN inserted.[IdentifierValue] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[IdentifierValue],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+ FROM dbo.EXTERNAL_IDENTIFIER_XREF x JOIN #MergeUPR m ON m.OldUPRID = x.UPRID;
+DELETE d
+OUTPUT N'UPR_CONTACT',deleted.[UPRID],deleted.[UPRContactID],'DELETE',
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRContactID = ' + CASE WHEN deleted.[UPRContactID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRContactID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ContactID = ' + CASE WHEN deleted.[ContactID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ContactID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'RoleTypeID = ' + CASE WHEN deleted.[RoleTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[RoleTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EffectiveDate = ' + CASE WHEN deleted.[EffectiveDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[EffectiveDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EndDate = ' + CASE WHEN deleted.[EndDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[EndDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CAST(NULL AS NVARCHAR(MAX))
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+ FROM dbo.UPR_CONTACT d JOIN #MergeUPR m ON m.OldUPRID = d.UPRID
 WHERE EXISTS (SELECT 1 FROM dbo.UPR_CONTACT k WHERE k.UPRID = m.NewUPRID AND k.ContactID = d.ContactID AND k.RoleTypeID = d.RoleTypeID);
-UPDATE d SET UPRID = m.NewUPRID FROM dbo.UPR_CONTACT d JOIN #MergeUPR m ON m.OldUPRID = d.UPRID;
+UPDATE d SET UPRID = m.NewUPRID
+OUTPUT N'UPR_CONTACT',inserted.[UPRID],inserted.[UPRContactID],'UPDATE',
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRContactID = ' + CASE WHEN deleted.[UPRContactID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRContactID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ContactID = ' + CASE WHEN deleted.[ContactID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ContactID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'RoleTypeID = ' + CASE WHEN deleted.[RoleTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[RoleTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EffectiveDate = ' + CASE WHEN deleted.[EffectiveDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[EffectiveDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EndDate = ' + CASE WHEN deleted.[EndDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[EndDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRContactID = ' + CASE WHEN inserted.[UPRContactID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRContactID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ContactID = ' + CASE WHEN inserted.[ContactID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ContactID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'RoleTypeID = ' + CASE WHEN inserted.[RoleTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[RoleTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EffectiveDate = ' + CASE WHEN inserted.[EffectiveDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EffectiveDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EndDate = ' + CASE WHEN inserted.[EndDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EndDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+ FROM dbo.UPR_CONTACT d JOIN #MergeUPR m ON m.OldUPRID = d.UPRID;
 /* Keep alternate source address links, but retain the survivor's primary. */
-UPDATE d SET IsPrimary = 0 FROM dbo.UPR_ADDRESS d JOIN #MergeUPR m ON m.OldUPRID = d.UPRID
+UPDATE d SET IsPrimary = 0
+OUTPUT N'UPR_ADDRESS',inserted.[UPRID],inserted.[UPRAddressID],'UPDATE',
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRAddressID = ' + CASE WHEN deleted.[UPRAddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRAddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressID = ' + CASE WHEN deleted.[AddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[AddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressRoleID = ' + CASE WHEN deleted.[AddressRoleID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[AddressRoleID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IsPrimary = ' + CASE WHEN deleted.[IsPrimary] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[IsPrimary],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EffectiveDate = ' + CASE WHEN deleted.[EffectiveDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[EffectiveDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EndDate = ' + CASE WHEN deleted.[EndDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[EndDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRAddressID = ' + CASE WHEN inserted.[UPRAddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRAddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressID = ' + CASE WHEN inserted.[AddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressRoleID = ' + CASE WHEN inserted.[AddressRoleID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AddressRoleID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IsPrimary = ' + CASE WHEN inserted.[IsPrimary] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[IsPrimary],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EffectiveDate = ' + CASE WHEN inserted.[EffectiveDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EffectiveDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EndDate = ' + CASE WHEN inserted.[EndDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EndDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+ FROM dbo.UPR_ADDRESS d JOIN #MergeUPR m ON m.OldUPRID = d.UPRID
 WHERE d.IsPrimary = 1 AND EXISTS (SELECT 1 FROM dbo.UPR_ADDRESS k WHERE k.UPRID = m.NewUPRID AND k.IsPrimary = 1);
-DELETE d FROM dbo.UPR_ADDRESS d JOIN #MergeUPR m ON m.OldUPRID = d.UPRID
+DELETE d
+OUTPUT N'UPR_ADDRESS',deleted.[UPRID],deleted.[UPRAddressID],'DELETE',
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRAddressID = ' + CASE WHEN deleted.[UPRAddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRAddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressID = ' + CASE WHEN deleted.[AddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[AddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressRoleID = ' + CASE WHEN deleted.[AddressRoleID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[AddressRoleID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IsPrimary = ' + CASE WHEN deleted.[IsPrimary] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[IsPrimary],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EffectiveDate = ' + CASE WHEN deleted.[EffectiveDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[EffectiveDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EndDate = ' + CASE WHEN deleted.[EndDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[EndDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CAST(NULL AS NVARCHAR(MAX))
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+ FROM dbo.UPR_ADDRESS d JOIN #MergeUPR m ON m.OldUPRID = d.UPRID
 WHERE EXISTS (SELECT 1 FROM dbo.UPR_ADDRESS k WHERE k.UPRID = m.NewUPRID
     AND k.AddressID = d.AddressID AND k.AddressRoleID = d.AddressRoleID
     AND NOT EXISTS (SELECT d.EffectiveDate, d.EndDate EXCEPT SELECT k.EffectiveDate, k.EndDate));
-UPDATE d SET UPRID = m.NewUPRID FROM dbo.UPR_ADDRESS d JOIN #MergeUPR m ON m.OldUPRID = d.UPRID;
-UPDATE h SET UPRID = m.NewUPRID FROM dbo.UPRSTATUSHISTORY h JOIN #MergeUPR m ON m.OldUPRID = h.UPRID;
-UPDATE h SET BuildingID = r.KeepBuildingID FROM dbo.UPRSTATUSHISTORY h
+UPDATE d SET UPRID = m.NewUPRID
+OUTPUT N'UPR_ADDRESS',inserted.[UPRID],inserted.[UPRAddressID],'UPDATE',
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRAddressID = ' + CASE WHEN deleted.[UPRAddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRAddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressID = ' + CASE WHEN deleted.[AddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[AddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressRoleID = ' + CASE WHEN deleted.[AddressRoleID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[AddressRoleID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IsPrimary = ' + CASE WHEN deleted.[IsPrimary] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[IsPrimary],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EffectiveDate = ' + CASE WHEN deleted.[EffectiveDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[EffectiveDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EndDate = ' + CASE WHEN deleted.[EndDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[EndDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRAddressID = ' + CASE WHEN inserted.[UPRAddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRAddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressID = ' + CASE WHEN inserted.[AddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressRoleID = ' + CASE WHEN inserted.[AddressRoleID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AddressRoleID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IsPrimary = ' + CASE WHEN inserted.[IsPrimary] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[IsPrimary],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EffectiveDate = ' + CASE WHEN inserted.[EffectiveDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EffectiveDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EndDate = ' + CASE WHEN inserted.[EndDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EndDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+ FROM dbo.UPR_ADDRESS d JOIN #MergeUPR m ON m.OldUPRID = d.UPRID;
+UPDATE h SET UPRID = m.NewUPRID
+OUTPUT N'UPRSTATUSHISTORY',inserted.[UPRID],inserted.[UPRStatusHistoryID],'UPDATE',
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRStatusHistoryID = ' + CASE WHEN deleted.[UPRStatusHistoryID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRStatusHistoryID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SDATAccountNumber = ' + CASE WHEN deleted.[SDATAccountNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[SDATAccountNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'OldStatusCode = ' + CASE WHEN deleted.[OldStatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[OldStatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'NewStatusCode = ' + CASE WHEN deleted.[NewStatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[NewStatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ChangeReason = ' + CASE WHEN deleted.[ChangeReason] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ChangeReason],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ParcelID = ' + CASE WHEN deleted.[ParcelID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ParcelID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Owner = ' + CASE WHEN deleted.[Owner] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[Owner],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'PropertyTypeCode = ' + CASE WHEN deleted.[PropertyTypeCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[PropertyTypeCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ChangeSource = ' + CASE WHEN deleted.[ChangeSource] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ChangeSource],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ChangedBy = ' + CASE WHEN deleted.[ChangedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ChangedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ChangedDate = ' + CASE WHEN deleted.[ChangedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ChangedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Notes = ' + CASE WHEN deleted.[Notes] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[Notes],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BuildingID = ' + CASE WHEN deleted.[BuildingID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[BuildingID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRStatusHistoryID = ' + CASE WHEN inserted.[UPRStatusHistoryID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRStatusHistoryID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SDATAccountNumber = ' + CASE WHEN inserted.[SDATAccountNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[SDATAccountNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'OldStatusCode = ' + CASE WHEN inserted.[OldStatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[OldStatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'NewStatusCode = ' + CASE WHEN inserted.[NewStatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[NewStatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ChangeReason = ' + CASE WHEN inserted.[ChangeReason] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ChangeReason],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ParcelID = ' + CASE WHEN inserted.[ParcelID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ParcelID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Owner = ' + CASE WHEN inserted.[Owner] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Owner],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'PropertyTypeCode = ' + CASE WHEN inserted.[PropertyTypeCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[PropertyTypeCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ChangeSource = ' + CASE WHEN inserted.[ChangeSource] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ChangeSource],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ChangedBy = ' + CASE WHEN inserted.[ChangedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ChangedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ChangedDate = ' + CASE WHEN inserted.[ChangedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ChangedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Notes = ' + CASE WHEN inserted.[Notes] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Notes],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BuildingID = ' + CASE WHEN inserted.[BuildingID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[BuildingID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+ FROM dbo.UPRSTATUSHISTORY h JOIN #MergeUPR m ON m.OldUPRID = h.UPRID;
+UPDATE h SET BuildingID = r.KeepBuildingID
+OUTPUT N'UPRSTATUSHISTORY',inserted.[UPRID],inserted.[UPRStatusHistoryID],'UPDATE',
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRStatusHistoryID = ' + CASE WHEN deleted.[UPRStatusHistoryID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRStatusHistoryID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SDATAccountNumber = ' + CASE WHEN deleted.[SDATAccountNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[SDATAccountNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'OldStatusCode = ' + CASE WHEN deleted.[OldStatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[OldStatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'NewStatusCode = ' + CASE WHEN deleted.[NewStatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[NewStatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ChangeReason = ' + CASE WHEN deleted.[ChangeReason] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ChangeReason],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ParcelID = ' + CASE WHEN deleted.[ParcelID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ParcelID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Owner = ' + CASE WHEN deleted.[Owner] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[Owner],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'PropertyTypeCode = ' + CASE WHEN deleted.[PropertyTypeCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[PropertyTypeCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ChangeSource = ' + CASE WHEN deleted.[ChangeSource] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ChangeSource],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ChangedBy = ' + CASE WHEN deleted.[ChangedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ChangedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ChangedDate = ' + CASE WHEN deleted.[ChangedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ChangedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Notes = ' + CASE WHEN deleted.[Notes] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[Notes],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BuildingID = ' + CASE WHEN deleted.[BuildingID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[BuildingID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRStatusHistoryID = ' + CASE WHEN inserted.[UPRStatusHistoryID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRStatusHistoryID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SDATAccountNumber = ' + CASE WHEN inserted.[SDATAccountNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[SDATAccountNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'OldStatusCode = ' + CASE WHEN inserted.[OldStatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[OldStatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'NewStatusCode = ' + CASE WHEN inserted.[NewStatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[NewStatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ChangeReason = ' + CASE WHEN inserted.[ChangeReason] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ChangeReason],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ParcelID = ' + CASE WHEN inserted.[ParcelID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ParcelID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Owner = ' + CASE WHEN inserted.[Owner] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Owner],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'PropertyTypeCode = ' + CASE WHEN inserted.[PropertyTypeCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[PropertyTypeCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ChangeSource = ' + CASE WHEN inserted.[ChangeSource] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ChangeSource],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ChangedBy = ' + CASE WHEN inserted.[ChangedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ChangedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ChangedDate = ' + CASE WHEN inserted.[ChangedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ChangedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Notes = ' + CASE WHEN inserted.[Notes] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Notes],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BuildingID = ' + CASE WHEN inserted.[BuildingID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[BuildingID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+ FROM dbo.UPRSTATUSHISTORY h
 JOIN #OverlapRepair r ON r.DropBuildingID = h.BuildingID WHERE r.DropBuildingID <> r.KeepBuildingID;
-UPDATE q SET UPRID = m.NewUPRID FROM dbo.UPRMATCHREVIEW_Q q JOIN #MergeUPR m ON m.OldUPRID = q.UPRID;
-UPDATE b SET YearBuilt = donor.YearBuilt FROM dbo.BUILDING b
+UPDATE q SET UPRID = m.NewUPRID
+OUTPUT N'UPRMATCHREVIEW_Q',inserted.[UPRID],inserted.[UPRMatchReviewID],'UPDATE',
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRMatchReviewID = ' + CASE WHEN deleted.[UPRMatchReviewID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRMatchReviewID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IncomingSourceSystem = ' + CASE WHEN deleted.[IncomingSourceSystem] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[IncomingSourceSystem],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SDAT_NormalizedIncomingAddress = ' + CASE WHEN deleted.[SDAT_NormalizedIncomingAddress] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[SDAT_NormalizedIncomingAddress],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'MA_NormalizedIncomingAddress = ' + CASE WHEN deleted.[MA_NormalizedIncomingAddress] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[MA_NormalizedIncomingAddress],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SDAT_ParcelID = ' + CASE WHEN deleted.[SDAT_ParcelID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[SDAT_ParcelID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'MA_ParcelID = ' + CASE WHEN deleted.[MA_ParcelID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[MA_ParcelID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SDAT_AccountNumber = ' + CASE WHEN deleted.[SDAT_AccountNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[SDAT_AccountNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'MA_Account = ' + CASE WHEN deleted.[MA_Account] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[MA_Account],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ReasonForNoMatch = ' + CASE WHEN deleted.[ReasonForNoMatch] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ReasonForNoMatch],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ProcessingTimestamp = ' + CASE WHEN deleted.[ProcessingTimestamp] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ProcessingTimestamp],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ReviewStatus = ' + CASE WHEN deleted.[ReviewStatus] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ReviewStatus],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Decision = ' + CASE WHEN deleted.[Decision] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[Decision],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRMatchReviewID = ' + CASE WHEN inserted.[UPRMatchReviewID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRMatchReviewID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IncomingSourceSystem = ' + CASE WHEN inserted.[IncomingSourceSystem] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[IncomingSourceSystem],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SDAT_NormalizedIncomingAddress = ' + CASE WHEN inserted.[SDAT_NormalizedIncomingAddress] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[SDAT_NormalizedIncomingAddress],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'MA_NormalizedIncomingAddress = ' + CASE WHEN inserted.[MA_NormalizedIncomingAddress] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[MA_NormalizedIncomingAddress],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SDAT_ParcelID = ' + CASE WHEN inserted.[SDAT_ParcelID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[SDAT_ParcelID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'MA_ParcelID = ' + CASE WHEN inserted.[MA_ParcelID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[MA_ParcelID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SDAT_AccountNumber = ' + CASE WHEN inserted.[SDAT_AccountNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[SDAT_AccountNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'MA_Account = ' + CASE WHEN inserted.[MA_Account] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[MA_Account],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ReasonForNoMatch = ' + CASE WHEN inserted.[ReasonForNoMatch] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ReasonForNoMatch],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ProcessingTimestamp = ' + CASE WHEN inserted.[ProcessingTimestamp] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ProcessingTimestamp],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ReviewStatus = ' + CASE WHEN inserted.[ReviewStatus] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ReviewStatus],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Decision = ' + CASE WHEN inserted.[Decision] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Decision],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+ FROM dbo.UPRMATCHREVIEW_Q q JOIN #MergeUPR m ON m.OldUPRID = q.UPRID;
+UPDATE b SET YearBuilt = donor.YearBuilt
+OUTPUT N'BUILDING',inserted.[UPRID],inserted.[BuildingID],'UPDATE',
+    CONVERT(NVARCHAR(MAX),N'') + N'BuildingID = ' + CASE WHEN deleted.[BuildingID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[BuildingID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BuildingName = ' + CASE WHEN deleted.[BuildingName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[BuildingName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'YearBuilt = ' + CASE WHEN deleted.[YearBuilt] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[YearBuilt],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN deleted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedDate = ' + CASE WHEN deleted.[UpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CONVERT(NVARCHAR(MAX),N'') + N'BuildingID = ' + CASE WHEN inserted.[BuildingID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[BuildingID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BuildingName = ' + CASE WHEN inserted.[BuildingName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[BuildingName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'YearBuilt = ' + CASE WHEN inserted.[YearBuilt] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[YearBuilt],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedDate = ' + CASE WHEN inserted.[UpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+ FROM dbo.BUILDING b
 JOIN #OverlapRepair r ON r.KeepBuildingID = b.BuildingID
 JOIN dbo.BUILDING donor ON donor.BuildingID = r.DropBuildingID
 WHERE b.YearBuilt IS NULL AND donor.YearBuilt IS NOT NULL;
-DELETE c FROM dbo.UPR_CLOSURE c WHERE EXISTS (SELECT 1 FROM #MergeUPR m WHERE m.OldUPRID IN (c.AncestorUPRID,c.DescendantUPRID));
-DELETE u FROM dbo.UNIT u JOIN #OverlapRepair r ON r.DropUnit = u.UPRID;
-DELETE u FROM dbo.UPR u JOIN #OverlapRepair r ON r.DropUnit = u.UPRID;
-DELETE b FROM dbo.BUILDING b JOIN #OverlapRepair r ON r.DropBuilding = b.UPRID WHERE r.DropBuilding <> r.KeepBuilding;
-DELETE u FROM dbo.UPR u JOIN #MergeUPR m ON m.OldUPRID = u.UPRID;
+DELETE c
+OUTPUT N'UPR_CLOSURE',deleted.[DescendantUPRID],deleted.[DescendantUPRID],'DELETE',
+    CONVERT(NVARCHAR(MAX),N'') + N'AncestorUPRID = ' + CASE WHEN deleted.[AncestorUPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[AncestorUPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'DescendantUPRID = ' + CASE WHEN deleted.[DescendantUPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[DescendantUPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Level = ' + CASE WHEN deleted.[Level] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[Level],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CAST(NULL AS NVARCHAR(MAX))
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+ FROM dbo.UPR_CLOSURE c WHERE EXISTS (SELECT 1 FROM #MergeUPR m WHERE m.OldUPRID IN (c.AncestorUPRID,c.DescendantUPRID));
+DELETE u
+OUTPUT N'UNIT',deleted.[UPRID],deleted.[UnitID],'DELETE',
+    CONVERT(NVARCHAR(MAX),N'') + N'UnitID = ' + CASE WHEN deleted.[UnitID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UnitID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BuildingID = ' + CASE WHEN deleted.[BuildingID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[BuildingID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UnitNumber = ' + CASE WHEN deleted.[UnitNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UnitNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UnitTypeCode = ' + CASE WHEN deleted.[UnitTypeCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UnitTypeCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'FloorNumber = ' + CASE WHEN deleted.[FloorNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[FloorNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BedroomCount = ' + CASE WHEN deleted.[BedroomCount] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[BedroomCount],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BathroomCount = ' + CASE WHEN deleted.[BathroomCount] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[BathroomCount],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'HasLegalIdentity = ' + CASE WHEN deleted.[HasLegalIdentity] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[HasLegalIdentity],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN deleted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedDate = ' + CASE WHEN deleted.[UpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CAST(NULL AS NVARCHAR(MAX))
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+ FROM dbo.UNIT u JOIN #OverlapRepair r ON r.DropUnit = u.UPRID;
+DELETE u
+OUTPUT N'UPR',deleted.[UPRID],deleted.[UPRID],'DELETE',
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ParentUPRID = ' + CASE WHEN deleted.[ParentUPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ParentUPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EntityTypeID = ' + CASE WHEN deleted.[EntityTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[EntityTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AccountNumber = ' + CASE WHEN deleted.[AccountNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[AccountNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN deleted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'CreatedBy = ' + CASE WHEN deleted.[CreatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[CreatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedDate = ' + CASE WHEN deleted.[UpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedBy = ' + CASE WHEN deleted.[UpdatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UpdatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CAST(NULL AS NVARCHAR(MAX))
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+ FROM dbo.UPR u JOIN #OverlapRepair r ON r.DropUnit = u.UPRID;
+DELETE b
+OUTPUT N'BUILDING',deleted.[UPRID],deleted.[BuildingID],'DELETE',
+    CONVERT(NVARCHAR(MAX),N'') + N'BuildingID = ' + CASE WHEN deleted.[BuildingID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[BuildingID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BuildingName = ' + CASE WHEN deleted.[BuildingName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[BuildingName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'YearBuilt = ' + CASE WHEN deleted.[YearBuilt] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[YearBuilt],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN deleted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedDate = ' + CASE WHEN deleted.[UpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CAST(NULL AS NVARCHAR(MAX))
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+ FROM dbo.BUILDING b JOIN #OverlapRepair r ON r.DropBuilding = b.UPRID WHERE r.DropBuilding <> r.KeepBuilding;
+DELETE u
+OUTPUT N'UPR',deleted.[UPRID],deleted.[UPRID],'DELETE',
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ParentUPRID = ' + CASE WHEN deleted.[ParentUPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ParentUPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EntityTypeID = ' + CASE WHEN deleted.[EntityTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[EntityTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AccountNumber = ' + CASE WHEN deleted.[AccountNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[AccountNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN deleted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'CreatedBy = ' + CASE WHEN deleted.[CreatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[CreatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedDate = ' + CASE WHEN deleted.[UpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedBy = ' + CASE WHEN deleted.[UpdatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UpdatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CAST(NULL AS NVARCHAR(MAX))
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+ FROM dbo.UPR u JOIN #MergeUPR m ON m.OldUPRID = u.UPRID;
 
 /* When a potential old pair cannot be repaired safely, do not silently remap
    its source identifier. Retain both records and show a repeatable review. */
 INSERT INTO dbo.UPRMATCHREVIEW_Q
     (UPRID, IncomingSourceSystem, SDAT_NormalizedIncomingAddress, MA_NormalizedIncomingAddress,
      SDAT_AccountNumber, MA_Account, ReasonForNoMatch, ProcessingTimestamp, ReviewStatus, Decision)
+
+OUTPUT N'UPRMATCHREVIEW_Q',inserted.[UPRID],inserted.[UPRMatchReviewID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRMatchReviewID = ' + CASE WHEN inserted.[UPRMatchReviewID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRMatchReviewID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IncomingSourceSystem = ' + CASE WHEN inserted.[IncomingSourceSystem] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[IncomingSourceSystem],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SDAT_NormalizedIncomingAddress = ' + CASE WHEN inserted.[SDAT_NormalizedIncomingAddress] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[SDAT_NormalizedIncomingAddress],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'MA_NormalizedIncomingAddress = ' + CASE WHEN inserted.[MA_NormalizedIncomingAddress] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[MA_NormalizedIncomingAddress],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SDAT_ParcelID = ' + CASE WHEN inserted.[SDAT_ParcelID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[SDAT_ParcelID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'MA_ParcelID = ' + CASE WHEN inserted.[MA_ParcelID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[MA_ParcelID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SDAT_AccountNumber = ' + CASE WHEN inserted.[SDAT_AccountNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[SDAT_AccountNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'MA_Account = ' + CASE WHEN inserted.[MA_Account] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[MA_Account],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ReasonForNoMatch = ' + CASE WHEN inserted.[ReasonForNoMatch] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ReasonForNoMatch],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ProcessingTimestamp = ' + CASE WHEN inserted.[ProcessingTimestamp] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ProcessingTimestamp],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ReviewStatus = ' + CASE WHEN inserted.[ReviewStatus] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ReviewStatus],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Decision = ' + CASE WHEN inserted.[Decision] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Decision],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
 SELECT sx.UPRID, N'KDAT', sd.NormalizedFullAddress, ma.NormalizedFullAddress,
     sd.AccountNumber, ma.AccountNumber, N'AMBIGUOUS_CANDIDATES', @Now, N'PENDING_REVIEW',
     N'MA/SDAT blank-unit overlap has existing records that cannot be safely merged; inspect source links and manually maintained values.'
@@ -1527,6 +2242,29 @@ SET @ReviewInserted += @@ROWCOUNT;
 /* Normalize the known BLV alias on source-linked existing addresses too,
    including an SDAT-only earlier load that is now joined by MA. */
 UPDATE a SET StreetType = N'BLVD', NormalizedAddress = n.FullAddress
+OUTPUT N'ADDRESS',CAST(NULL AS BIGINT),inserted.[AddressID],'UPDATE',
+    CONVERT(NVARCHAR(MAX),N'') + N'AddressID = ' + CASE WHEN deleted.[AddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[AddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StreetNumber = ' + CASE WHEN deleted.[StreetNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StreetNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StreetName = ' + CASE WHEN deleted.[StreetName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StreetName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StreetType = ' + CASE WHEN deleted.[StreetType] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StreetType],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'City = ' + CASE WHEN deleted.[City] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[City],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'State = ' + CASE WHEN deleted.[State] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[State],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ZipCode = ' + CASE WHEN deleted.[ZipCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ZipCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'NormalizedAddress = ' + CASE WHEN deleted.[NormalizedAddress] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[NormalizedAddress],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'YCoordinate = ' + CASE WHEN deleted.[YCoordinate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[YCoordinate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'XCoordinate = ' + CASE WHEN deleted.[XCoordinate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[XCoordinate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CONVERT(NVARCHAR(MAX),N'') + N'AddressID = ' + CASE WHEN inserted.[AddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StreetNumber = ' + CASE WHEN inserted.[StreetNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StreetNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StreetName = ' + CASE WHEN inserted.[StreetName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StreetName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StreetType = ' + CASE WHEN inserted.[StreetType] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StreetType],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'City = ' + CASE WHEN inserted.[City] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[City],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'State = ' + CASE WHEN inserted.[State] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[State],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ZipCode = ' + CASE WHEN inserted.[ZipCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ZipCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'NormalizedAddress = ' + CASE WHEN inserted.[NormalizedAddress] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[NormalizedAddress],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'YCoordinate = ' + CASE WHEN inserted.[YCoordinate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[YCoordinate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'XCoordinate = ' + CASE WHEN inserted.[XCoordinate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[XCoordinate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+
 FROM dbo.ADDRESS a
 CROSS APPLY (SELECT FullAddress = dbo.fn_UPR_NormalizeFullAddressLine(
     a.StreetNumber + N' ' + a.StreetName + N' BLVD', a.City, a.ZipCode)) n
@@ -1585,6 +2323,7 @@ OUTER APPLY (
 
 IF OBJECT_ID('tempdb..#BuildingMap') IS NOT NULL DROP TABLE #BuildingMap;
 CREATE TABLE #BuildingMap (
+    AuditNewValue NVARCHAR(MAX) NULL,
     BuildingKey BIGINT NOT NULL PRIMARY KEY,
     GroupKey NVARCHAR(450) NOT NULL,
     BuildingUPRID BIGINT NOT NULL,
@@ -1605,6 +2344,23 @@ CREATE TABLE #BuildingMap (
     GROUP BY u.UPRID
 )
 UPDATE ua SET IsPrimary = 1
+OUTPUT N'UPR_ADDRESS',inserted.[UPRID],inserted.[UPRAddressID],'UPDATE',
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRAddressID = ' + CASE WHEN deleted.[UPRAddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRAddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressID = ' + CASE WHEN deleted.[AddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[AddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressRoleID = ' + CASE WHEN deleted.[AddressRoleID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[AddressRoleID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IsPrimary = ' + CASE WHEN deleted.[IsPrimary] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[IsPrimary],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EffectiveDate = ' + CASE WHEN deleted.[EffectiveDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[EffectiveDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EndDate = ' + CASE WHEN deleted.[EndDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[EndDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRAddressID = ' + CASE WHEN inserted.[UPRAddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRAddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressID = ' + CASE WHEN inserted.[AddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressRoleID = ' + CASE WHEN inserted.[AddressRoleID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AddressRoleID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IsPrimary = ' + CASE WHEN inserted.[IsPrimary] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[IsPrimary],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EffectiveDate = ' + CASE WHEN inserted.[EffectiveDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EffectiveDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EndDate = ' + CASE WHEN inserted.[EndDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EndDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+
 FROM dbo.UPR_ADDRESS ua
 INNER JOIN PrimaryBuildingAddress p ON p.UPRAddressID = ua.UPRAddressID;
 
@@ -1642,12 +2398,35 @@ ON 1 = 0
 WHEN NOT MATCHED THEN
     INSERT (ParentUPRID, EntityTypeID, AccountNumber, StatusCode, CreatedBy)
     VALUES (s.ParentUPRID, @EtBuilding, NULL, N'ACTIVE', @RunUser)
-OUTPUT s.BuildingKey, s.GroupKey, inserted.UPRID, s.NormalizedFullAddress, s.PathType
-INTO #BuildingMap (BuildingKey, GroupKey, BuildingUPRID, NormalizedFullAddress, PathType);
+OUTPUT s.BuildingKey, s.GroupKey, inserted.UPRID, s.NormalizedFullAddress, s.PathType,
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ParentUPRID = ' + CASE WHEN inserted.[ParentUPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ParentUPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EntityTypeID = ' + CASE WHEN inserted.[EntityTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EntityTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AccountNumber = ' + CASE WHEN inserted.[AccountNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AccountNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'CreatedBy = ' + CASE WHEN inserted.[CreatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedDate = ' + CASE WHEN inserted.[UpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedBy = ' + CASE WHEN inserted.[UpdatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UpdatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #BuildingMap (BuildingKey, GroupKey, BuildingUPRID, NormalizedFullAddress, PathType, AuditNewValue);
+SET @AuditDmlRows=@@ROWCOUNT;
+INSERT #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+SELECT N'UPR',m.BuildingUPRID,m.BuildingUPRID,'INSERT',NULL,m.AuditNewValue
+FROM #BuildingMap m WHERE m.AuditNewValue IS NOT NULL;
 
-SET @BuildingInserted = @@ROWCOUNT;
+
+SET @BuildingInserted = @AuditDmlRows;
 
 INSERT INTO dbo.BUILDING (UPRID, BuildingName, YearBuilt, StatusCode)
+
+OUTPUT N'BUILDING',inserted.[UPRID],inserted.[BuildingID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'BuildingID = ' + CASE WHEN inserted.[BuildingID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[BuildingID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BuildingName = ' + CASE WHEN inserted.[BuildingName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[BuildingName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'YearBuilt = ' + CASE WHEN inserted.[YearBuilt] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[YearBuilt],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedDate = ' + CASE WHEN inserted.[UpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
 SELECT
     bm.BuildingUPRID,
     NULL,   /* No BuildingName is supplied by the incoming tables. */
@@ -1659,6 +2438,21 @@ WHERE NOT EXISTS (SELECT 1 FROM dbo.BUILDING x WHERE x.UPRID = bm.BuildingUPRID)
 
 /* Clear the exact names generated by the previous loader for these groups. */
 UPDATE target SET BuildingName = NULL
+OUTPUT N'BUILDING',inserted.[UPRID],inserted.[BuildingID],'UPDATE',
+    CONVERT(NVARCHAR(MAX),N'') + N'BuildingID = ' + CASE WHEN deleted.[BuildingID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[BuildingID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BuildingName = ' + CASE WHEN deleted.[BuildingName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[BuildingName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'YearBuilt = ' + CASE WHEN deleted.[YearBuilt] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[YearBuilt],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN deleted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedDate = ' + CASE WHEN deleted.[UpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CONVERT(NVARCHAR(MAX),N'') + N'BuildingID = ' + CASE WHEN inserted.[BuildingID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[BuildingID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BuildingName = ' + CASE WHEN inserted.[BuildingName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[BuildingName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'YearBuilt = ' + CASE WHEN inserted.[YearBuilt] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[YearBuilt],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedDate = ' + CASE WHEN inserted.[UpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+
 FROM dbo.BUILDING target
 INNER JOIN #BuildingMap bm ON bm.BuildingUPRID = target.UPRID
 INNER JOIN #BuildingSrc src ON src.BuildingKey = bm.BuildingKey
@@ -1667,6 +2461,21 @@ WHERE target.BuildingName = CASE WHEN src.BuildingSeq <= 26
     ELSE N'Building ' + CONVERT(NVARCHAR(20), src.BuildingSeq) END;
 
 UPDATE target SET CommunityName = NULL
+OUTPUT N'COMPLEX',inserted.[UPRID],inserted.[ComplexID],'UPDATE',
+    CONVERT(NVARCHAR(MAX),N'') + N'ComplexID = ' + CASE WHEN deleted.[ComplexID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ComplexID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'CommunityName = ' + CASE WHEN deleted.[CommunityName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[CommunityName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'PropertyTypeID = ' + CASE WHEN deleted.[PropertyTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[PropertyTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN deleted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'CreatedBy = ' + CASE WHEN deleted.[CreatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[CreatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CONVERT(NVARCHAR(MAX),N'') + N'ComplexID = ' + CASE WHEN inserted.[ComplexID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ComplexID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'CommunityName = ' + CASE WHEN inserted.[CommunityName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CommunityName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'PropertyTypeID = ' + CASE WHEN inserted.[PropertyTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[PropertyTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'CreatedBy = ' + CASE WHEN inserted.[CreatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+
 FROM dbo.COMPLEX target
 INNER JOIN #ParentMap pm ON pm.UPRID = target.UPRID
 WHERE target.CommunityName IN (N'BUILDING COMPLEX', pm.AccountNumber + N' BUILDING COMPLEX')
@@ -1700,6 +2509,29 @@ WHERE NOT EXISTS (SELECT a.XCoordinate, a.YCoordinate EXCEPT SELECT src.LegacyMa
       WHERE s.GroupKey = src.GroupKey AND s.NormalizedFullAddress = src.NormalizedFullAddress AND s.IsValid = 1);
 
 UPDATE a SET XCoordinate = r.XCoordinate, YCoordinate = r.YCoordinate
+OUTPUT N'ADDRESS',CAST(NULL AS BIGINT),inserted.[AddressID],'UPDATE',
+    CONVERT(NVARCHAR(MAX),N'') + N'AddressID = ' + CASE WHEN deleted.[AddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[AddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StreetNumber = ' + CASE WHEN deleted.[StreetNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StreetNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StreetName = ' + CASE WHEN deleted.[StreetName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StreetName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StreetType = ' + CASE WHEN deleted.[StreetType] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StreetType],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'City = ' + CASE WHEN deleted.[City] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[City],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'State = ' + CASE WHEN deleted.[State] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[State],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ZipCode = ' + CASE WHEN deleted.[ZipCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ZipCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'NormalizedAddress = ' + CASE WHEN deleted.[NormalizedAddress] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[NormalizedAddress],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'YCoordinate = ' + CASE WHEN deleted.[YCoordinate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[YCoordinate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'XCoordinate = ' + CASE WHEN deleted.[XCoordinate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[XCoordinate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CONVERT(NVARCHAR(MAX),N'') + N'AddressID = ' + CASE WHEN inserted.[AddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StreetNumber = ' + CASE WHEN inserted.[StreetNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StreetNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StreetName = ' + CASE WHEN inserted.[StreetName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StreetName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StreetType = ' + CASE WHEN inserted.[StreetType] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StreetType],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'City = ' + CASE WHEN inserted.[City] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[City],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'State = ' + CASE WHEN inserted.[State] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[State],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ZipCode = ' + CASE WHEN inserted.[ZipCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ZipCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'NormalizedAddress = ' + CASE WHEN inserted.[NormalizedAddress] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[NormalizedAddress],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'YCoordinate = ' + CASE WHEN inserted.[YCoordinate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[YCoordinate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'XCoordinate = ' + CASE WHEN inserted.[XCoordinate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[XCoordinate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+
 FROM dbo.ADDRESS a INNER JOIN #CoordinateRepair r ON r.AddressID = a.AddressID
 WHERE (SELECT COUNT(*) FROM #CoordinateRepair other WHERE other.AddressID = r.AddressID) = 1;
 
@@ -1729,6 +2561,29 @@ WHERE NOT EXISTS (
 /* Remove the former MD fallback on a matched source address when no valid
    state was supplied. The incoming tables do not provide a state for MA. */
 UPDATE a SET State = NULL
+OUTPUT N'ADDRESS',CAST(NULL AS BIGINT),inserted.[AddressID],'UPDATE',
+    CONVERT(NVARCHAR(MAX),N'') + N'AddressID = ' + CASE WHEN deleted.[AddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[AddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StreetNumber = ' + CASE WHEN deleted.[StreetNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StreetNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StreetName = ' + CASE WHEN deleted.[StreetName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StreetName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StreetType = ' + CASE WHEN deleted.[StreetType] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StreetType],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'City = ' + CASE WHEN deleted.[City] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[City],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'State = ' + CASE WHEN deleted.[State] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[State],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ZipCode = ' + CASE WHEN deleted.[ZipCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ZipCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'NormalizedAddress = ' + CASE WHEN deleted.[NormalizedAddress] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[NormalizedAddress],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'YCoordinate = ' + CASE WHEN deleted.[YCoordinate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[YCoordinate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'XCoordinate = ' + CASE WHEN deleted.[XCoordinate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[XCoordinate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CONVERT(NVARCHAR(MAX),N'') + N'AddressID = ' + CASE WHEN inserted.[AddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StreetNumber = ' + CASE WHEN inserted.[StreetNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StreetNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StreetName = ' + CASE WHEN inserted.[StreetName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StreetName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StreetType = ' + CASE WHEN inserted.[StreetType] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StreetType],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'City = ' + CASE WHEN inserted.[City] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[City],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'State = ' + CASE WHEN inserted.[State] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[State],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ZipCode = ' + CASE WHEN inserted.[ZipCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ZipCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'NormalizedAddress = ' + CASE WHEN inserted.[NormalizedAddress] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[NormalizedAddress],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'YCoordinate = ' + CASE WHEN inserted.[YCoordinate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[YCoordinate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'XCoordinate = ' + CASE WHEN inserted.[XCoordinate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[XCoordinate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+
 FROM dbo.ADDRESS a
 INNER JOIN dbo.UPR_ADDRESS ua ON ua.AddressID = a.AddressID AND ua.IsPrimary = 1
 INNER JOIN #BuildingMap bm ON bm.BuildingUPRID = ua.UPRID
@@ -1737,6 +2592,7 @@ WHERE a.State = N'MD' AND src.State IS NULL;
 
 IF OBJECT_ID('tempdb..#AddressMap') IS NOT NULL DROP TABLE #AddressMap;
 CREATE TABLE #AddressMap (
+    AuditNewValue NVARCHAR(MAX) NULL,
     AddressKey BIGINT NOT NULL PRIMARY KEY,
     AddressID BIGINT NOT NULL
 );
@@ -1766,11 +2622,37 @@ WHEN NOT MATCHED THEN
         s.StreetNumber, s.StreetName, s.StreetType, s.City, s.[State], s.ZipCode,
         s.NormalizedAddress, s.YCoordinate, s.XCoordinate
     )
-OUTPUT s.AddressKey, inserted.AddressID INTO #AddressMap (AddressKey, AddressID);
+OUTPUT s.AddressKey, inserted.AddressID,
+    CONVERT(NVARCHAR(MAX),N'') + N'AddressID = ' + CASE WHEN inserted.[AddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StreetNumber = ' + CASE WHEN inserted.[StreetNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StreetNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StreetName = ' + CASE WHEN inserted.[StreetName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StreetName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StreetType = ' + CASE WHEN inserted.[StreetType] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StreetType],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'City = ' + CASE WHEN inserted.[City] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[City],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'State = ' + CASE WHEN inserted.[State] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[State],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ZipCode = ' + CASE WHEN inserted.[ZipCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ZipCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'NormalizedAddress = ' + CASE WHEN inserted.[NormalizedAddress] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[NormalizedAddress],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'YCoordinate = ' + CASE WHEN inserted.[YCoordinate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[YCoordinate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'XCoordinate = ' + CASE WHEN inserted.[XCoordinate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[XCoordinate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END INTO #AddressMap (AddressKey, AddressID, AuditNewValue);
+SET @AuditDmlRows=@@ROWCOUNT;
+INSERT #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+SELECT N'ADDRESS',CAST(NULL AS BIGINT),m.AddressID,'INSERT',NULL,m.AuditNewValue
+FROM #AddressMap m WHERE m.AuditNewValue IS NOT NULL;
+
 
 SET @AddressInserted = @@ROWCOUNT;
 
 INSERT INTO dbo.UPR_ADDRESS (UPRID, AddressID, AddressRoleID, IsPrimary, EffectiveDate)
+
+OUTPUT N'UPR_ADDRESS',inserted.[UPRID],inserted.[UPRAddressID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRAddressID = ' + CASE WHEN inserted.[UPRAddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRAddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressID = ' + CASE WHEN inserted.[AddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressRoleID = ' + CASE WHEN inserted.[AddressRoleID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AddressRoleID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IsPrimary = ' + CASE WHEN inserted.[IsPrimary] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[IsPrimary],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EffectiveDate = ' + CASE WHEN inserted.[EffectiveDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EffectiveDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EndDate = ' + CASE WHEN inserted.[EndDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EndDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
 SELECT
     bm.BuildingUPRID,
     am.AddressID,
@@ -1788,8 +2670,7 @@ PRINT N'Step 8 complete - Building UPRs this run~' + CONVERT(NVARCHAR(20), @Buil
 
 /* ============================================================================
    9. Units
-      PROPERTY/COMPLEX: Unit child of Building (ParentUPRID=Building)
-      CONDO: Unit child of Condo (ParentUPRID=Condo); BuildingID still required
+      PROPERTY/COMPLEX/CONDO: Unit child of its Building (ParentUPRID=Building)
    ============================================================================ */
 PRINT N'Step 9: Insert Unit UPRs + UNIT...';
 
@@ -1838,10 +2719,7 @@ UnitJoined AS (
            NULL when independent. Both source identifiers remain linked. */
         UnitNumber = COALESCE(ub.RealUnitNumber,
             CASE WHEN ub.SourceSystem = N'KDAT' THEN NULL ELSE N'N/A' END),
-        ParentUPRID = CASE
-            WHEN ub.PathType = N'CONDO' THEN pm.UPRID
-            ELSE bm.BuildingUPRID
-        END,
+        ParentUPRID = bm.BuildingUPRID,
         BuildingUPRID = bm.BuildingUPRID,
         BuildingTableID = CAST(NULL AS BIGINT),
         /* Named units match by real number. An unambiguous blank MA/SDAT
@@ -1908,6 +2786,7 @@ DELETE FROM #UnitSrc WHERE BuildingTableID IS NULL OR ParentUPRID IS NULL;
 
 IF OBJECT_ID('tempdb..#UnitMap') IS NOT NULL DROP TABLE #UnitMap;
 CREATE TABLE #UnitMap (
+    AuditNewValue NVARCHAR(MAX) NULL,
     StageKey INT NOT NULL PRIMARY KEY,
     UnitUPRID BIGINT NOT NULL,
     GroupKey NVARCHAR(450) NOT NULL
@@ -1963,10 +2842,38 @@ ON 1 = 0
 WHEN NOT MATCHED THEN
     INSERT (ParentUPRID, EntityTypeID, AccountNumber, StatusCode, CreatedBy)
     VALUES (s.ParentUPRID, @EtUnit, NULL, N'ACTIVE', @RunUser)
-OUTPUT s.StageKey, inserted.UPRID, s.GroupKey
-INTO #UnitMap (StageKey, UnitUPRID, GroupKey);
+OUTPUT s.StageKey, inserted.UPRID, s.GroupKey,
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ParentUPRID = ' + CASE WHEN inserted.[ParentUPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ParentUPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EntityTypeID = ' + CASE WHEN inserted.[EntityTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EntityTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AccountNumber = ' + CASE WHEN inserted.[AccountNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AccountNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'CreatedBy = ' + CASE WHEN inserted.[CreatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedDate = ' + CASE WHEN inserted.[UpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedBy = ' + CASE WHEN inserted.[UpdatedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UpdatedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #UnitMap (StageKey, UnitUPRID, GroupKey, AuditNewValue);
+SET @AuditDmlRows=@@ROWCOUNT;
+INSERT #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+SELECT N'UPR',m.UnitUPRID,m.UnitUPRID,'INSERT',NULL,m.AuditNewValue
+FROM #UnitMap m WHERE m.AuditNewValue IS NOT NULL;
+
 
 INSERT INTO dbo.UNIT (UPRID, BuildingID, UnitNumber, StatusCode)
+
+OUTPUT N'UNIT',inserted.[UPRID],inserted.[UnitID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'UnitID = ' + CASE WHEN inserted.[UnitID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UnitID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BuildingID = ' + CASE WHEN inserted.[BuildingID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[BuildingID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UnitNumber = ' + CASE WHEN inserted.[UnitNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UnitNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UnitTypeCode = ' + CASE WHEN inserted.[UnitTypeCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UnitTypeCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'FloorNumber = ' + CASE WHEN inserted.[FloorNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[FloorNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BedroomCount = ' + CASE WHEN inserted.[BedroomCount] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[BedroomCount],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BathroomCount = ' + CASE WHEN inserted.[BathroomCount] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[BathroomCount],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'HasLegalIdentity = ' + CASE WHEN inserted.[HasLegalIdentity] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[HasLegalIdentity],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UpdatedDate = ' + CASE WHEN inserted.[UpdatedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UpdatedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
 SELECT
     um.UnitUPRID,
     us.BuildingTableID,
@@ -1999,6 +2906,17 @@ WHERE EXISTS (
 
 /* Remove the previous account-as-owner fallback, without changing real names. */
 UPDATE c SET OrganizationName = src.OrgName
+OUTPUT N'CONTACT',CAST(NULL AS BIGINT),inserted.[ContactID],'UPDATE',
+    CONVERT(NVARCHAR(MAX),N'') + N'ContactID = ' + CASE WHEN deleted.[ContactID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ContactID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ContactTypeID = ' + CASE WHEN deleted.[ContactTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[ContactTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'OrganizationName = ' + CASE WHEN deleted.[OrganizationName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[OrganizationName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN deleted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CONVERT(NVARCHAR(MAX),N'') + N'ContactID = ' + CASE WHEN inserted.[ContactID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ContactID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ContactTypeID = ' + CASE WHEN inserted.[ContactTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ContactTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'OrganizationName = ' + CASE WHEN inserted.[OrganizationName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[OrganizationName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+
 FROM dbo.CONTACT c
 INNER JOIN dbo.UPR_CONTACT uc ON uc.ContactID = c.ContactID AND uc.RoleTypeID = @RoleOwner
 INNER JOIN #ContactSrc src ON src.ParentUPRID = uc.UPRID
@@ -2008,6 +2926,7 @@ WHERE c.OrganizationName = pm.AccountNumber
 
 IF OBJECT_ID('tempdb..#ContactMap') IS NOT NULL DROP TABLE #ContactMap;
 CREATE TABLE #ContactMap (
+    AuditNewValue NVARCHAR(MAX) NULL,
     GroupKey NVARCHAR(450) NOT NULL PRIMARY KEY,
     ContactID BIGINT NOT NULL,
     ParentUPRID BIGINT NOT NULL
@@ -2026,12 +2945,31 @@ ON 1 = 0
 WHEN NOT MATCHED THEN
     INSERT (ContactTypeID, OrganizationName, StatusCode)
     VALUES (@CtOrg, s.OrgName, N'ACTIVE')
-OUTPUT s.GroupKey, inserted.ContactID, s.ParentUPRID
-INTO #ContactMap (GroupKey, ContactID, ParentUPRID);
+OUTPUT s.GroupKey, inserted.ContactID, s.ParentUPRID,
+    CONVERT(NVARCHAR(MAX),N'') + N'ContactID = ' + CASE WHEN inserted.[ContactID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ContactID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ContactTypeID = ' + CASE WHEN inserted.[ContactTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ContactTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'OrganizationName = ' + CASE WHEN inserted.[OrganizationName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[OrganizationName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #ContactMap (GroupKey, ContactID, ParentUPRID, AuditNewValue);
+SET @AuditDmlRows=@@ROWCOUNT;
+INSERT #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+SELECT N'CONTACT',m.ParentUPRID,m.ContactID,'INSERT',NULL,m.AuditNewValue
+FROM #ContactMap m WHERE m.AuditNewValue IS NOT NULL;
 
-SET @ContactInserted = @@ROWCOUNT;
+
+SET @ContactInserted = @AuditDmlRows;
 
 INSERT INTO dbo.UPR_CONTACT (UPRID, ContactID, RoleTypeID, EffectiveDate)
+
+OUTPUT N'UPR_CONTACT',inserted.[UPRID],inserted.[UPRContactID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRContactID = ' + CASE WHEN inserted.[UPRContactID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRContactID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ContactID = ' + CASE WHEN inserted.[ContactID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ContactID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'RoleTypeID = ' + CASE WHEN inserted.[RoleTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[RoleTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EffectiveDate = ' + CASE WHEN inserted.[EffectiveDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EffectiveDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EndDate = ' + CASE WHEN inserted.[EndDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EndDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
 SELECT
     cm.ParentUPRID,
     cm.ContactID,
@@ -2094,6 +3032,15 @@ INSERT INTO dbo.EXTERNAL_IDENTIFIER_XREF (
 )
 /* MIN() guards the one-row-per-source-record index if the incoming table
    was loaded with duplicate source IDs */
+
+OUTPUT N'EXTERNAL_IDENTIFIER_XREF',inserted.[UPRID],inserted.[ExternalIdentifierID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'ExternalIdentifierID = ' + CASE WHEN inserted.[ExternalIdentifierID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ExternalIdentifierID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SourceSystem = ' + CASE WHEN inserted.[SourceSystem] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[SourceSystem],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IdentifierType = ' + CASE WHEN inserted.[IdentifierType] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[IdentifierType],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IdentifierValue = ' + CASE WHEN inserted.[IdentifierValue] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[IdentifierValue],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
 SELECT
     MIN(x.TargetUPRID),
     x.SourceSystem,
@@ -2116,6 +3063,15 @@ SET @XrefInserted = @@ROWCOUNT;
 INSERT INTO dbo.EXTERNAL_IDENTIFIER_XREF (
     UPRID, SourceSystem, IdentifierType, IdentifierValue
 )
+
+OUTPUT N'EXTERNAL_IDENTIFIER_XREF',inserted.[UPRID],inserted.[ExternalIdentifierID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'ExternalIdentifierID = ' + CASE WHEN inserted.[ExternalIdentifierID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ExternalIdentifierID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SourceSystem = ' + CASE WHEN inserted.[SourceSystem] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[SourceSystem],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IdentifierType = ' + CASE WHEN inserted.[IdentifierType] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[IdentifierType],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IdentifierValue = ' + CASE WHEN inserted.[IdentifierValue] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[IdentifierValue],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
 SELECT DISTINCT
     pm.UPRID,
     CASE WHEN s.SourceSystem = N'KDAT' THEN N'KDAT' ELSE N'ADDRESS_MASTER' END,
@@ -2148,6 +3104,15 @@ SET @XrefInserted = @XrefInserted + @@ROWCOUNT;
     WHERE s.IsValid = 1 AND s.ParcelID IS NOT NULL
 )
 INSERT INTO dbo.EXTERNAL_IDENTIFIER_XREF (UPRID, SourceSystem, IdentifierType, IdentifierValue)
+
+OUTPUT N'EXTERNAL_IDENTIFIER_XREF',inserted.[UPRID],inserted.[ExternalIdentifierID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'ExternalIdentifierID = ' + CASE WHEN inserted.[ExternalIdentifierID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ExternalIdentifierID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SourceSystem = ' + CASE WHEN inserted.[SourceSystem] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[SourceSystem],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IdentifierType = ' + CASE WHEN inserted.[IdentifierType] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[IdentifierType],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IdentifierValue = ' + CASE WHEN inserted.[IdentifierValue] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[IdentifierValue],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
 SELECT p.UPRID, p.SourceSystem, N'PARCEL_ID', p.ParcelID
 FROM ParcelLinks p
 WHERE NOT EXISTS (SELECT 1 FROM dbo.EXTERNAL_IDENTIFIER_XREF x
@@ -2206,26 +3171,49 @@ BEGIN
         WHERE x.AncestorUPRID = c.AncestorUPRID AND x.DescendantUPRID = child.UPRID);
     SET @ClosureAdded = @@ROWCOUNT;
 END;
-DELETE c FROM dbo.UPR_CLOSURE c
+DELETE c
+OUTPUT N'UPR_CLOSURE',deleted.[DescendantUPRID],deleted.[DescendantUPRID],'DELETE',
+    CONVERT(NVARCHAR(MAX),N'') + N'AncestorUPRID = ' + CASE WHEN deleted.[AncestorUPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[AncestorUPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'DescendantUPRID = ' + CASE WHEN deleted.[DescendantUPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[DescendantUPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Level = ' + CASE WHEN deleted.[Level] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[Level],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CAST(NULL AS NVARCHAR(MAX))
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+ FROM dbo.UPR_CLOSURE c
 WHERE NOT EXISTS (SELECT 1 FROM #ExpectedClosure e
     WHERE e.AncestorUPRID = c.AncestorUPRID AND e.DescendantUPRID = c.DescendantUPRID);
 UPDATE c SET [Level] = e.[Level]
+OUTPUT N'UPR_CLOSURE',inserted.[DescendantUPRID],inserted.[DescendantUPRID],'UPDATE',
+    CONVERT(NVARCHAR(MAX),N'') + N'AncestorUPRID = ' + CASE WHEN deleted.[AncestorUPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[AncestorUPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'DescendantUPRID = ' + CASE WHEN deleted.[DescendantUPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[DescendantUPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Level = ' + CASE WHEN deleted.[Level] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[Level],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CONVERT(NVARCHAR(MAX),N'') + N'AncestorUPRID = ' + CASE WHEN inserted.[AncestorUPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AncestorUPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'DescendantUPRID = ' + CASE WHEN inserted.[DescendantUPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DescendantUPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Level = ' + CASE WHEN inserted.[Level] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Level],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+
 FROM dbo.UPR_CLOSURE c
 INNER JOIN #ExpectedClosure e
     ON e.AncestorUPRID = c.AncestorUPRID AND e.DescendantUPRID = c.DescendantUPRID
 WHERE c.[Level] IS NULL OR c.[Level] <> e.[Level];
 INSERT INTO dbo.UPR_CLOSURE (AncestorUPRID, DescendantUPRID, [Level])
+
+OUTPUT N'UPR_CLOSURE',inserted.[DescendantUPRID],inserted.[DescendantUPRID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'AncestorUPRID = ' + CASE WHEN inserted.[AncestorUPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AncestorUPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'DescendantUPRID = ' + CASE WHEN inserted.[DescendantUPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DescendantUPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Level = ' + CASE WHEN inserted.[Level] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Level],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
 SELECT e.AncestorUPRID, e.DescendantUPRID, e.[Level] FROM #ExpectedClosure e
 WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_CLOSURE c
     WHERE c.AncestorUPRID = e.AncestorUPRID AND c.DescendantUPRID = e.DescendantUPRID);
 
-IF EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.UPR_CLOSURE')
-           AND name = N'Level' AND is_nullable = 1)
-    ALTER TABLE dbo.UPR_CLOSURE ALTER COLUMN [Level] INT NOT NULL;
-IF OBJECT_ID(N'dbo.CK_UPR_CLOSURE_Level', N'C') IS NULL
-    ALTER TABLE dbo.UPR_CLOSURE WITH CHECK ADD CONSTRAINT CK_UPR_CLOSURE_Level CHECK ([Level] >= 0);
+/* Preserve the client's existing Level type/nullability and dependent indexes.
+   The synchronization above fills NULL/incorrect values with calculated distances.
+   Do not ALTER COLUMN or add a new CHECK constraint during the data load. */
+IF EXISTS(SELECT 1 FROM dbo.UPR_CLOSURE WHERE [Level] IS NULL OR [Level]<0)
+    THROW 50005,'Closure synchronization left a NULL or negative distance. The load was rolled back.',1;
 
-/* Ensure indexes after any legacy Level backfill/nullability upgrade. */
+/* Ensure the requested pair and traversal indexes after distance synchronization. */
 /* CLOSURE_FORWARD_INDEX_CHECK */
 IF NOT EXISTS (
     SELECT 1 FROM sys.indexes i
@@ -2288,6 +3276,17 @@ SELECT UPRID, AddressID INTO #HierarchyAddressLinks FROM AddressLinks;
     FROM #HierarchyAddressLinks
 )
 INSERT INTO dbo.UPR_ADDRESS (UPRID, AddressID, AddressRoleID, IsPrimary, EffectiveDate)
+
+OUTPUT N'UPR_ADDRESS',inserted.[UPRID],inserted.[UPRAddressID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRAddressID = ' + CASE WHEN inserted.[UPRAddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRAddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressID = ' + CASE WHEN inserted.[AddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressRoleID = ' + CASE WHEN inserted.[AddressRoleID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AddressRoleID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IsPrimary = ' + CASE WHEN inserted.[IsPrimary] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[IsPrimary],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EffectiveDate = ' + CASE WHEN inserted.[EffectiveDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EffectiveDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EndDate = ' + CASE WHEN inserted.[EndDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EndDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
 SELECT l.UPRID, l.AddressID, @AddrPhysical,
     CASE WHEN l.Rn = 1 AND NOT EXISTS (
         SELECT 1 FROM dbo.UPR_ADDRESS p WHERE p.UPRID = l.UPRID AND p.IsPrimary = 1
@@ -2307,11 +3306,38 @@ WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_ADDRESS ua
     GROUP BY ua.UPRID
 )
 UPDATE ua SET IsPrimary = 1
+OUTPUT N'UPR_ADDRESS',inserted.[UPRID],inserted.[UPRAddressID],'UPDATE',
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRAddressID = ' + CASE WHEN deleted.[UPRAddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRAddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN deleted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressID = ' + CASE WHEN deleted.[AddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[AddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressRoleID = ' + CASE WHEN deleted.[AddressRoleID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[AddressRoleID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IsPrimary = ' + CASE WHEN deleted.[IsPrimary] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[IsPrimary],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EffectiveDate = ' + CASE WHEN deleted.[EffectiveDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[EffectiveDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EndDate = ' + CASE WHEN deleted.[EndDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[EndDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRAddressID = ' + CASE WHEN inserted.[UPRAddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRAddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressID = ' + CASE WHEN inserted.[AddressID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AddressID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'AddressRoleID = ' + CASE WHEN inserted.[AddressRoleID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AddressRoleID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'IsPrimary = ' + CASE WHEN inserted.[IsPrimary] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[IsPrimary],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EffectiveDate = ' + CASE WHEN inserted.[EffectiveDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EffectiveDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EndDate = ' + CASE WHEN inserted.[EndDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EndDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
+
 FROM dbo.UPR_ADDRESS ua
 INNER JOIN PrimaryHierarchyAddress p ON p.UPRAddressID = ua.UPRAddressID;
 
 /* Share each parent's source contact with its Building/Unit/ADU descendants. */
 INSERT INTO dbo.UPR_CONTACT (UPRID, ContactID, RoleTypeID, EffectiveDate)
+
+OUTPUT N'UPR_CONTACT',inserted.[UPRID],inserted.[UPRContactID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRContactID = ' + CASE WHEN inserted.[UPRContactID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRContactID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ContactID = ' + CASE WHEN inserted.[ContactID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ContactID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'RoleTypeID = ' + CASE WHEN inserted.[RoleTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[RoleTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EffectiveDate = ' + CASE WHEN inserted.[EffectiveDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EffectiveDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'EndDate = ' + CASE WHEN inserted.[EndDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[EndDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
 SELECT DISTINCT cl.DescendantUPRID, uc.ContactID, uc.RoleTypeID, CONVERT(DATE, @Now)
 FROM #ParentMap pm
 INNER JOIN dbo.UPR_CONTACT uc ON uc.UPRID = pm.UPRID AND uc.RoleTypeID = @RoleOwner
@@ -2334,6 +3360,24 @@ INSERT INTO dbo.UPRSTATUSHISTORY (
     UPRID, SDATAccountNumber, OldStatusCode, NewStatusCode, ChangeReason,
     ParcelID, Owner, PropertyTypeCode, ChangeSource, ChangedBy, ChangedDate, Notes
 )
+
+OUTPUT N'UPRSTATUSHISTORY',inserted.[UPRID],inserted.[UPRStatusHistoryID],'INSERT',
+    CAST(NULL AS NVARCHAR(MAX)),
+    CONVERT(NVARCHAR(MAX),N'') + N'UPRStatusHistoryID = ' + CASE WHEN inserted.[UPRStatusHistoryID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRStatusHistoryID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'UPRID = ' + CASE WHEN inserted.[UPRID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[UPRID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'SDATAccountNumber = ' + CASE WHEN inserted.[SDATAccountNumber] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[SDATAccountNumber],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'OldStatusCode = ' + CASE WHEN inserted.[OldStatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[OldStatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'NewStatusCode = ' + CASE WHEN inserted.[NewStatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[NewStatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ChangeReason = ' + CASE WHEN inserted.[ChangeReason] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ChangeReason],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ParcelID = ' + CASE WHEN inserted.[ParcelID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ParcelID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Owner = ' + CASE WHEN inserted.[Owner] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Owner],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'PropertyTypeCode = ' + CASE WHEN inserted.[PropertyTypeCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[PropertyTypeCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ChangeSource = ' + CASE WHEN inserted.[ChangeSource] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ChangeSource],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ChangedBy = ' + CASE WHEN inserted.[ChangedBy] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ChangedBy],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'ChangedDate = ' + CASE WHEN inserted.[ChangedDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[ChangedDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'Notes = ' + CASE WHEN inserted.[Notes] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Notes],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'BuildingID = ' + CASE WHEN inserted.[BuildingID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[BuildingID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
+INTO #AuditEvents(EntityName,UPRID,EntityRecordID,OperationType,OldValues,NewValue)
 SELECT
     pm.UPRID,
     pm.AccountNumber,
@@ -2357,60 +3401,96 @@ SET @StatusHistInserted = @@ROWCOUNT;
 PRINT N'Step 13 complete - status history: ' + CONVERT(NVARCHAR(20), @StatusHistInserted);
 
 /* ============================================================================
-   14. AuditLog summary counts
+   14. Persist row audit events and batch summary
    ============================================================================ */
 PRINT N'Step 14: AuditLog...';
 
-DECLARE @LoadSummary NVARCHAR(MAX)=(SELECT @AuditRunID AS runId,@@SPID AS sessionId,
-    N'UPR_HIER_LOAD' AS eventType,@MARead+@SDATRead AS sourceRowsRead,@InvalidRows AS rejectedRows,
-    @ParentInserted AS parentsInserted,@ComplexInserted AS complexesInserted,
-    @PropertyInserted AS propertiesInserted,@CondoInserted AS condosInserted,
-    @BuildingInserted AS buildingsInserted,@UnitInserted AS unitsInserted,
-    @AddressInserted AS addressesInserted,@ContactInserted AS contactsInserted,
-    @XrefInserted AS identifiersInserted,@ReviewInserted AS reviewRowsInserted,@ClosureRows AS closureRows
-    FOR JSON PATH,WITHOUT_ARRAY_WRAPPER);
-INSERT INTO dbo.AuditLog (EntityNameID, EntityRecordID, OperationType, ChangedBy, ChangedDate, NewValues)
-VALUES (@SummaryEntityID,0,N'INSERT',@AuditUser,@Now,@LoadSummary);
-SET @AuditInserted = @@ROWCOUNT;
-DECLARE @SummaryAuditID INT = CONVERT(INT, SCOPE_IDENTITY());
-DECLARE @SummaryText NVARCHAR(2000) =
-     N'Parents=' + CONVERT(NVARCHAR(20), @ParentInserted)
-     + N'; Complex=' + CONVERT(NVARCHAR(20), @ComplexInserted)
-     + N'; Property=' + CONVERT(NVARCHAR(20), @PropertyInserted)
-     + N'; Condo=' + CONVERT(NVARCHAR(20), @CondoInserted)
-     + N'; Building~' + CONVERT(NVARCHAR(20), @BuildingInserted)
-     + N'; Unit=' + CONVERT(NVARCHAR(20), @UnitInserted)
-     + N'; Address=' + CONVERT(NVARCHAR(20), @AddressInserted)
-     + N'; Contact=' + CONVERT(NVARCHAR(20), @ContactInserted)
-     + N'; XREF=' + CONVERT(NVARCHAR(20), @XrefInserted)
-     + N'; ReviewQ=' + CONVERT(NVARCHAR(20), @ReviewInserted)
-     + N'; Closure=' + CONVERT(NVARCHAR(20), @ClosureRows)
-     + N'; Classification=MA-FIRST-2026-09-15; Parcel=OPTIONAL-PARCEL-2026-09-16'
-     + N'; Coordinates=SOURCE-PAIR-2026-09-16; Duplicates=MA-SDAT-OVERLAP-2026-09-23';
-IF @HasAuditContext=1
-    EXEC sys.sp_executesql N'INSERT dbo.AUDIT_LOG_CONTEXT(AuditID,EntityKey,ChangeSummary,RunID,SessionID)
-        VALUES(@audit,N''BATCH'',@summary,@run,@@SPID);',
-        N'@audit INT,@summary NVARCHAR(2000),@run UNIQUEIDENTIFIER',@SummaryAuditID,@SummaryText,@AuditRunID;
-DECLARE @SourceRowsRead INT=@MARead+@SDATRead;
-IF @RunRecorded=1
-    EXEC sys.sp_executesql N'UPDATE dbo.UPR_LOAD_RUN
-        SET RunStatus=''COMPLETED'',FinishedAt=SYSDATETIME(),SourceRowsRead=@read,RejectedRows=@rejected
-        WHERE RunID=@id;',N'@read INT,@rejected INT,@id UNIQUEIDENTIFIER',
-        @read=@SourceRowsRead,@rejected=@InvalidRows,@id=@AuditRunID;
-/* Never infer run ownership from an AuditID range: other sessions can write
-   concurrently. Row attribution is available only through existing context. */
-IF OBJECT_ID('tempdb..#RunAuditRows') IS NOT NULL DROP TABLE #RunAuditRows;
-CREATE TABLE #RunAuditRows(AuditID INT NOT NULL PRIMARY KEY,RunID UNIQUEIDENTIFIER,
-    EntityName NVARCHAR(100),EntityKey NVARCHAR(200),OperationType NVARCHAR(20),
-    ChangedDate DATETIME2(7),ChangedBy NVARCHAR(100),OldValues NVARCHAR(MAX),NewValues NVARCHAR(MAX));
-IF @HasAuditContext=1
+/* Omit no-op UPDATE events. Binary comparison preserves case/trailing-space changes. */
+DELETE FROM #AuditEvents WHERE OperationType='UPDATE'
+    AND CONVERT(VARBINARY(MAX),OldValues)=CONVERT(VARBINARY(MAX),NewValue);
+IF EXISTS(SELECT 1 FROM #AuditEntityMap m WHERE m.EntityID IS NULL
+    OR (SELECT COUNT(*) FROM dbo.REF_ENTITY_IDENTIFICATION e WHERE e.EntityName=m.EntityName)<>1
+    OR (SELECT COUNT(*) FROM dbo.REF_ENTITY_IDENTIFICATION e WHERE e.EntityID=m.EntityID)<>1
+    OR NOT EXISTS(SELECT 1 FROM dbo.REF_ENTITY_IDENTIFICATION e WHERE e.EntityID=m.EntityID AND e.EntityName=m.EntityName))
+    THROW 50004,'An audit entity mapping changed during loading; no audit insert was attempted.',1;
+IF OBJECT_ID('tempdb..#AuditCounts') IS NOT NULL DROP TABLE #AuditCounts;
+SELECT EntityName AS TableName,
+    RowsInserted=SUM(CONVERT(BIGINT,CASE WHEN OperationType='INSERT' THEN 1 ELSE 0 END)),
+    RowsUpdated=SUM(CONVERT(BIGINT,CASE WHEN OperationType='UPDATE' THEN 1 ELSE 0 END)),
+    RowsDeleted=SUM(CONVERT(BIGINT,CASE WHEN OperationType='DELETE' THEN 1 ELSE 0 END))
+INTO #AuditCounts FROM #AuditEvents GROUP BY EntityName;
+DECLARE @UPRRowsInserted BIGINT=0,@UPRRowsUpdated BIGINT=0,@UPRRowsDeleted BIGINT=0,@UPRDistinctWritten BIGINT=0;
+DECLARE @UPRTotalAfterLoad BIGINT=(SELECT COUNT_BIG(*) FROM dbo.UPR);
+SELECT @UPRRowsInserted=RowsInserted,@UPRRowsUpdated=RowsUpdated,@UPRRowsDeleted=RowsDeleted
+FROM #AuditCounts WHERE TableName=N'UPR';
+SELECT @UPRDistinctWritten=COUNT_BIG(DISTINCT UPRID) FROM #AuditEvents
+WHERE EntityName=N'UPR' AND OperationType IN('INSERT','UPDATE');
+DECLARE @AuditRowsWritten BIGINT=0,@AuditBatchEnd BIGINT,@AuditExpected BIGINT,@AuditWritten INT;
+DECLARE @AuditPrefix NVARCHAR(100)=N'RunID = '+CONVERT(NVARCHAR(36),@AuditRunID)+NCHAR(10);
+IF OBJECT_ID('tempdb..#PersistedAuditIDs') IS NOT NULL DROP TABLE #PersistedAuditIDs;
+CREATE TABLE #PersistedAuditIDs(AuditID INT NOT NULL PRIMARY KEY);
+/* Bound each audit INSERT to 10,000 events. Capture is set-based; no per-record
+   cursor, permanent helper table or trigger installation is required. */
+DECLARE @RowAuditSql NVARCHAR(MAX)=N'INSERT dbo.AuditLog
+    (UPRID,EntityNameID,EntityRecordID,OperationType,ChangedBy,ChangedDate,OldValues,'+QUOTENAME(@AuditNewColumn)+N')
+    OUTPUT inserted.AuditID INTO #PersistedAuditIDs(AuditID)
+    SELECT e.UPRID,m.EntityID,e.EntityRecordID,e.OperationType,@who,@at,
+        CASE WHEN e.OldValues IS NULL THEN NULL ELSE @prefix+e.OldValues END,
+        CASE WHEN e.NewValue IS NULL THEN NULL ELSE @prefix+e.NewValue END
+    FROM #AuditEvents e JOIN #AuditEntityMap m ON m.EntityName=e.EntityName
+    WHERE e.EventID<=@last;
+    SET @written=@@ROWCOUNT;';
+WHILE EXISTS(SELECT 1 FROM #AuditEvents)
 BEGIN
-    EXEC sys.sp_executesql N'INSERT #RunAuditRows
-        SELECT a.AuditID,c.RunID,e.EntityName,c.EntityKey,a.OperationType,a.ChangedDate,a.ChangedBy,a.OldValues,a.NewValues
-        FROM dbo.AuditLog a JOIN dbo.AUDIT_LOG_CONTEXT c ON c.AuditID=a.AuditID
-        LEFT JOIN dbo.REF_ENTITY_IDENTIFICATION e ON e.EntityID=a.EntityNameID
-        WHERE c.RunID=@run;',N'@run UNIQUEIDENTIFIER',@AuditRunID;
+    SELECT @AuditBatchEnd=MAX(EventID) FROM (SELECT TOP(10000) EventID FROM #AuditEvents ORDER BY EventID) batch;
+    SELECT @AuditExpected=COUNT_BIG(*) FROM #AuditEvents WHERE EventID<=@AuditBatchEnd;
+    SET @AuditWritten=0;
+    EXEC sys.sp_executesql @RowAuditSql,
+        N'@who NVARCHAR(100),@at DATETIME2(0),@prefix NVARCHAR(100),@last BIGINT,@written INT OUTPUT',
+        @who=@AuditUser,@at=@Now,@prefix=@AuditPrefix,@last=@AuditBatchEnd,@written=@AuditWritten OUTPUT;
+    IF @AuditWritten<>@AuditExpected
+        THROW 50004,'Audit row count did not match captured changes; transaction will be rolled back.',1;
+    SET @AuditRowsWritten+=@AuditWritten;
+    DELETE FROM #AuditEvents WHERE EventID<=@AuditBatchEnd;
 END;
+IF EXISTS(SELECT 1 FROM #PersistedAuditIDs p LEFT JOIN dbo.AuditLog a ON a.AuditID=p.AuditID WHERE a.AuditID IS NULL)
+    THROW 50004,'A captured audit row was not retained; transaction will be rolled back.',1;
+DECLARE @LoadSummary NVARCHAR(MAX)=@AuditPrefix
+    +N'Event = UPR_HIER_LOAD'+NCHAR(10)
+    +N'Source rows read = '+CONVERT(NVARCHAR(30),CONVERT(BIGINT,@MARead)+@SDATRead)+NCHAR(10)
+    +N'UPR rows inserted = '+CONVERT(NVARCHAR(30),@UPRRowsInserted)+NCHAR(10)
+    +N'UPR rows updated = '+CONVERT(NVARCHAR(30),@UPRRowsUpdated)+NCHAR(10)
+    +N'UPR rows deleted = '+CONVERT(NVARCHAR(30),@UPRRowsDeleted)+NCHAR(10)
+    +N'Distinct UPR records inserted or updated = '+CONVERT(NVARCHAR(30),@UPRDistinctWritten)+NCHAR(10)
+    +N'Condo units reparented = '+CONVERT(NVARCHAR(30),@CondoUnitsReparented)+NCHAR(10)
+    +N'UPR records in database = '+CONVERT(NVARCHAR(30),@UPRTotalAfterLoad)+NCHAR(10)
+    +N'Row audit entries written = '+CONVERT(NVARCHAR(30),@AuditRowsWritten)+NCHAR(10)
+    +N'Closure rows = '+CONVERT(NVARCHAR(30),@ClosureRows);
+/* The client column is NewValue VARCHAR(MAX); prior project databases used
+   NewValues NVARCHAR(MAX). Bind the selected name only inside dynamic SQL, so
+   neither absent alternative can cause an invalid-column compilation error.
+   Capture identity inside that same scope and pass values as parameters. */
+/* Recheck after business triggers have run; never send a NULL or remapped ID. */
+IF @SummaryEntityID IS NULL
+    THROW 50004,'Summary audit EntityNameID is NULL; audit INSERT was not attempted.',1;
+IF (SELECT COUNT(*) FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName=N'UPR_HIER_LOAD')<>1
+ OR (SELECT COUNT(*) FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityID=@SummaryEntityID)<>1
+ OR NOT EXISTS(SELECT 1 FROM dbo.REF_ENTITY_IDENTIFICATION
+               WHERE EntityName=N'UPR_HIER_LOAD' AND EntityID=@SummaryEntityID)
+    THROW 50004,'Summary audit dictionary mapping changed during loading; transaction will be rolled back.',1;
+DECLARE @SummaryAuditID INT;
+DECLARE @AuditInsertSql NVARCHAR(MAX) = N'INSERT INTO dbo.AuditLog
+    (EntityNameID,EntityRecordID,OperationType,ChangedBy,ChangedDate,' + QUOTENAME(@AuditNewColumn) + N')
+    VALUES(@entity,0,N''INSERT'',@who,@at,@payload);
+    SET @audit=CONVERT(INT,SCOPE_IDENTITY());';
+EXEC sys.sp_executesql @AuditInsertSql,
+    N'@entity INT,@who NVARCHAR(100),@at DATETIME2(0),@payload NVARCHAR(MAX),@audit INT OUTPUT',
+    @entity=@SummaryEntityID,@who=@AuditUser,@at=@Now,@payload=@LoadSummary,@audit=@SummaryAuditID OUTPUT;
+IF @SummaryAuditID IS NULL OR NOT EXISTS(
+    SELECT 1 FROM dbo.AuditLog WHERE AuditID=@SummaryAuditID AND EntityNameID=@SummaryEntityID
+      AND EntityRecordID=0 AND OperationType=N'INSERT')
+    THROW 50004,'Summary audit INSERT did not retain the expected row. Check AuditLog triggers; the load will be rolled back.',1;
+SET @AuditInserted = 1;
 COMMIT TRANSACTION;
 EXEC sys.sp_set_session_context @key = N'UPR_AuditRunID', @value = @PreviousAuditRun;
 
@@ -2428,6 +3508,13 @@ PRINT N'Parent groups COMPLEX/PROP/CONDO: '
     + CONVERT(NVARCHAR(20), @ComplexGroups) + N' / '
     + CONVERT(NVARCHAR(20), @PropertyGroups) + N' / '
     + CONVERT(NVARCHAR(20), @CondoGroups);
+PRINT N'UPR rows inserted            : ' + CONVERT(NVARCHAR(30),@UPRRowsInserted);
+PRINT N'UPR rows updated             : ' + CONVERT(NVARCHAR(30),@UPRRowsUpdated);
+PRINT N'UPR rows deleted             : ' + CONVERT(NVARCHAR(30),@UPRRowsDeleted);
+PRINT N'Distinct UPR records written : ' + CONVERT(NVARCHAR(30),@UPRDistinctWritten);
+PRINT N'Condo units reparented       : ' + CONVERT(NVARCHAR(20),@CondoUnitsReparented);
+PRINT N'UPR records in database      : ' + CONVERT(NVARCHAR(30),@UPRTotalAfterLoad);
+PRINT N'Row audit entries written    : ' + CONVERT(NVARCHAR(30),@AuditRowsWritten);
 PRINT N'New parent UPRs              : ' + CONVERT(NVARCHAR(20), @ParentInserted);
 PRINT N'COMPLEX / PROPERTY / CONDO   : '
     + CONVERT(NVARCHAR(20), @ComplexInserted) + N' / '
@@ -2476,7 +3563,15 @@ FROM (VALUES
     (22, N'Written', N'UPR_CONTACT rows inserted',       CONVERT(NVARCHAR(20), @UPRContactInserted)),
     (23, N'Written', N'XREF inserted',                   CONVERT(NVARCHAR(20), @XrefInserted)),
     (24, N'Written', N'UPR_CLOSURE rows (total)',        CONVERT(NVARCHAR(20), @ClosureRows)),
-    (25, N'Written', N'StatusHistory inserted',          CONVERT(NVARCHAR(20), @StatusHistInserted))
+    (25, N'Written', N'StatusHistory inserted',          CONVERT(NVARCHAR(20), @StatusHistInserted)),
+    (26, N'Written', N'UPR rows inserted', CONVERT(NVARCHAR(30),@UPRRowsInserted)),
+    (27, N'Written', N'UPR rows updated', CONVERT(NVARCHAR(30),@UPRRowsUpdated)),
+    (28, N'Written', N'UPR rows deleted', CONVERT(NVARCHAR(30),@UPRRowsDeleted)),
+    (29, N'Written', N'Distinct UPR records inserted or updated', CONVERT(NVARCHAR(30),@UPRDistinctWritten)),
+    (30, N'Audit', N'Row audit entries written', CONVERT(NVARCHAR(30),@AuditRowsWritten)),
+    (31, N'Audit', N'Batch audit entries written', CONVERT(NVARCHAR(30),@AuditInserted)),
+    (32, N'Database', N'UPR records after load', CONVERT(NVARCHAR(30),@UPRTotalAfterLoad)),
+    (33, N'Written', N'Existing Condo units reparented', CONVERT(NVARCHAR(20),@CondoUnitsReparented))
 ) v([Order], Section, Metric, [Value])
 ORDER BY [Order];
 
@@ -2488,30 +3583,12 @@ FROM #Stage s
 GROUP BY s.SourceSystem, s.PathType, s.IsValid, s.ReviewReason
 ORDER BY s.SourceSystem, Outcome, s.PathType, ReviewReason;
 
-/* Row-change totals are available only with existing run context. */
-IF @HasAuditContext=1
-BEGIN
-SELECT TableName, RowsInserted, RowsUpdated, RowsDeleted
-FROM (
-    SELECT SortGroup = 0, TableName = EntityName,
-        RowsInserted = SUM(CASE WHEN OperationType = 'INSERT' THEN 1 ELSE 0 END),
-        RowsUpdated = SUM(CASE WHEN OperationType = 'UPDATE' THEN 1 ELSE 0 END),
-        RowsDeleted = SUM(CASE WHEN OperationType = 'DELETE' THEN 1 ELSE 0 END)
-    FROM #RunAuditRows WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD'
-    GROUP BY EntityName
-    UNION ALL
-    SELECT 1, N'TOTAL',
-        COALESCE(SUM(CASE WHEN OperationType = 'INSERT' THEN 1 ELSE 0 END), 0),
-        COALESCE(SUM(CASE WHEN OperationType = 'UPDATE' THEN 1 ELSE 0 END), 0),
-        COALESCE(SUM(CASE WHEN OperationType = 'DELETE' THEN 1 ELSE 0 END), 0)
-    FROM #RunAuditRows WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD'
-) t
-ORDER BY SortGroup, TableName;
-
-END;
-ELSE
-    SELECT AuditDetailStatus=N'NOT_AVAILABLE',
-        Reason=N'No audit context installed. Batch summary is in AuditLog.NewValues; per-row history depends on existing client triggers.';
+/* Counts belong to this session's captured changes, never a global ID range. */
+SELECT TableName,RowsInserted,RowsUpdated,RowsDeleted FROM #AuditCounts ORDER BY TableName;
+SELECT @SummaryAuditID AS BatchAuditID,@AuditRowsWritten AS RowAuditEntriesWritten,
+       @AuditInserted AS BatchAuditEntriesWritten,@AuditRunID AS RunID,
+       COALESCE((SELECT MIN(AuditID) FROM #PersistedAuditIDs),@SummaryAuditID) AS FirstAuditID,
+       @SummaryAuditID AS LastAuditID;
 
 IF @ShowDetailResults = 1
 BEGIN
@@ -2524,11 +3601,12 @@ BEGIN
     FROM #Stage s LEFT JOIN #AcctAddrCnt a ON a.AccountNumber = s.AccountNumber
     ORDER BY s.AccountNumber, s.SourceSystem, s.SourceRecordID;
 
-    IF @HasAuditContext=1
-    SELECT AuditID, RunID, EntityName AS TableName, EntityKey AS RecordKey,
-        OperationType AS Action, ChangedDate, ChangedBy, OldValues, NewValues
-    FROM #RunAuditRows WHERE RunID = @AuditRunID AND EntityName <> N'UPR_HIER_LOAD'
-    ORDER BY AuditID;
+    DECLARE @AuditDetailSql NVARCHAR(MAX)=N'SELECT a.AuditID,a.UPRID,e.EntityName AS TableName,
+        a.EntityRecordID,a.OperationType,a.ChangedBy,a.ChangedDate,a.OldValues,a.'+QUOTENAME(@AuditNewColumn)+N' AS NewValue
+        FROM #PersistedAuditIDs p JOIN dbo.AuditLog a ON a.AuditID=p.AuditID
+        JOIN #AuditEntityMap e ON e.EntityID=a.EntityNameID ORDER BY a.AuditID;';
+    EXEC sys.sp_executesql @AuditDetailSql;
+
 END;
 
 END TRY
@@ -2537,11 +3615,9 @@ BEGIN CATCH
     DECLARE @ErrNum INT = ERROR_NUMBER();
     DECLARE @ErrLine INT = ERROR_LINE();
     DECLARE @ErrMsg NVARCHAR(4000) = ERROR_MESSAGE();
-    IF @RunRecorded = 1
-        EXEC sys.sp_executesql N'
-            UPDATE dbo.UPR_LOAD_RUN SET RunStatus = ''FAILED'', FinishedAt = SYSDATETIME(),
-                ErrorMessage = @err WHERE RunID = @id AND RunStatus = ''RUNNING'';',
-            N'@id UNIQUEIDENTIFIER, @err NVARCHAR(4000)', @AuditRunID, @ErrMsg;
+    DECLARE @ErrProcedure NVARCHAR(128) = ERROR_PROCEDURE();
+    SELECT @ErrNum AS ErrorNumber,@ErrProcedure AS ErrorProcedure,@ErrLine AS ErrorLine,
+        @SummaryEntityID AS SummaryEntityID,@ErrMsg AS ErrorMessage;
     EXEC sys.sp_set_session_context @key = N'UPR_AuditRunID', @value = @PreviousAuditRun;
     PRINT N'*** UPR hierarchical load FAILED ***';
     PRINT N'Error ' + CONVERT(NVARCHAR(20), @ErrNum)
