@@ -1,9 +1,0 @@
-Hello. I have prepared one updated script package covering all three items:
-
-1. Search: Updated the existing search script against UPR_SearchSpecificationv2, including UPRID/external-ID and contextual Unit searches, address/owner matching, ranked candidates, pagination and Property360. Housing Portal API integration and permission mapping still need to be completed.
-
-2. EntityKey explanation and display: I should have explained this field in the previous delivery. It identifies the exact row that changed. For example, {"UnitID":123} means Unit row 123. A closure relationship needs both UPRAncestry and DescendantUPRID, so JSON retained both key names and values. The audit report now displays readable labels such as [UnitID] = 123, with a raw-key option for technical use. Negative EntityRecordID values are internal references for composite/text keys, not negative property IDs.
-
-3. Your actual AuditLog layout: Updated the scripts so dbo.AuditLog is a physical table with the nine columns shown in your screenshot, including EntityNameID and EntityRecordID. EntityKey and run/session details are kept in a separate AUDIT_LOG_CONTEXT table so they do not add columns to your main layout. The existing AUDIT_LOG name becomes a read compatibility view. The migration preserves available history and stops if IDs or entity mappings cannot be migrated safely.
-
-The included notes explain the new objects/options and installation order. Local static and SQL syntax checks passed; SQL Server testing on a restored database is still pending. The screenshot's small text should also be checked against your original CREATE TABLE statement before acceptance.

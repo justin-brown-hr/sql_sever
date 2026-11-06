@@ -135,7 +135,7 @@ INSERT #V VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
 
 /* Every loaded UPR entity has direct source Address and Contact links. */
 SELECT @n = COUNT(*) FROM dbo.UPR u
-WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_ADDRESS ua WHERE ua.UPRID = u.UPRID AND ua.IsPrimary = 1);
+WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_ADDRESS ua WHERE ua.UPRID = u.UPRID AND ua.PrimaryInd = 1);
 INSERT #V VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
     'Every UPR has a primary Address link', CONVERT(VARCHAR(20), @n) + ' without primary address');
 SELECT @n = COUNT(*) FROM dbo.UPR u
@@ -176,7 +176,7 @@ FROM (
     SELECT u.ParentUPRID, a.NormalizedAddress
     FROM dbo.BUILDING b
     INNER JOIN dbo.UPR u ON u.UPRID = b.UPRID
-    INNER JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = b.UPRID AND ua.IsPrimary = 1
+    INNER JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = b.UPRID AND ua.PrimaryInd = 1
     INNER JOIN dbo.ADDRESS a ON a.AddressID = ua.AddressID
     GROUP BY u.ParentUPRID, a.NormalizedAddress
     HAVING COUNT(*) > 1
@@ -270,7 +270,7 @@ BEGIN
     LEFT JOIN dbo.COMPLEX cx ON cx.UPRID = u.UPRID
     LEFT JOIN dbo.BUILDING b ON b.UPRID = u.UPRID
     LEFT JOIN dbo.UNIT n ON n.UPRID = u.UPRID
-    LEFT JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = u.UPRID AND ua.IsPrimary = 1
+    LEFT JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = u.UPRID AND ua.PrimaryInd = 1
     LEFT JOIN dbo.ADDRESS a ON a.AddressID = ua.AddressID
     LEFT JOIN dbo.UPR_CONTACT uc ON uc.UPRID = u.UPRID
     LEFT JOIN dbo.CONTACT ct ON ct.ContactID = uc.ContactID

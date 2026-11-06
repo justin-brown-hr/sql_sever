@@ -27,8 +27,8 @@ INSERT @Expected(TableName,ColumnName,Requirement) VALUES
     (N'REF_PROPERTYTYPE',N'DeletedInd',N'CORE'),
     (N'REF_PROPERTYTYPE',N'CreationUserID',N'CORE'),
     (N'REF_PROPERTYTYPE',N'CreationDate',N'CORE'),
-    (N'REF_PROPERTYTYPE',N'LastUpdatedUserID',N'CORE'),
-    (N'REF_PROPERTYTYPE',N'LastUpdatedDate',N'CORE'),
+    (N'REF_PROPERTYTYPE',N'LastUpdateUserID',N'CORE'),
+    (N'REF_PROPERTYTYPE',N'LastUpdateDate',N'CORE'),
     (N'REF_CONTACTTYPE',N'ContactTypeID',N'CORE'),
     (N'REF_CONTACTTYPE',N'ContactTypeCode',N'CORE'),
     (N'REF_CONTACTTYPE',N'Description',N'CORE'),
@@ -44,7 +44,7 @@ INSERT @Expected(TableName,ColumnName,Requirement) VALUES
     (N'UPR',N'AccountNumber',N'CORE'),
     (N'UPR',N'StatusCode',N'CORE'),
     (N'UPR',N'CreatedBy',N'CORE'),
-    (N'UPR',N'UpdatedDate',N'CORE'),
+    (N'UPR',N'UpdateDate',N'CORE'),
     (N'UPR',N'UpdatedBy',N'CORE'),
     (N'ADDRESS',N'AddressID',N'CORE'),
     (N'ADDRESS',N'StreetNumber',N'CORE'),
@@ -75,7 +75,7 @@ INSERT @Expected(TableName,ColumnName,Requirement) VALUES
     (N'BUILDING',N'BuildingName',N'CORE'),
     (N'BUILDING',N'YearBuilt',N'CORE'),
     (N'BUILDING',N'StatusCode',N'CORE'),
-    (N'BUILDING',N'UpdatedDate',N'CORE'),
+    (N'BUILDING',N'UpdateDate',N'CORE'),
     (N'UNIT',N'UPRID',N'CORE'),
     (N'UNIT',N'BuildingID',N'CORE'),
     (N'UNIT',N'UnitNumber',N'CORE'),
@@ -85,12 +85,12 @@ INSERT @Expected(TableName,ColumnName,Requirement) VALUES
     (N'UNIT',N'BathroomCount',N'CORE'),
     (N'UNIT',N'HasLegalIdentity',N'CORE'),
     (N'UNIT',N'StatusCode',N'CORE'),
-    (N'UNIT',N'UpdatedDate',N'CORE'),
+    (N'UNIT',N'UpdateDate',N'CORE'),
     (N'UPR_ADDRESS',N'UPRAddressID',N'CORE'),
     (N'UPR_ADDRESS',N'UPRID',N'CORE'),
     (N'UPR_ADDRESS',N'AddressID',N'CORE'),
     (N'UPR_ADDRESS',N'AddressRoleID',N'CORE'),
-    (N'UPR_ADDRESS',N'IsPrimary',N'CORE'),
+    (N'UPR_ADDRESS',N'PrimaryInd',N'CORE'),
     (N'UPR_ADDRESS',N'EffectiveDate',N'CORE'),
     (N'UPR_ADDRESS',N'EndDate',N'CORE'),
     (N'EXTERNAL_IDENTIFIER_XREF',N'ExternalIdentifierID',N'CORE'),
@@ -245,7 +245,7 @@ WHERE EXISTS(SELECT 1 FROM @Expected e WHERE OBJECT_ID(N'dbo.'+e.TableName)=pare
 -- Preflight for the summary dictionary seed (required fields with no defaults).
 SELECT c.name AS RequiredDictionaryColumn,TYPE_NAME(c.system_type_id) AS DataType,
     CASE WHEN c.name=N'EntityID' AND c.system_type_id=56 THEN N'LOADER ALLOCATES NEXT INT UNDER TABLE LOCK'
-         WHEN c.name IN(N'EntityName',N'EntityDescription',N'IsActive',N'CreatedDate',N'CreatedBy') THEN N'LOADER SUPPLIES VALUE'
+         WHEN c.name IN(N'EntityName',N'EntityDescription',N'IsActive',N'ActiveInd',N'DeletedInd',N'CreatedDate',N'CreationDate',N'LastUpdateDate',N'CreatedBy',N'CreationUserID',N'LastUpdateUserID') THEN N'LOADER SUPPLIES VALUE'
          ELSE N'REVIEW: UNMAPPED REQUIRED COLUMN OR UNSUPPORTED KEY TYPE' END AS SeedHandling
 FROM sys.columns c WHERE c.object_id=OBJECT_ID(N'dbo.REF_ENTITY_IDENTIFICATION')
     AND (c.is_nullable=0 OR c.name=N'EntityID') AND c.is_identity=0 AND c.is_computed=0

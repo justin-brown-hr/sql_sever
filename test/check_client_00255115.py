@@ -96,7 +96,7 @@ IF EXISTS (
     LEFT JOIN dbo.UNIT un ON un.UPRID = x.UPRID
     LEFT JOIN dbo.UPR u ON u.UPRID = un.UPRID
     LEFT JOIN dbo.BUILDING b ON b.BuildingID = un.BuildingID
-    LEFT JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = b.UPRID AND ua.IsPrimary = 1
+    LEFT JOIN dbo.UPR_ADDRESS ua ON ua.UPRID = b.UPRID AND ua.PrimaryInd = 1
     LEFT JOIN dbo.ADDRESS a ON a.AddressID = ua.AddressID
     WHERE un.UnitID IS NULL OR a.AddressID IS NULL OR EXISTS (
         SELECT un.UnitNumber, u.ParentUPRID, a.StreetNumber, a.StreetName, a.StreetType, a.City, a.ZipCode

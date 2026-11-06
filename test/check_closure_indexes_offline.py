@@ -69,3 +69,49 @@ else:
     raise AssertionError('Duplicate pair with different Level was accepted')
 assert db.execute('SELECT COUNT(*) FROM Closure').fetchone()[0] == 5
 print('PASS: composite uniqueness rejects duplicate pairs but permits shared ancestors/descendants')
+
+# R10: simulate setup using the actual catalog predicates/name collision queries.
+# This validates name allocation/reuse, not execution of SQL Server CREATE INDEX.
+db.execute('ALTER TABLE sys.indexes ADD COLUMN name TEXT')
+setup=loader.split('/* CLOSURE_INDEX_SETUP_BEGIN',1)[1].split('/* CLOSURE_INDEX_SETUP_END */',1)[0]
+assert 'THROW 50007' not in setup
+assert not re.search(r'\b(?:DROP|ALTER)\s+INDEX',setup,re.I)
+assert loader.index('/* CLOSURE_INDEX_SETUP_BEGIN')<loader.index("PRINT N'Step 1:")
+assert loader.index('HAVING COUNT_BIG(*)>1')<loader.index('/* CLOSURE_INDEX_SETUP_BEGIN')
+assert loader.index('BEGIN TRANSACTION;')<loader.index('/* CLOSURE_INDEX_SETUP_BEGIN')
+rendered=[]
+for direction,q,requiredkeys,unique in [('Forward',queries[0],[1,2],True),('Reverse',queries[1],[2,1],False)]:
+    base=re.search(r'DECLARE @Closure'+direction+r"IndexName SYSNAME=N'([^']+)'",setup)[1]
+    suffix=re.search(r'SET @Closure'+direction+r"IndexName=N'([^']+)'\+CONVERT",setup)[1]
+    namequery=re.search(r'WHILE EXISTS\((SELECT .*?name=@Closure'+direction+r'IndexName)\)',setup)[1]
+    expr=re.search(r'DECLARE @Closure'+direction+r"IndexSql NVARCHAR\(MAX\)=N'([^']*)'\s*\+QUOTENAME\(@Closure"+direction+r"IndexName\)\s*\+N'([^']*)';",setup)
+    assert expr
+    def add_index(name,keys,is_unique=False,**flags):
+        i=db.execute('SELECT COALESCE(MAX(index_id),0)+1 FROM sys.indexes').fetchone()[0]
+        db.execute('INSERT INTO sys.indexes VALUES(42,?,?,?,?,?,?,?,?)',
+          (i,2,int(is_unique),flags.get('ignore_dup_key',0),flags.get('is_disabled',0),flags.get('has_filter',0),0,name))
+        for ordinal,col in enumerate(keys,1): db.execute('INSERT INTO sys.index_columns VALUES(42,?,?,?)',(i,col,ordinal))
+    def ensure():
+        if db.execute(q,dict(ClosureObjectID=42)).fetchone(): return None
+        name=base;n=0
+        while db.execute(namequery,{'ClosureObjectID':42,'Closure'+direction+'IndexName':name}).fetchone():
+            n+=1;name=suffix+str(n)
+        rendered.append(expr[1]+'['+name+']'+expr[2])
+        add_index(name,requiredkeys,unique)
+        return name
+    def reset():
+        db.execute('DELETE FROM sys.indexes');db.execute('DELETE FROM sys.index_columns')
+    reset();assert ensure()==base and ensure() is None
+    for flags in ({},{'is_disabled':1},{'has_filter':1}):
+        reset();add_index(base,[3],**flags);add_index(suffix+'1',[3]);add_index(suffix+'2',[3])
+        before=db.execute('SELECT * FROM sys.indexes').fetchall()
+        assert ensure()==suffix+'3'
+        assert db.execute('SELECT * FROM sys.indexes ORDER BY index_id').fetchall()[:len(before)]==before
+        assert ensure() is None # repeated load does not accumulate new indexes
+    reset();add_index(base,[3]);add_index('ClientCompatibleName',requiredkeys,unique)
+    assert ensure() is None # correct definition under another name wins
+    reset();add_index(base,[3]);add_index(suffix+'1',requiredkeys,unique,is_disabled=1)
+    assert ensure()==suffix+'2' and ensure() is None
+Path('/tmp/upr-r10-index-ddl.sql').write_text('\nGO\n'.join(rendered))
+print('PASS: R10 name collisions, occupied suffixes, compatible alternate names, disabled/filtered definitions, preservation and rerun reuse')
+print('Rendered actual dynamic index DDL: /tmp/upr-r10-index-ddl.sql (for ScriptDom parsing)')

@@ -52,7 +52,7 @@ IF @MaxMatches IS NULL OR @MaxMatches NOT BETWEEN 1 AND 5000
    Dynamic execution is fixed SQL; search values are passed as parameters. */
 DECLARE @Required TABLE(TableName SYSNAME,ColumnName SYSNAME);
 INSERT @Required VALUES
-    (N'UPR',N'UPRID'),(N'UPR',N'ParentUPRID'),(N'UPR',N'EntityTypeID'),(N'UPR',N'AccountNumber'),(N'UPR',N'StatusCode'),(N'UPR',N'CreatedDate'),(N'UPR',N'UpdatedDate'),
+    (N'UPR',N'UPRID'),(N'UPR',N'ParentUPRID'),(N'UPR',N'EntityTypeID'),(N'UPR',N'AccountNumber'),(N'UPR',N'StatusCode'),(N'UPR',N'CreationDate'),(N'UPR',N'UpdateDate'),
     (N'REF_ENTITYTYPE',N'EntityTypeID'),(N'REF_ENTITYTYPE',N'Description'),
     (N'PROPERTY',N'UPRID'),(N'PROPERTY',N'PropertyName'),(N'PROPERTY',N'OwnerName'),(N'PROPERTY',N'Parcel'),(N'PROPERTY',N'PropertyTypeID'),(N'PROPERTY',N'StatusCode'),
     (N'COMPLEX',N'UPRID'),(N'COMPLEX',N'CommunityName'),(N'COMPLEX',N'PropertyTypeID'),(N'COMPLEX',N'StatusCode'),
@@ -60,13 +60,13 @@ INSERT @Required VALUES
     (N'BUILDING',N'BuildingID'),(N'BUILDING',N'UPRID'),(N'BUILDING',N'BuildingName'),(N'BUILDING',N'YearBuilt'),(N'BUILDING',N'StatusCode'),
     (N'UNIT',N'UnitID'),(N'UNIT',N'UPRID'),(N'UNIT',N'BuildingID'),(N'UNIT',N'UnitNumber'),(N'UNIT',N'StatusCode'),
     (N'REF_PROPERTYTYPE',N'PropertyTypeID'),(N'REF_PROPERTYTYPE',N'PropertyTypeName'),
-    (N'UPR_ADDRESS',N'UPRID'),(N'UPR_ADDRESS',N'AddressID'),(N'UPR_ADDRESS',N'AddressRoleID'),(N'UPR_ADDRESS',N'IsPrimary'),(N'UPR_ADDRESS',N'EffectiveDate'),(N'UPR_ADDRESS',N'EndDate'),
+    (N'UPR_ADDRESS',N'UPRID'),(N'UPR_ADDRESS',N'AddressID'),(N'UPR_ADDRESS',N'AddressRoleID'),(N'UPR_ADDRESS',N'PrimaryInd'),(N'UPR_ADDRESS',N'EffectiveDate'),(N'UPR_ADDRESS',N'EndDate'),
     (N'ADDRESS',N'AddressID'),(N'ADDRESS',N'StreetNumber'),(N'ADDRESS',N'StreetDirection'),(N'ADDRESS',N'StreetName'),(N'ADDRESS',N'StreetType'),(N'ADDRESS',N'StreetSuffix'),(N'ADDRESS',N'City'),(N'ADDRESS',N'State'),(N'ADDRESS',N'ZipCode'),(N'ADDRESS',N'XCoordinate'),(N'ADDRESS',N'YCoordinate'),
     (N'REF_ADDRESSROLE',N'AddressRoleID'),(N'REF_ADDRESSROLE',N'AddressRoleCode'),(N'REF_ADDRESSROLE',N'Description'),
     (N'UPR_CONTACT',N'UPRID'),(N'UPR_CONTACT',N'ContactID'),(N'UPR_CONTACT',N'RoleTypeID'),(N'UPR_CONTACT',N'EffectiveDate'),(N'UPR_CONTACT',N'EndDate'),
     (N'CONTACT',N'ContactID'),(N'CONTACT',N'FirstName'),(N'CONTACT',N'MiddleName'),(N'CONTACT',N'LastName'),(N'CONTACT',N'OrganizationName'),(N'CONTACT',N'Phone'),(N'CONTACT',N'Email'),(N'CONTACT',N'StatusCode'),
     (N'REF_ROLETYPE',N'RoleTypeID'),(N'REF_ROLETYPE',N'RoleTypeCode'),(N'REF_ROLETYPE',N'Description'),
-    (N'EXTERNAL_IDENTIFIER_XREF',N'UPRID'),(N'EXTERNAL_IDENTIFIER_XREF',N'SourceSystem'),(N'EXTERNAL_IDENTIFIER_XREF',N'IdentifierType'),(N'EXTERNAL_IDENTIFIER_XREF',N'IdentifierValue'),(N'EXTERNAL_IDENTIFIER_XREF',N'CreatedDate'),
+    (N'EXTERNAL_IDENTIFIER_XREF',N'UPRID'),(N'EXTERNAL_IDENTIFIER_XREF',N'SourceSystem'),(N'EXTERNAL_IDENTIFIER_XREF',N'IdentifierType'),(N'EXTERNAL_IDENTIFIER_XREF',N'IdentifierValue'),(N'EXTERNAL_IDENTIFIER_XREF',N'CreationDate'),
     (N'UPRSTATUSHISTORY',N'UPRID'),(N'UPRSTATUSHISTORY',N'UPRStatusHistoryID'),(N'UPRSTATUSHISTORY',N'OldStatusCode'),(N'UPRSTATUSHISTORY',N'NewStatusCode'),(N'UPRSTATUSHISTORY',N'ChangeReason'),(N'UPRSTATUSHISTORY',N'ChangeSource'),(N'UPRSTATUSHISTORY',N'ChangedBy'),(N'UPRSTATUSHISTORY',N'ChangedDate');
 IF EXISTS(SELECT 1 FROM @Required r WHERE COL_LENGTH(N'dbo.'+QUOTENAME(r.TableName),r.ColumnName) IS NULL)
 BEGIN
@@ -124,11 +124,11 @@ BEGIN
     IF @SearchBy=''ACCOUNT'' AND LEN(@Account)<8 AND @Account NOT LIKE N''%[^0-9]%''
         SET @Account=RIGHT(N''00000000''+@Account,8);
     CREATE TABLE #SearchAddress(UPRID BIGINT,AddressID BIGINT,DisplayAddress NVARCHAR(600),
-        SearchAddress NVARCHAR(600),AddressRole NVARCHAR(30),IsPrimary BIT);
+        SearchAddress NVARCHAR(600),AddressRole NVARCHAR(30),PrimaryInd BIT);
     INSERT #SearchAddress
     SELECT ua.UPRID,a.AddressID,
         LTRIM(RTRIM(CONCAT(a.StreetNumber,N'' '',a.StreetDirection,N'' '',a.StreetName,N'' '',a.StreetType,N'' '',a.StreetSuffix,
-            N'' '',a.City,N'' '',a.State,N'' '',a.ZipCode))),NULL,ar.AddressRoleCode,ua.IsPrimary
+            N'' '',a.City,N'' '',a.State,N'' '',a.ZipCode))),NULL,ar.AddressRoleCode,ua.PrimaryInd
     FROM dbo.UPR_ADDRESS ua JOIN dbo.ADDRESS a ON a.AddressID=ua.AddressID
     JOIN dbo.REF_ADDRESSROLE ar ON ar.AddressRoleID=ua.AddressRoleID
     WHERE (ua.EffectiveDate IS NULL OR ua.EffectiveDate<=@AsOfDate)
@@ -226,7 +226,7 @@ BEGIN
     LEFT JOIN dbo.BUILDING b ON b.UPRID=u.UPRID LEFT JOIN dbo.UNIT un ON un.UPRID=u.UPRID
     OUTER APPLY(SELECT TOP(1) a.DisplayAddress,a.AddressRole FROM #SearchAddress a WHERE a.UPRID=u.UPRID
         AND (@SearchBy<>''ADDRESS'' OR CHARINDEX(@Needle,a.SearchAddress)>0)
-        ORDER BY CASE WHEN a.AddressRole=N''PHYSICAL'' THEN 0 ELSE 1 END,a.IsPrimary DESC,a.AddressID) ad
+        ORDER BY CASE WHEN a.AddressRole=N''PHYSICAL'' THEN 0 ELSE 1 END,a.PrimaryInd DESC,a.AddressID) ad
     ORDER BY u.UPRID;
     RETURN;
 END;
@@ -292,7 +292,7 @@ SELECT N''2. Hierarchy and property details'' AS Section,c.RootLevel,c.UPRID,c.P
         CONCAT(et.Description,N'' '',c.UPRID)) AS PropertyOrEntity,
     u.AccountNumber,pt.PropertyTypeName,p.Parcel,un.UnitNumber,b.YearBuilt,
     u.StatusCode AS UPRStatus,COALESCE(p.StatusCode,cx.StatusCode,b.StatusCode,un.StatusCode,co.StatusCode) AS EntityStatus,
-    u.CreatedDate,u.UpdatedDate
+    u.CreationDate,u.UpdateDate
 FROM #Context c JOIN dbo.UPR u ON u.UPRID=c.UPRID JOIN dbo.REF_ENTITYTYPE et ON et.EntityTypeID=u.EntityTypeID
 LEFT JOIN #Ancestors an ON an.UPRID=c.UPRID
 LEFT JOIN dbo.PROPERTY p ON p.UPRID=c.UPRID LEFT JOIN dbo.COMPLEX cx ON cx.UPRID=c.UPRID
@@ -301,14 +301,14 @@ LEFT JOIN dbo.CONDO co ON co.UPRID=c.UPRID
 LEFT JOIN dbo.REF_PROPERTYTYPE pt ON pt.PropertyTypeID=COALESCE(p.PropertyTypeID,cx.PropertyTypeID)
 ORDER BY c.RootLevel,c.ParentUPRID,c.UPRID;
 
-SELECT N''3. Location'' AS Section,ua.UPRID,a.AddressID,ar.AddressRoleCode AS AddressRole,ua.IsPrimary,
+SELECT N''3. Location'' AS Section,ua.UPRID,a.AddressID,ar.AddressRoleCode AS AddressRole,ua.PrimaryInd,
     a.StreetNumber,a.StreetDirection,a.StreetName,a.StreetType,a.StreetSuffix,a.City,a.State,a.ZipCode,
     a.XCoordinate,a.YCoordinate,ua.EffectiveDate,ua.EndDate,
     CASE WHEN ua.EffectiveDate>@AsOfDate THEN N''Future association''
          WHEN ua.EndDate<@AsOfDate THEN N''Ended association'' ELSE N''Current association'' END AS AssociationStatus
 FROM #Context c JOIN dbo.UPR_ADDRESS ua ON ua.UPRID=c.UPRID JOIN dbo.ADDRESS a ON a.AddressID=ua.AddressID
 JOIN dbo.REF_ADDRESSROLE ar ON ar.AddressRoleID=ua.AddressRoleID
-ORDER BY c.RootLevel,ua.UPRID,CASE WHEN ar.AddressRoleCode=N''PHYSICAL'' THEN 0 ELSE 1 END,ua.IsPrimary DESC,a.AddressID;
+ORDER BY c.RootLevel,ua.UPRID,CASE WHEN ar.AddressRoleCode=N''PHYSICAL'' THEN 0 ELSE 1 END,ua.PrimaryInd DESC,a.AddressID;
 
 SELECT N''4a. Recorded owners'' AS Section,p.UPRID,N''PROPERTY'' AS OwnerSource,p.OwnerName
 FROM dbo.PROPERTY p JOIN #Context c ON c.UPRID=p.UPRID WHERE p.OwnerName IS NOT NULL
@@ -323,7 +323,7 @@ SELECT N''4b. Contacts and roles'' AS Section,uc.UPRID,c.ContactID,r.Description
 FROM #Context scope JOIN dbo.UPR_CONTACT uc ON uc.UPRID=scope.UPRID JOIN dbo.CONTACT c ON c.ContactID=uc.ContactID
 JOIN dbo.REF_ROLETYPE r ON r.RoleTypeID=uc.RoleTypeID ORDER BY uc.UPRID,r.RoleTypeCode,c.ContactID;
 
-SELECT N''5. External system identifiers'' AS Section,x.UPRID,x.SourceSystem,x.IdentifierType,x.IdentifierValue,x.CreatedDate,
+SELECT N''5. External system identifiers'' AS Section,x.UPRID,x.SourceSystem,x.IdentifierType,x.IdentifierValue,x.CreationDate,
     N''Identifier link only; source record detail and status are not supplied by this UPR table'' AS DetailAvailability
 FROM #Context c JOIN dbo.EXTERNAL_IDENTIFIER_XREF x ON x.UPRID=c.UPRID
 ORDER BY x.UPRID,x.SourceSystem,x.IdentifierType,x.IdentifierValue;

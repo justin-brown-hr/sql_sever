@@ -5,44 +5,15 @@ SQL Server integration that loads **AddressMaster** and **SDAT** into the **hier
 **Model:** `docs/NewUPRTABLEUSED.docx` + `docs/Response.docx` (COMPLEX).  
 **Old flat model** archived under `legacy/` for reference only - do not run it.
 
-Latest full-record report: [October 13 UPR listing](CLIENT_FULL_RECORDS_2026-10-13.md).
-Send `UPR_Full_Records_2026-10-13.zip` for UPRID, account, owner, address, building
-and unit details. One read-only SQL file; select the loaded database in SSMS.
-No loader rerun or audit installation is required. SQL Server execution is pending.
+Latest delivery: [November 3 R12 record layout names](CLIENT_MAIN_LOADER_2026-11-03.md).
+Send `UPR_Main_Loader_2026-11-03_R12.zip`: complete loader, full-records listing
+(`@FilterEntity`), Search / Property 360 demo and read-only schema check, all on the
+client's November 2026 column names. A record layout check stops before any change.
 
-Latest demo: [October 8 search and Property 360](CLIENT_SEARCH_DEMO_2026-10-08.md).
-`UPR_Search_Property360_Demo_2026-10-08.zip` contains one read-only SSMS script.
-It shows readable grids, resolves a selected unit to its full property tree, and
-marks regulatory/program details unavailable while supporting loaded external links.
-
-Latest loader: [October 8 R9 Condo unit parent correction](CLIENT_MAIN_LOADER_2026-10-08.md).
-Send `UPR_Main_Loader_2026-10-08_R9.zip`: complete loader and read-only unit hierarchy
-check. Condo units now attach to their linked buildings; existing direct links are
-validated and repaired before source reuse. R8 readable auditing and UPR counts
-remain included. Historical values and closure column definitions are preserved.
-
-Previous correction: [October 1 standalone data repair](CLIENT_CLOSURE_DISTANCE_FIX_2026-10-01.md).
-
-Historical client instruction: [retain the original UPR_CLOSURE API table](CLIENT_CLOSURE_API_2026-09-29.md).
-The earlier read-only report was not a stored-data correction.
-
-Previous client follow-up: [descendant lookup including root level 0](CLIENT_CLOSURE_LEVEL_2026-09-28.md).
-Use [list_upr_ancestor_path.sql](scripts/list_upr_ancestor_path.sql) to display each
-ancestor's own level when selecting a descendant.
-
-Latest updates: [UPR search implementation](CLIENT_SEARCH_UPDATE_2026-09-24.md) and
-[EntityKey explanation/readable audit report](CLIENT_AUDIT_KEY_UPDATE_2026-09-24.md), plus
-[the supplied AuditLog layout](CLIENT_AUDIT_LAYOUT_2026-09-24.md).
-See [combined results and validation limits](WORK_RESULTS_2026-09-24.md).
-Extends the existing search script with Portal modes and Property 360; SQL Server
-integration execution remains pending.
-
-Previous update: [September 17 review implementation](CLIENT_UPDATE_2026-09-23.md).
-Package: `archive/deliveries/UPR_Corrections_2026-09-23_Review_Update.zip`.
-See [review findings and corrections](CLIENT_REVIEW_FEEDBACK_2026-09-23.md).
-Includes MA/SDAT overlap matching, `BLV` normalization, guarded existing-duplicate
-repair, Condo column removal, original `AncestorUPRID` API compatibility, and normalized auditing.
-**Static checks pass; the updated integration suite is pending a SQL Server runtime.**
+C Number Complex / Building / Unit rule: [November 2 R11 guide](CLIENT_MAIN_LOADER_2026-11-02.md)
+(included in R12). `UPR_Main_Loader_2026-10-14_R10.zip` is kept only as the baseline
+for `test/check_cnumber_buildings.py`. Earlier guides were removed; see git history
+and `SESSION_HANDOVER.md` for past releases.
 
 ## Requirements
 
@@ -54,7 +25,7 @@ repair, Condo column removal, original `AncestorUPRID` API compatibility, and no
 ```
 SQL/
 ├── DELIVERY.md                    # Delivery package overview
-├── CLIENT_REAL_DATA_TEST.md       # Client guide for real-data testing
+├── CLIENT_MAIN_LOADER_2026-11-03.md # Current client run guide (R12)
 ├── ddl/
 │   └── 03_new_upr_schema.sql      # Hierarchical schema (run first)
 ├── scripts/
@@ -77,7 +48,7 @@ SQL/
 └── docs/                          # Client specs (NewUPRTABLEUSED, Response, Program Spec)
 ```
 
-For an existing client database, follow the [R9 run order](CLIENT_MAIN_LOADER_2026-10-08.md).
+For an existing client database, follow the [R12 run steps](CLIENT_MAIN_LOADER_2026-11-03.md).
 Do not recreate the schema or install the historical audit extensions for this update.
 The client's source-only requirements supersede older generated-name conventions.
 

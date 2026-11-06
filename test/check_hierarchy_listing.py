@@ -30,16 +30,16 @@ def sql(text, expect_error=False):
 listing = f"USE [{DATABASE}];\nGO\n" + (ROOT / "scripts/list_upr_hierarchy.sql").read_text()
 
 
-def report(account=None, limit=None):
+def report(account=None, limit=None, entity=None, expect_error=False):
     text = listing
-    for variable, value in (("FilterAccount", account), ("MaxRows", limit)):
+    for variable, value in (("FilterAccount", account), ("MaxRows", limit), ("FilterEntity", entity)):
         literal = "NULL" if value is None else (
             "N'" + value.replace("'", "''") + "'" if isinstance(value, str) else str(value))
         text, changes = re.subn(
             rf"(DECLARE @{variable}\s+[^=;]+?=\s*)NULL;",
             lambda m: m[1] + literal + ";", text, count=1)
         assert changes == 1, f"Cannot set @{variable} in listing"
-    return sql(text, expect_error=limit is not None and limit <= 0)
+    return sql(text, expect_error=expect_error or (limit is not None and limit <= 0))
 
 
 def tree(output):
@@ -141,6 +141,18 @@ FROM Closure cl;
     assert len(tree(filtered)) == 6
     assert all(r[6] == "123456789" for r in units), "Units need root account context"
     print("PASS: Building units accepted; direct Condo/wrong links flagged; BuildingID and account displayed")
+    for entity, count in (("Condo",1),("Building",1),("Unit",4),("Complex",0),("Property",0),("ADU",0)):
+        selected=tree(report("123456789",entity=entity))
+        assert len(selected)==count and all(r[7]==entity for r in selected),entity
+    selected=tree(report("123456789",entity="  unit  "))
+    assert len(selected)==4 and all(r[6]=="123456789" for r in selected)
+    assert {r[0] for r in selected}=={"1","2"}, "Do not renumber depth after filtering"
+    for entity in ("ALL","", "  "):
+        assert len(tree(report("123456789",entity=entity)))==6
+    assert "Use Complex" in report(entity="Unitt",expect_error=True)
+    assert len(tree(report(entity="Unit",limit=1)))==0 # root cap precedes entity filter
+    print("PASS: entity filters and normalization, combined account scope, invalid names and root caps")
+
 finally:
     sql(f"USE master; ALTER DATABASE [{DATABASE}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; "
         f"DROP DATABASE [{DATABASE}];")

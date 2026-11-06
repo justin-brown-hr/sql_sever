@@ -1,6 +1,6 @@
 /*
 ================================================================================
-  UPR Full Records / Hierarchy Listing - 2026-10-13
+  UPR Full Records / Hierarchy Listing - 2026-10-14
   Read existing loaded UPR data; no loader rerun or audit installation required.
 
   Lists every UPR record as Parent followed by its children, so you can confirm
@@ -13,6 +13,8 @@
 
   EDIT:
     - Select the intended database in SSMS; this file does not switch databases
+    - @FilterEntity   = NULL for all, or N'Complex', N'Property', N'Condo',
+                        N'Building', N'Unit' or N'ADU' (only that entity's rows)
     - @FilterAccount  = NULL for ALL records, or set one Account# to drill down
     - @MaxRows        = NULL for all root trees, or a positive root-tree cap
 ================================================================================
@@ -23,21 +25,25 @@ SET ANSI_NULLS ON;
 SET NOCOUNT ON;
 GO
 
+DECLARE @FilterEntity NVARCHAR(50) = NULL;   -- e.g. N'Unit' | NULL = all entities
 DECLARE @FilterAccount NVARCHAR(50) = NULL;   -- e.g. N'00272531'  |  NULL = all
 DECLARE @MaxRows       INT          = NULL;  -- optional cap on roots, not children
 DECLARE @AsOfDate DATE=CONVERT(DATE,GETDATE());
+DECLARE @ShowCompletenessChecks BIT=1;      -- 0 skips the additional integrity checks
 DECLARE @ShowAllAssociations BIT=1;          -- all direct address/contact links
-/* BuildingID is the model key, not a street number or invented building number.
-   Display a separate BuildingNumber only if that column actually exists. */
-IF OBJECT_ID('tempdb..#ReportBuildingNumber') IS NOT NULL DROP TABLE #ReportBuildingNumber;
-CREATE TABLE #ReportBuildingNumber(BuildingID BIGINT PRIMARY KEY,BuildingNumber NVARCHAR(200) NULL);
-IF COL_LENGTH(N'dbo.BUILDING',N'BuildingNumber') IS NOT NULL
-    EXEC sys.sp_executesql N'INSERT #ReportBuildingNumber(BuildingID,BuildingNumber)
-        SELECT BuildingID,CONVERT(NVARCHAR(200),BuildingNumber) FROM dbo.BUILDING;';
-IF OBJECT_ID('tempdb..#ReportADU') IS NOT NULL DROP TABLE #ReportADU;
-CREATE TABLE #ReportADU(UPRID BIGINT,UnitNumber NVARCHAR(50));
-IF COL_LENGTH(N'dbo.ADU',N'UPRID') IS NOT NULL AND COL_LENGTH(N'dbo.ADU',N'UnitNumber') IS NOT NULL
-    EXEC sys.sp_executesql N'INSERT #ReportADU(UPRID,UnitNumber) SELECT UPRID,UnitNumber FROM dbo.ADU;';
+/* Resolve the entity once. Invalid names must not silently become an all-records run. */
+DECLARE @NormEntity NVARCHAR(50)=NULLIF(UPPER(LTRIM(RTRIM(@FilterEntity))),N'');
+IF @NormEntity=N'ALL' SET @NormEntity=NULL;
+DECLARE @FilterEntityTypeID INT=NULL;
+IF @NormEntity IS NOT NULL
+BEGIN
+    IF @NormEntity NOT IN (N'COMPLEX',N'PROPERTY',N'CONDO',N'BUILDING',N'UNIT',N'ADU')
+        THROW 50002, 'Use Complex, Property, Condo, Building, Unit, ADU, or NULL for @FilterEntity.', 1;
+    IF (SELECT COUNT(*) FROM dbo.REF_ENTITYTYPE WHERE UPPER(LTRIM(RTRIM(Description)))=@NormEntity)<>1
+        THROW 50003, 'The selected entity must have exactly one REF_ENTITYTYPE mapping in this database.', 1;
+    SELECT @FilterEntityTypeID=EntityTypeID FROM dbo.REF_ENTITYTYPE
+    WHERE UPPER(LTRIM(RTRIM(Description)))=@NormEntity;
+END;
 
 
 IF @MaxRows IS NOT NULL AND @MaxRows <= 0
@@ -56,6 +62,7 @@ IF @AccountDigits <> N'' AND @AccountDigits NOT LIKE N'%[^0-9]%'
 
 PRINT N'============================================================';
 PRINT N'  UPR HIERARCHY LISTING';
+PRINT N'  Entity: '+COALESCE(@NormEntity,N'(all entities)');
 PRINT N'  Database: ' + DB_NAME()
     + N'   Run: ' + CONVERT(NVARCHAR(30), SYSDATETIME(), 120);
 IF @NormAccount IS NOT NULL
@@ -75,7 +82,8 @@ SELECT
     Records    = COUNT(*)
 FROM dbo.UPR u
 INNER JOIN dbo.REF_ENTITYTYPE e ON e.EntityTypeID = u.EntityTypeID
-WHERE @NormAccount IS NULL
+WHERE (@FilterEntityTypeID IS NULL OR u.EntityTypeID=@FilterEntityTypeID)
+  AND (@NormAccount IS NULL
    OR u.AccountNumber = @NormAccount
    OR EXISTS (
         SELECT 1
@@ -84,7 +92,7 @@ WHERE @NormAccount IS NULL
         WHERE cl.DescendantUPRID = u.UPRID
           AND root.ParentUPRID IS NULL
           AND root.AccountNumber = @NormAccount
-      )
+      ))
 GROUP BY e.Description
 ORDER BY
     CASE e.Description
@@ -183,6 +191,27 @@ IF @NormAccount IS NULL AND @MaxRows IS NULL
         CONVERT(VARCHAR(8000),N'~'+CONVERT(VARCHAR(20),u.UPRID))
     FROM dbo.UPR u WHERE NOT EXISTS(SELECT 1 FROM #ReportTree t WHERE t.UPRID=u.UPRID);
 
+/* ENTITY_FILTER_BEGIN
+   Retain root/depth context before restricting rows. This also restricts the
+   association grids and avoids running detail lookups on other entity types. */
+DELETE FROM #ReportTree
+WHERE @FilterEntityTypeID IS NOT NULL AND EntityTypeID<>@FilterEntityTypeID;
+/* ENTITY_FILTER_END */
+/* BuildingID is the model key, not a street number or invented building number.
+   Display a separate BuildingNumber only if that column actually exists. */
+IF OBJECT_ID('tempdb..#ReportBuildingNumber') IS NOT NULL DROP TABLE #ReportBuildingNumber;
+CREATE TABLE #ReportBuildingNumber(BuildingID BIGINT PRIMARY KEY,BuildingNumber NVARCHAR(200) NULL);
+IF COL_LENGTH(N'dbo.BUILDING',N'BuildingNumber') IS NOT NULL
+    EXEC sys.sp_executesql N'INSERT #ReportBuildingNumber(BuildingID,BuildingNumber)
+        SELECT BuildingID,CONVERT(NVARCHAR(200),BuildingNumber) FROM dbo.BUILDING b
+        WHERE EXISTS(SELECT 1 FROM #ReportTree t WHERE t.UPRID=b.UPRID)
+           OR EXISTS(SELECT 1 FROM dbo.UNIT u JOIN #ReportTree t ON t.UPRID=u.UPRID WHERE u.BuildingID=b.BuildingID);';
+IF OBJECT_ID('tempdb..#ReportADU') IS NOT NULL DROP TABLE #ReportADU;
+CREATE TABLE #ReportADU(UPRID BIGINT,UnitNumber NVARCHAR(50));
+IF COL_LENGTH(N'dbo.ADU',N'UPRID') IS NOT NULL AND COL_LENGTH(N'dbo.ADU',N'UnitNumber') IS NOT NULL
+    EXEC sys.sp_executesql N'INSERT #ReportADU(UPRID,UnitNumber) SELECT ad.UPRID,ad.UnitNumber FROM dbo.ADU ad JOIN #ReportTree t ON t.UPRID=ad.UPRID;';
+
+
 SELECT
     LevelNo=CASE WHEN t.LevelNo>=0 THEN t.LevelNo END,
     Hierarchy = CASE WHEN t.LevelNo<0 THEN N'[UNRESOLVED HIERARCHY] ' ELSE REPLICATE(N'  ',t.LevelNo) END
@@ -275,17 +304,17 @@ OUTER APPLY (
         addr.StreetDirection,addr.StreetType,addr.StreetSuffix,addr.City,addr.State,addr.ZipCode,
         rel.AddressUPRID,ar.AddressRoleCode AS AddressRole
     FROM (
-        SELECT ua.UPRID AS AddressUPRID,ua.AddressID,ua.AddressRoleID,ua.IsPrimary,ua.UPRAddressID,
+        SELECT ua.UPRID AS AddressUPRID,ua.AddressID,ua.AddressRoleID,ua.PrimaryInd,ua.UPRAddressID,
             ua.EffectiveDate,ua.EndDate,Pri=0,Distance=0
         FROM dbo.UPR_ADDRESS ua WHERE ua.UPRID=t.UPRID
         UNION ALL
-        SELECT ua.UPRID,ua.AddressID,ua.AddressRoleID,ua.IsPrimary,ua.UPRAddressID,
+        SELECT ua.UPRID,ua.AddressID,ua.AddressRoleID,ua.PrimaryInd,ua.UPRAddressID,
             ua.EffectiveDate,ua.EndDate,1,cl.[Level]
         FROM dbo.UPR_CLOSURE cl JOIN dbo.BUILDING childBuilding ON childBuilding.UPRID=cl.DescendantUPRID
         JOIN dbo.UPR_ADDRESS ua ON ua.UPRID=childBuilding.UPRID
         WHERE cl.AncestorUPRID=t.UPRID AND cl.DescendantUPRID<>t.UPRID
         UNION ALL
-        SELECT ua.UPRID,ua.AddressID,ua.AddressRoleID,ua.IsPrimary,ua.UPRAddressID,
+        SELECT ua.UPRID,ua.AddressID,ua.AddressRoleID,ua.PrimaryInd,ua.UPRAddressID,
             ua.EffectiveDate,ua.EndDate,2,cl.[Level]
         FROM dbo.UPR_CLOSURE cl JOIN dbo.UPR_ADDRESS ua ON ua.UPRID=cl.AncestorUPRID
         WHERE cl.DescendantUPRID=t.UPRID AND cl.AncestorUPRID<>t.UPRID
@@ -294,7 +323,7 @@ OUTER APPLY (
     WHERE (rel.EffectiveDate IS NULL OR rel.EffectiveDate<=@AsOfDate)
       AND (rel.EndDate IS NULL OR rel.EndDate>=@AsOfDate)
     ORDER BY rel.Pri,CASE WHEN ar.AddressRoleCode=N'PHYSICAL' THEN 0 ELSE 1 END,
-        rel.Distance,rel.IsPrimary DESC,rel.UPRAddressID
+        rel.Distance,rel.PrimaryInd DESC,rel.UPRAddressID
 ) a
 OUTER APPLY (
     SELECT TOP(1) oc.OwnerUPRID,oc.OwnerName,oc.OwnerSource,oc.ContactID
@@ -338,7 +367,9 @@ ORDER BY t.SortPath;
    Empty result = no issues found by these checks. Any row needs attention.
    ------------------------------------------------------------ */
 PRINT N'';
-PRINT N'--- Section 3: Completeness flags (empty = good) ---';
+IF @ShowCompletenessChecks=1
+BEGIN
+PRINT N'--- Section 3: Completeness flags for selected entity ---';
 
 SELECT
     Issue,
@@ -386,7 +417,7 @@ FROM (
               ))
       AND NOT EXISTS (
             SELECT 1 FROM dbo.UPR_ADDRESS ua
-            WHERE ua.UPRID = b.UPRID AND ua.IsPrimary = 1
+            WHERE ua.UPRID = b.UPRID AND ua.PrimaryInd = 1
           )
 
     UNION ALL
@@ -438,12 +469,15 @@ FROM (
 ) x
 INNER JOIN dbo.UPR u ON u.UPRID = x.UPRID
 INNER JOIN dbo.REF_ENTITYTYPE e ON e.EntityTypeID = u.EntityTypeID
+WHERE @FilterEntityTypeID IS NULL OR u.EntityTypeID=@FilterEntityTypeID
 ORDER BY Issue, u.AccountNumber, u.UPRID;
+END
+ELSE PRINT N'Section 3 checks skipped by @ShowCompletenessChecks=0.';
 
 PRINT N'';
 IF @ShowAllAssociations=1
 BEGIN
-    SELECT N'All address links' AS RecordSection,ua.UPRID,ua.AddressID,ar.AddressRoleCode,ua.IsPrimary,
+    SELECT N'All address links' AS RecordSection,ua.UPRID,ua.AddressID,ar.AddressRoleCode,ua.PrimaryInd,
         a.StreetNumber,a.StreetDirection,a.StreetName,a.StreetType,a.StreetSuffix,a.City,a.State,a.ZipCode,
         ua.EffectiveDate,ua.EndDate,
         CASE WHEN ua.EffectiveDate>@AsOfDate THEN N'Future' WHEN ua.EndDate<@AsOfDate THEN N'Ended' ELSE N'Current' END AS AssociationStatus
@@ -463,6 +497,7 @@ IF EXISTS(SELECT 1 FROM #ReportTree WHERE LevelNo<0)
     FROM #ReportTree WHERE LevelNo<0;
 
 PRINT N'HIERARCHY LISTING COMPLETE';
-PRINT N'  Section 2 = parent/child trees within the selected root limit (Results grid).';
-PRINT N'  Section 3 empty = no issues found by these checks; not a full integrity audit.';
+PRINT N'  Section 2 = selected entity records within the account/root scope (Results grid).';
+IF @ShowCompletenessChecks=1
+    PRINT N'  Section 3 empty = no issues found by selected checks; not a full integrity audit.';
 GO

@@ -30,7 +30,7 @@ db.create_function('CHARINDEX',2,lambda needle,s: None if needle is None or s is
 db.create_function('CONCAT',-1,lambda *xs: ''.join('' if x is None else str(x) for x in xs))
 db.create_function('TRY_BIGINT',1,lambda s: int(s) if s is not None and str(s).lstrip('-').isdigit() else None)
 db.executescript('''
-CREATE TABLE SearchAddress(UPRID INTEGER,AddressID INTEGER,DisplayAddress TEXT,SearchAddress TEXT,AddressRole TEXT,IsPrimary INTEGER);
+CREATE TABLE SearchAddress(UPRID INTEGER,AddressID INTEGER,DisplayAddress TEXT,SearchAddress TEXT,AddressRole TEXT,PrimaryInd INTEGER);
 CREATE TABLE Context(UPRID INTEGER PRIMARY KEY,ParentUPRID INTEGER,RootLevel INTEGER);
 INSERT INTO dbo.REF_ENTITYTYPE(EntityTypeID,Description) VALUES(1,'Complex'),(2,'Building'),(3,'Unit'),(4,'Property');
 INSERT INTO dbo.UPR(UPRID,ParentUPRID,EntityTypeID,AccountNumber,StatusCode) VALUES
@@ -81,7 +81,7 @@ db.executescript("""
 INSERT INTO dbo.REF_ADDRESSROLE(AddressRoleID,AddressRoleCode) VALUES(1,'PHYSICAL'),(2,'MAILING');
 INSERT INTO dbo.ADDRESS(AddressID,StreetNumber,StreetName,StreetType,City,State,ZipCode) VALUES
  (1,'123','Main','Street','Rockville','MD','20850'),(2,'123','Main','St','Rockville','MD','20850');
-INSERT INTO dbo.UPR_ADDRESS(UPRID,AddressID,AddressRoleID,IsPrimary,EffectiveDate,EndDate) VALUES
+INSERT INTO dbo.UPR_ADDRESS(UPRID,AddressID,AddressRoleID,PrimaryInd,EffectiveDate,EndDate) VALUES
  (24,1,1,1,NULL,NULL),(88788,1,1,1,NULL,NULL),(207075,1,1,1,NULL,NULL),
  (90,2,2,1,NULL,NULL),(90,1,1,0,'2000-01-01','2001-01-01'),
  (90,1,1,0,'2099-01-01',NULL);

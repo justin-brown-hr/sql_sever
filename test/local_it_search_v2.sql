@@ -53,7 +53,7 @@ BEGIN TRY
         VALUES('123','MAIN','ST','ROCKVILLE','20850','123 MAIN ST ROCKVILLE 20850'); SET @A1=SCOPE_IDENTITY();
     INSERT dbo.ADDRESS(StreetNumber,StreetName,StreetType,City,ZipCode,NormalizedAddress)
         VALUES('456','OAK','RD','ROCKVILLE','20850','456 OAK RD ROCKVILLE 20850'); SET @A2=SCOPE_IDENTITY();
-    INSERT dbo.UPR_ADDRESS(UPRID,AddressID,AddressRoleID,IsPrimary)
+    INSERT dbo.UPR_ADDRESS(UPRID,AddressID,AddressRoleID,PrimaryInd)
         VALUES(@R1,@A1,@AR,1),(@R1,@A2,@AR,0),(@B1,@A1,@AR,1),(@U1,@A1,@AR,1),(@R2,@A1,@AR,1);
     INSERT dbo.CONTACT(ContactTypeID,FirstName,LastName) VALUES(@CT,'John','Smith'); SET @Contact=SCOPE_IDENTITY();
     INSERT dbo.UPR_CONTACT(UPRID,ContactID,RoleTypeID) VALUES(@R1,@Contact,@Owner),(@U1,@Contact,@Owner),(@R2,@Contact,@Other);

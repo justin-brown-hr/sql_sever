@@ -43,7 +43,7 @@ INSERT #R VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
 /* ---- 3. every Building UPR has exactly one primary address --------------- */
 SELECT @n = COUNT(*)
 FROM dbo.BUILDING b
-WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_ADDRESS ua WHERE ua.UPRID = b.UPRID AND ua.IsPrimary = 1);
+WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_ADDRESS ua WHERE ua.UPRID = b.UPRID AND ua.PrimaryInd = 1);
 INSERT #R VALUES (CASE WHEN @n = 0 THEN 'PASS' ELSE 'FAIL' END,
                   'Every BUILDING has a primary ADDRESS', CONVERT(VARCHAR(20), @n) + ' without address');
 

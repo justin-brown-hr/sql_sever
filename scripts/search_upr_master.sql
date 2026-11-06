@@ -290,7 +290,7 @@ BEGIN
     JOIN dbo.REF_ROLETYPE r ON r.RoleTypeID = uc.RoleTypeID
     CROSS APPLY (SELECT dbo.fn_UPR_SearchText(ct.OrganizationName,0) AS OrgName,
         dbo.fn_UPR_SearchText(CONCAT(ct.FirstName,N' ',ct.LastName),0) AS PersonName) n
-    WHERE @OwnerName IS NOT NULL AND r.RoleTypeCode = @OwnerRole AND r.IsActive = 1
+    WHERE @OwnerName IS NOT NULL AND r.RoleTypeCode = @OwnerRole AND r.ActiveInd = 1
       AND ct.StatusCode = 'ACTIVE'
       AND (uc.EffectiveDate IS NULL OR uc.EffectiveDate <= @Today)
       AND (uc.EndDate IS NULL OR uc.EndDate >= @Today)
@@ -301,7 +301,7 @@ BEGIN
 
     /* All directly linked addresses qualify, including secondary and mailing
        links. The loader already shares building addresses with parents/units. */
-    SELECT DISTINCT e.UPRID, ua.AddressID, ua.IsPrimary, ad.NormalizedAddress,
+    SELECT DISTINCT e.UPRID, ua.AddressID, ua.PrimaryInd, ad.NormalizedAddress,
         ad.StreetNumber,ad.StreetName,ad.StreetType,ad.City,ad.State,ad.ZipCode,
         StreetText = dbo.fn_UPR_SearchText(CONCAT(ad.StreetNumber,N' ',ad.StreetName,N' ',ad.StreetType),1),
         FullText = dbo.fn_UPR_SearchText(CONCAT(ad.StreetNumber,N' ',ad.StreetName,N' ',ad.StreetType,N' ',ad.City,N' ',ad.State,N' ',ad.ZipCode),1),
@@ -375,7 +375,7 @@ BEGIN
     SELECT e.UPRID, u.ParentUPRID, et.Description AS EntityType, u.AccountNumber,u.StatusCode,
         p.PropertyName,pt.PropertyTypeCode,p.OwnerName AS PropertyOwner,cx.CommunityName,
         b.BuildingName,b.YearBuilt,un.UnitNumber,
-        ad.NormalizedAddress,ad.StreetNumber,ad.StreetName,ad.City,ad.ZipCode,u.CreatedDate,
+        ad.NormalizedAddress,ad.StreetNumber,ad.StreetName,ad.City,ad.ZipCode,u.CreationDate,
         AddressID=ad.AddressID,
         BuildingUPRID=CASE WHEN EXISTS(SELECT 1 FROM #Allowed al WHERE al.UPRID=ub.UPRID) THEN ub.UPRID END,
         PropertyUPRID=anc.UPRID,
@@ -395,7 +395,7 @@ BEGIN
         WHERE m.UPRID=e.UPRID AND @HasAddress=1 ORDER BY m.MatchRank,m.MatchScore DESC,m.AddressID) am
     OUTER APPLY (SELECT TOP (1) a.* FROM #Addresses a WHERE a.UPRID=e.UPRID
         AND (@HasAddress=0 OR a.AddressID=am.AddressID)
-        ORDER BY CASE WHEN a.AddressID=am.AddressID THEN 0 ELSE 1 END,a.IsPrimary DESC,a.AddressID) ad
+        ORDER BY CASE WHEN a.AddressID=am.AddressID THEN 0 ELSE 1 END,a.PrimaryInd DESC,a.AddressID) ad
     OUTER APPLY (SELECT MIN(o.MatchRank) AS MatchRank FROM #Owners o WHERE o.UPRID=e.UPRID) own
     OUTER APPLY (SELECT TOP (1) au.UPRID FROM dbo.UPR_CLOSURE cl
         JOIN dbo.UPR au ON au.UPRID=cl.AncestorUPRID JOIN #Allowed al ON al.UPRID=au.UPRID
@@ -415,10 +415,10 @@ BEGIN
         BEGIN
             SELECT TOP (@Top) UPRID,ParentUPRID,EntityType,AccountNumber,StatusCode,
                 PropertyName,PropertyTypeCode,PropertyOwner,CommunityName,BuildingName,YearBuilt,UnitNumber,
-                NormalizedAddress,StreetNumber,StreetName,City,ZipCode,CreatedDate
+                NormalizedAddress,StreetNumber,StreetName,City,ZipCode,CreationDate
             FROM #Matches ORDER BY UPRID;
             SELECT TOP (@Top) x.ExternalIdentifierID,x.UPRID,m.AccountNumber,m.EntityType,
-                x.SourceSystem,x.IdentifierType,x.IdentifierValue,x.CreatedDate
+                x.SourceSystem,x.IdentifierType,x.IdentifierValue,x.CreationDate
             FROM #Identifiers x JOIN #Matches m ON m.UPRID=x.UPRID ORDER BY x.UPRID,x.SourceSystem,x.ExternalIdentifierID;
             SELECT TOP (@Top) cl.AncestorUPRID,ae.Description AS AncestorEntityType,cl.DescendantUPRID,
                 de.Description AS DescendantEntityType,d.AccountNumber AS DescendantAccount
@@ -572,13 +572,13 @@ BEGIN
                 FROM #Nodes n WHERE n.Relation='CHILD' ORDER BY n.RootLevel,n.UPRID FOR JSON PATH)) AS children
             FOR JSON PATH,WITHOUT_ARRAY_WRAPPER) END) AS hierarchy,
         JSON_QUERY(CASE WHEN @Full=1 THEN (SELECT ua.UPRID AS uprId,a.AddressID AS addressId,
-            r.AddressRoleCode AS role,ua.IsPrimary AS isPrimary,a.NormalizedAddress AS formatted,
+            r.AddressRoleCode AS role,ua.PrimaryInd AS isPrimary,a.NormalizedAddress AS formatted,
             a.StreetNumber AS streetNumber,a.StreetName AS streetName,a.StreetType AS streetType,
             a.City AS city,a.State AS state,a.ZipCode AS postalCode
             FROM #Scope s JOIN dbo.UPR_ADDRESS ua ON ua.UPRID=s.UPRID
             JOIN dbo.ADDRESS a ON a.AddressID=ua.AddressID JOIN dbo.REF_ADDRESSROLE r ON r.AddressRoleID=ua.AddressRoleID
             WHERE (ua.EffectiveDate IS NULL OR ua.EffectiveDate<=@Today) AND (ua.EndDate IS NULL OR ua.EndDate>=@Today)
-            ORDER BY ua.UPRID,ua.IsPrimary DESC,ua.UPRAddressID FOR JSON PATH) END) AS addresses,
+            ORDER BY ua.UPRID,ua.PrimaryInd DESC,ua.UPRAddressID FOR JSON PATH) END) AS addresses,
         JSON_QUERY(CASE WHEN @Full=1 AND @IncludeIdentifiers=1 THEN (SELECT x.UPRID AS uprId,
             x.SourceSystem AS sourceSystem,x.IdentifierType AS identifierType,x.IdentifierValue AS identifierValue
             FROM #Scope s JOIN dbo.EXTERNAL_IDENTIFIER_XREF x ON x.UPRID=s.UPRID

@@ -156,33 +156,42 @@ for payload_column in ('NewValue', 'NewValues'):
 # test separately exercises the metadata discovery, identity and table locks.
 base_columns = re.search(r"DECLARE @DictionaryInsertColumns NVARCHAR\(MAX\)=N'([^']*)'",source)[1]
 base_values = re.search(r"DECLARE @DictionaryInsertValues NVARCHAR\(MAX\)=N'([^']*)'",source)[1]
-fragments = re.findall(r"SET @DictionaryInsertColumns\+=N'([^']*)';\s*SET @DictionaryInsertValues\+=N'([^']*)';",source)
-assert len(fragments)==5
-for required in (set(), {'IsActive','CreatedDate','CreatedBy'},
-                 {'EntityID','EntityDescription','IsActive','CreatedDate','CreatedBy'}):
+value_map = dict(re.findall(r"\(N'(\w+)',N'(@\w+)'\)",
+    re.search(r"INSERT @DictionaryValueMap\(ColumnName,ParameterName\) VALUES(.*?);",source,re.S)[1]))
+assert {'IsActive','ActiveInd','CreatedDate','CreationDate','CreatedBy','CreationUserID'} <= set(value_map)
+assert "SET @DictionaryInsertColumns+=N',[EntityID]';" in source
+layouts = {'earlier': ('IsActive','CreatedDate','CreatedBy'),
+           'november': ('ActiveInd','CreationDate','CreationUserID')}
+for layout, (active, created, creator) in layouts.items():
+  for required in (set(), {active,created,creator,'DeletedInd','LastUpdateUserID','LastUpdateDate'},
+                   {'EntityID','EntityDescription',active,created,creator}):
     cols, vals = base_columns, base_values
-    for col, val in fragments:
-        if col.strip(',[]') in required:
-            cols += col
-            vals += val
+    if 'EntityID' in required:
+        cols, vals = cols+',[EntityID]', vals+',@id'
+    # Mirrors the loader's single-row assignment: each column with its value.
+    for col in sorted(required - {'EntityID'}):
+        cols += ',['+col+']'
+        vals += ','+value_map[col]
     statement = 'INSERT INTO dbo.REF_ENTITY_IDENTIFICATION ('+cols+') VALUES ('+vals+');'
-    mode = 'manual' if 'EntityID' in required else 'metadata' if required else 'defaults'
+    mode = layout+'_'+('manual' if 'EntityID' in required else 'metadata' if required else 'defaults')
     if args.audit_sql_dir:
         (args.audit_sql_dir / ('dictionary_'+mode+'.sql')).write_text(statement)
     db=sqlite3.connect(':memory:')
-    db.executescript("""ATTACH ':memory:' AS dbo;
+    db.executescript(f"""ATTACH ':memory:' AS dbo;
         CREATE TABLE dbo.REF_ENTITY_IDENTIFICATION(EntityID INTEGER PRIMARY KEY,
             EntityName VARCHAR(100) NOT NULL UNIQUE,EntityDescription VARCHAR(250) NOT NULL DEFAULT('default description'),
-            IsActive INT NOT NULL DEFAULT(1),CreatedDate TEXT NOT NULL DEFAULT('2026-10-05'),
-            CreatedBy VARCHAR(100) NOT NULL DEFAULT('default creator'));
+            {active} INT NOT NULL DEFAULT(1),{created} TEXT NOT NULL DEFAULT('2026-10-05'),
+            {creator} VARCHAR(100) NOT NULL DEFAULT('default creator'),DeletedInd INT NOT NULL DEFAULT(0),
+            LastUpdateUserID VARCHAR(100) NOT NULL DEFAULT('x'),LastUpdateDate TEXT NOT NULL DEFAULT('2026-10-05'));
         INSERT INTO dbo.REF_ENTITY_IDENTIFICATION(EntityID,EntityName) VALUES(41,'UPR');""")
-    db.execute(statement,{'name':'UPR_HIER_LOAD','id':42,'description':'Load batch summary',
-                          'active':1,'created':'2026-10-05','creator':'Ade'})
-    assert db.execute("SELECT EntityID,IsActive FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName='UPR_HIER_LOAD'").fetchone()==(42,1)
+    db.execute(statement.replace('@','$'),{'name':'UPR_HIER_LOAD','id':42,'description':'Load batch summary',
+               'active':1,'deleted':0,'created':'2026-11-03','creator':'Ade'})
+    row=db.execute(f"SELECT EntityID,{active},DeletedInd FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName='UPR_HIER_LOAD'").fetchone()
+    assert row[1:]==(1,0) and (row[0]==42 or 'EntityID' not in required), (mode,row)
     assert db.execute("SELECT EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName='UPR'").fetchone()==(41,)
     db.close()
 assert 'WITH(TABLOCKX,HOLDLOCK)' in source and '@LargestEntityID>=2147483647' in source
-print('PASS: dictionary INSERT variants preserve existing IDs and supply standard required metadata')
+print('PASS: dictionary INSERT variants (earlier and November 2026 names) preserve IDs and supply required metadata')
 
 # Reproduce the October 6 failure with a nullable, NON-identity manual key.
 # INTEGER PRIMARY KEY would auto-generate in SQLite and hide this regression.
@@ -209,11 +218,7 @@ nullable.execute(repair.replace("N'","'"),{'NextEntityID':42,'AuditEntityName':'
 nullable.execute(repair.replace("N'","'"),{'NextEntityID':43,'AuditEntityName':'UPR_HIER_LOAD'})
 assert nullable.execute('SELECT EntityID FROM dbo.REF_ENTITY_IDENTIFICATION ORDER BY EntityID').fetchall()==[(41,),(42,)]
 nullable.execute("DELETE FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName='UPR_HIER_LOAD'")
-manual_cols,manual_vals=base_columns,base_values
-for col,val in fragments:
-    if col.strip(',[]')=='EntityID':
-        manual_cols+=col
-        manual_vals+=val
+manual_cols,manual_vals=base_columns+',[EntityID]',base_values+',@id'
 nullable.execute('INSERT INTO dbo.REF_ENTITY_IDENTIFICATION ('+manual_cols+') VALUES ('+manual_vals+')',{'name':'UPR_HIER_LOAD','id':42})
 assert nullable.execute("SELECT EntityID FROM dbo.REF_ENTITY_IDENTIFICATION WHERE EntityName='UPR_HIER_LOAD'").fetchone()==(42,)
 preflight = source[source.index('BEGIN TRANSACTION;\n/* Create the batch-summary dictionary'):source.index("PRINT N'Step 1:")]
@@ -280,3 +285,24 @@ check_db.execute('DELETE FROM dbo.AuditLog')
 assert check_db.execute(retained,params).fetchone() is None
 check_db.close()
 print('PASS: actual persisted-audit query accepts correct summary and rejects removed/remapped summary')
+
+# R12 record layout preflight: its lists must equal the diagnostic CORE columns
+# and the columns the loader actually supplies on INSERT/MERGE.
+block = source[source.index('/* RECORD_LAYOUT_PREFLIGHT_BEGIN'):source.index('/* RECORD_LAYOUT_PREFLIGHT_END */')]
+def listed(name):
+    body = re.search(r'INSERT @' + name + r'\(TableName,ColumnName\) VALUES(.*?);', block, re.S)[1]
+    return set(re.findall(r"\(N'(\w+)',N'(\w+)'\)", body))
+core_columns = set(re.findall(r"\(N'([^']+)',N'([^']+)',N'CORE'\)", diagnostic))
+assert listed('LoaderColumns') == core_columns, listed('LoaderColumns') ^ core_columns
+supplied = set()
+for table, columns in re.findall(r'INSERT\s+(?:INTO\s+)?dbo\.(\w+)\s*\(([^()]*)\)', outer, re.I):
+    supplied.update((table, c.strip().strip('[]')) for c in columns.split(','))
+for table, columns in re.findall(
+        r'MERGE\s+dbo\.(\w+)\s+AS\s+t\b.*?WHEN\s+NOT\s+MATCHED\s+THEN\s*INSERT\s*\(([^)]*)\)', outer, re.I | re.S):
+    supplied.update((table, c.strip().strip('[]')) for c in columns.split(','))
+supplied = {x for x in supplied if x[0] not in ('AuditLog', 'REF_ENTITY_IDENTIFICATION')}
+assert listed('SuppliedColumns') == supplied, listed('SuppliedColumns') ^ supplied
+assert block.index('SET NOEXEC ON') > block.index('IF EXISTS(SELECT 1 FROM @LayoutIssues)')
+assert source.rstrip().endswith('SET NOEXEC OFF;\nGO')
+assert source.index('RECORD_LAYOUT_PREFLIGHT_BEGIN') < source.index('CREATE OR ALTER FUNCTION')
+print('PASS: record layout preflight lists match loader columns; it runs before any object change')

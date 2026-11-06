@@ -34,7 +34,7 @@ INSERT INTO dbo.REF_ROLETYPE VALUES(1,'OWNER'),(2,'AGENT');
 INSERT INTO dbo.CONTACT VALUES(1,'Owner','Person',NULL,'ACTIVE'),(2,'Agent','Person','AgentCo','ACTIVE'),(3,'Old','Owner',NULL,'ACTIVE');
 INSERT INTO dbo.UPR_CONTACT VALUES(1,24,1,1,NULL,NULL),(2,345168,2,2,NULL,NULL),(3,345168,3,1,NULL,'2000-01-01');
 CREATE TABLE dbo.ADDRESS(AddressID INTEGER,NormalizedAddress TEXT,StreetNumber TEXT,StreetName TEXT,StreetDirection TEXT,StreetType TEXT,StreetSuffix TEXT,City TEXT,State TEXT,ZipCode TEXT);
-CREATE TABLE dbo.UPR_ADDRESS(UPRAddressID INTEGER,UPRID INTEGER,AddressID INTEGER,AddressRoleID INTEGER,IsPrimary INTEGER,EffectiveDate TEXT,EndDate TEXT);
+CREATE TABLE dbo.UPR_ADDRESS(UPRAddressID INTEGER,UPRID INTEGER,AddressID INTEGER,AddressRoleID INTEGER,PrimaryInd INTEGER,EffectiveDate TEXT,EndDate TEXT);
 CREATE TABLE dbo.REF_ADDRESSROLE(AddressRoleID INTEGER,AddressRoleCode TEXT);
 CREATE TABLE dbo.BUILDING(BuildingID INTEGER,UPRID INTEGER,BuildingName TEXT);
 INSERT INTO dbo.BUILDING VALUES(8001,147901,'Recorded building');
@@ -83,3 +83,42 @@ address=db.execute(a,args).fetchone()
 assert address[0]==1 and address[-2:]==(147901,'PHYSICAL')
 print('PASS: actual address fallback ignores expired unit link, selects physical Building address and retains source UPRID')
 print('LIMIT: offline relational tests do not prove SQL Server runtime binding, permissions or performance')
+
+# Entity selection executes the actual DELETE on report data after traversal.
+# A Condo and Unit already stored as siblings must both retain their real depth.
+db.executescript('''
+INSERT INTO dbo.REF_ENTITYTYPE VALUES(4,'Complex'),(5,'Property'),(6,'ADU');
+INSERT INTO dbo.UPR VALUES(500,NULL,4,'COMPLEXACCOUNT','ACTIVE'),
+ (600,NULL,5,'PROPERTYACCOUNT','ACTIVE'),(601,600,6,NULL,'ACTIVE'),
+ (347,147901,1,'SDATCONDOACCOUNT','ACTIVE');
+''')
+prune=re.search(r'DELETE FROM #ReportTree\s+WHERE @FilterEntityTypeID.*?;',s,re.S)[0].replace('#ReportTree','ReportTree')
+all_tree=db.execute(q,dict(RootLimit=99,NormAccount=None)).fetchall()
+for entity_id in [None,1,2,3,4,5,6,99999]:
+    db.execute('DELETE FROM ReportTree')
+    db.executemany('INSERT INTO ReportTree VALUES(?,?,?,?,?,?,?,?,?)',all_tree)
+    db.execute('INSERT INTO ReportTree '+fallback)
+    db.execute(prune,dict(FilterEntityTypeID=entity_id))
+    selected=db.execute('SELECT UPRID,EntityTypeID,LevelNo,RootAccount FROM ReportTree').fetchall()
+    expected=db.execute('SELECT UPRID FROM dbo.UPR WHERE @id IS NULL OR EntityTypeID=@id',dict(id=entity_id)).fetchall()
+    assert {r[0] for r in selected}=={r[0] for r in expected},entity_id
+    if entity_id==1:
+        assert (347,1,2,'00118285') in selected
+    if entity_id==3:
+        assert (345168,3,2,'00118285') in selected
+        assert any(r[0]==999 and r[2]==-1 for r in selected)
+# Combined account/entity filtering retains the original root context.
+db.execute('DELETE FROM ReportTree')
+db.executemany('INSERT INTO ReportTree VALUES(?,?,?,?,?,?,?,?,?)',db.execute(q,dict(RootLimit=99,NormAccount='00118285')).fetchall())
+db.execute(prune,dict(FilterEntityTypeID=3))
+assert db.execute('SELECT UPRID,LevelNo,RootAccount FROM ReportTree').fetchall()==[(345168,2,'00118285')]
+# The supplemental grids read the filtered tree; summary and checks filter independently.
+assert s.index('DELETE FROM #ReportTree')<s.index('SELECT\n    LevelNo=CASE')
+assert 'FROM #ReportTree t JOIN dbo.UPR_ADDRESS' in s
+assert 'FROM #ReportTree t JOIN dbo.UPR_CONTACT' in s
+summary=s[s.index('SELECT\n    EntityType = e.Description'):s.index('/* ------------------------------------------------------------\n   SECTION 2')]
+assert '@FilterEntityTypeID IS NULL OR u.EntityTypeID=@FilterEntityTypeID' in summary
+flags=s[s.index(') x\nINNER JOIN dbo.UPR'):s.index("PRINT N'';\nIF @ShowAllAssociations")]
+assert '@FilterEntityTypeID IS NULL OR u.EntityTypeID=@FilterEntityTypeID' in flags
+assert 'THROW 50002' in s and 'THROW 50003' in s
+print('PASS: all six entity selections, all/empty result sets, account+entity filter, unresolved rows and sibling Condo/Unit depth')

@@ -23,7 +23,7 @@ def candidates():return db.execute(query,args).fetchall()
 assert candidates()==[(345168,24,8001,147901,24,None)]
 identity_before=(list(db.execute('SELECT * FROM dbo.UNIT')),list(db.execute('SELECT * FROM dbo.EXTERNAL_IDENTIFIER_XREF')))
 # Execute the actual UPDATE relationship after removing SQL Server OUTPUT/metadata.
-join=re.search(r'UPDATE u SET ParentUPRID=r.BuildingUPRID,UpdatedBy=@RunUser,UpdatedDate=@Now.*?\n(FROM dbo.UPR u JOIN #CondoUnitParentRepair.*?);',s,re.S)[1]
+join=re.search(r'UPDATE u SET ParentUPRID=r.BuildingUPRID,UpdatedBy=@RunUser,UpdateDate=@Now.*?\n(FROM dbo.UPR u JOIN #CondoUnitParentRepair.*?);',s,re.S)[1]
 select='SELECT u.UPRID,r.BuildingUPRID '+join.replace('#CondoUnitParentRepair','CondoUnitParentRepair')
 def repair():
  rows=candidates();assert not any(r[-1] for r in rows)

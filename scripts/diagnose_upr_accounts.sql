@@ -49,7 +49,7 @@ PRINT N'Written UPR entities with direct Address and Contact links';
 )
 SELECT t.RootAccount, u.UPRID, u.ParentUPRID, e.Description AS EntityType,
     un.UnitNumber, BuildingID = COALESCE(b.BuildingID, un.BuildingID),
-    ua.IsPrimary, a.AddressID, a.StreetNumber, a.StreetName, a.StreetType,
+    ua.PrimaryInd, a.AddressID, a.StreetNumber, a.StreetName, a.StreetType,
     a.City, a.State, a.ZipCode, a.NormalizedAddress,
     ct.ContactID, ct.OrganizationName
 FROM Tree t
@@ -113,7 +113,7 @@ SELECT
     EnabledTriggerCount   = (SELECT COUNT(*) FROM sys.triggers WHERE name LIKE N'tr_UPR_Audit[_]%' AND is_disabled = 0),
     EarliestAuditEvent    = (SELECT MIN(ChangedDate) FROM dbo.AUDIT_LOG WHERE EntityName <> 'UPR_HIER_LOAD'),
     LatestAuditEvent      = (SELECT MAX(ChangedDate) FROM dbo.AUDIT_LOG),
-    EarliestUPRCreated    = (SELECT MIN(CreatedDate) FROM dbo.UPR);
+    EarliestUPRCreated    = (SELECT MIN(CreationDate) FROM dbo.UPR);
 PRINT N'If EnabledTriggerCount < 23, run scripts/install_upr_audit.sql.';
 PRINT N'If EarliestUPRCreated is well before EarliestAuditEvent, some UPR rows';
 PRINT N'were loaded before auditing was installed - their creation cannot be';

@@ -82,7 +82,7 @@ IF NOT EXISTS (SELECT 1 FROM dbo.ADDRESS
       AND XCoordinate = 1283026 AND YCoordinate = 513743)
     THROW 51003, 'Client source address/coordinates were lost or State invented.', 1;
 IF EXISTS (SELECT 1 FROM dbo.UPR u
-    WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_ADDRESS ua WHERE ua.UPRID = u.UPRID AND ua.IsPrimary = 1)
+    WHERE NOT EXISTS (SELECT 1 FROM dbo.UPR_ADDRESS ua WHERE ua.UPRID = u.UPRID AND ua.PrimaryInd = 1)
        OR NOT EXISTS (SELECT 1 FROM dbo.UPR_CONTACT uc WHERE uc.UPRID = u.UPRID))
     THROW 51004, 'Parent or Building lacks a direct Address/Contact link.', 1;
 IF EXISTS (SELECT 1 FROM dbo.CONTACT WHERE OrganizationName IS NOT NULL)
@@ -112,10 +112,10 @@ IF (SELECT COUNT(DISTINCT EntityName) FROM dbo.AUDIT_LOG
     print("PASS: missing parcel accepted without review; source row unchanged; rerun preserves records")
 
     # Partially populated client databases may have links that are not primary.
-    query("UPDATE dbo.UPR_ADDRESS SET IsPrimary = 0; SELECT 'PREPARED';")
+    query("UPDATE dbo.UPR_ADDRESS SET PrimaryInd = 0; SELECT 'PREPARED';")
     sql(current)
     assert query(identity_query) == ids, "Non-primary address link created a duplicate Building"
-    query("IF (SELECT COUNT(*) FROM dbo.UPR_ADDRESS WHERE IsPrimary = 1) <> 2 "
+    query("IF (SELECT COUNT(*) FROM dbo.UPR_ADDRESS WHERE PrimaryInd = 1) <> 2 "
           "THROW 51010, 'Existing source address links were not made primary.', 1; SELECT 'PASS';")
     print("PASS: existing non-primary Address links repaired without duplicating Buildings")
 

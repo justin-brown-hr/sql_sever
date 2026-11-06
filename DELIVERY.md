@@ -1,36 +1,9 @@
-> October 13 full-record listing: [run guide](CLIENT_FULL_RECORDS_2026-10-13.md).
-> Send `UPR_Full_Records_2026-10-13.zip` for the client's latest listing request.
-> One read-only SQL file; all UPRs by default, optional account filter, readable grids.
-> Syntax/offline checks passed; client SQL Server execution remains pending.
-
-> October 8 demo: [Search and Property 360 run guide](CLIENT_SEARCH_DEMO_2026-10-08.md).
-> Send `UPR_Search_Property360_Demo_2026-10-08.zip` for the new demo request.
-> One read-only SQL script; existing load/search/API objects are unchanged.
-
-> Latest main loader: [October 8 R9 Condo unit parent correction](CLIENT_MAIN_LOADER_2026-10-08.md).
-> Send `UPR_Main_Loader_2026-10-08_R9.zip` for the hierarchy correction.
-> Two SQL files: complete main loader and read-only unit hierarchy verification.
-> R8 readable row auditing remains included. SQL Server execution is pending.
-
-The notes below describe historical deliveries. Obsolete closure-test ZIPs and
-superseded client messages were removed during cleanup. The earlier complete
-release is retained under `archive/deliveries/` for reference only.
-
-> Earlier full releases included the [EntityKey explanation and readable audit report](CLIENT_AUDIT_KEY_UPDATE_2026-09-24.md).
-
-> Latest September 29 contract: [retain the original AncestorUPRID API column](CLIENT_CLOSURE_API_2026-09-29.md).
-> The level-0 display test is read-only and does not change UPR_CLOSURE.
-
-> September 24 combined revision: search, readable audit keys and the supplied
-> physical AuditLog layout. [Latest installation contract](CLIENT_AUDIT_LAYOUT_2026-09-24.md)
-> supersedes earlier descriptions of AUDIT_LOG as a table / AuditLog as a view.
-> [Combined results](WORK_RESULTS_2026-09-24.md); SQL Server execution remains pending.
-
-> Current search behavior and installation notes: [September 24 search update](CLIENT_SEARCH_UPDATE_2026-09-24.md).
-> The refreshed SQL candidate still requires SQL Server integration execution.
-
-> Historical delivery notes. For the current schema, migration order and verification status,
-> see [September 23 update](CLIENT_UPDATE_2026-09-23.md). Earlier test passes do not validate this update.
+> Current: November 3 R12 - [record layout metadata names](CLIENT_MAIN_LOADER_2026-11-03.md).
+> Send `UPR_Main_Loader_2026-11-03_R12.zip` (loader + listing + Property 360 demo + schema check, new names).
+> Layout check stops before any change and lists every missing/unfilled column. Native SQL Server tests pass.
+> Includes the November 2 R11 [C Number Complex/Building/Unit rule](CLIENT_MAIN_LOADER_2026-11-02.md).
+> Earlier delivery notes were removed; see git history and `SESSION_HANDOVER.md`.
+> The sections below describe the original September 2026 package.
 
 # UPR Master Load - Delivery Package (Hierarchical Model)
 
@@ -50,10 +23,10 @@ release is retained under `archive/deliveries/` for reference only.
 | 2 | **Load script** (MA + SDAT to full hierarchy) | `scripts/load_upr_master.sql` |
 | 3 | **Search procedure** | `scripts/search_upr_master.sql` -> `dbo.usp_UPR_Search` |
 | 4 | **Validation report** (PASS/FAIL checks, works with real data) | `test/run_test_and_results.sql` |
-| 5 | **Real-data test guide** | `CLIENT_REAL_DATA_TEST.md` |
+| 5 | **Current client run guide** | `CLIENT_MAIN_LOADER_2026-11-03.md` |
 | 6 | **README** (structure, run steps, assumptions) | `README.md` |
 | 7 | **Persistent row auditing** (install before loading) | `scripts/install_upr_audit.sql` |
-| 8 | **Current correction guide and account diagnostics** | `CLIENT_FIX_2026-09-16.md`, `scripts/diagnose_upr_accounts.sql` |
+| 8 | **Account diagnostics** | `scripts/diagnose_upr_accounts.sql` |
 
 Supporting files:
 
@@ -68,7 +41,7 @@ Supporting files:
 
 ---
 
-For an **existing database**, apply [CLIENT_FIX_2026-09-16.md](CLIENT_FIX_2026-09-16.md)
+For an **existing database**, follow [CLIENT_MAIN_LOADER_2026-11-03.md](CLIENT_MAIN_LOADER_2026-11-03.md)
 instead of the clean-schema setup below.
 
 ## Quick Start (SSMS)

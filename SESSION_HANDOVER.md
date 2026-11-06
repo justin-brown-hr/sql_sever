@@ -1,3 +1,128 @@
+# Cleanup — November 3
+
+User asked to remove unnecessary md/zip files. Deleted superseded ZIPs (R9, R11, Full_Records
+10-13/10-14, Property360 demo 10-08; untracked, permanent) and 21 older guides/notes (tracked,
+recoverable from git) plus untracked CLIENT_MAIN_LOADER_2026-10-14.md and
+CLIENT_FULL_RECORDS_2026-10-14.md (permanent; summarized in the entries below). Kept: README,
+DELIVERY, this file, R11/R12 guides, R12 ZIP, R10 ZIP (baseline for check_cnumber_buildings.py).
+Entries below may name files that no longer exist.
+
+---
+
+# Current — November 3 R12 record layout metadata names
+
+Client renamed metadata columns (no layout document supplied): UpdatedDate->UpdateDate
+(UPR/BUILDING/UNIT), IsPrimary->PrimaryInd (UPR_ADDRESS), LastUpdatedUserID/
+LastUpdatedDate->LastUpdateUserID/LastUpdateDate (REF tables), CreatedDate->CreationDate,
+IsActive->ActiveInd; CreationUserID and DeletedInd "now used". CreatedBy/UpdatedBy were
+NOT listed and are kept - unconfirmed assumption.
+Whole-word renames applied in loader, listing, demo, search, diagnose, schema check,
+project DDL and tests. Dictionary seed now uses @DictionaryValueMap (both naming sets +
+DeletedInd/LastUpdate*). New RECORD_LAYOUT_PREFLIGHT batch (before any CREATE): missing
+CORE columns + NOT NULL no-default columns not supplied on INSERT -> grid, RAISERROR,
+SET NOEXEC ON; final batch SET NOEXEC OFF. Dependency test keeps its lists in sync.
+Native test check_cnumber_buildings.py (10 PASS on SQL Server 2022): R11 rules on new
+names, client scripts on new names, R10 on old layout -> sp_rename -> R12 (no moves/dups,
+identical to R10), stale layout stops with all six names and no change.
+Found, not fixed (pre-existing, outside this request): diagnose_upr_accounts.sql reads
+dbo.AUDIT_LOG; usp_UPR_Search executes against dbo.UPR_CONDO_LEGACY (absent in client).
+Delivery UPR_Main_Loader_2026-11-03_R12.zip (4 files, byte-identical to scripts/).
+
+---
+
+# Current — November 2 R11 C Number Complex / Building / Unit
+
+Client (Nov 2): 1) units under Complex buildings missing from Unit table;
+2) normalize street-number leading zeros in both incoming tables; 3) no rule yet
+to identify Buildings; proposed: C Number + MultiFamily -> Complex, distinct
+addresses -> Buildings (validated), SDAT address match -> condo Units.
+
+Cause of 1: C Number = MA Account `C<digits>` (legacy loader same assumption);
+SDAT condo accounts never equal it, so SDAT condos became separate Condo roots.
+R11 Step 4 block CNUMBER_BUILDINGS_BEGIN/END: #CNumberBuilding (CNumber, street
+address, ValidationStatus VALIDATED | ZIP_CONFLICT | SHARED_WITH_OTHER_ACCOUNT |
+EXISTING_ROOT_REVIEW), #CNumberSdatMatch (KDAT, HasMAAccount=0, street + compatible
+ZIP; Outcome ASSIGNED | NO_CONDO_UNIT | AMBIGUOUS_BUILDING | BUILDING_NOT_VALIDATED |
+LOADED_ELSEWHERE). ASSIGNED rows join the Building group (IsAddressMatchedUnit=1,
+NormalizedFullAddress = chosen MA address, original in SourceFullAddress). Validated
+Complex MA City/ZIP variants consolidate to one Building. Parent excludes matched
+rows' account/owner/parcel (Step 6, 11); Unit gets UPR.AccountNumber, ACCOUNT_NUMBER
+and PARCEL_ID XREFs and OWNER contact (Steps 9-11, all audited; 63 -> 66 DML).
+#BuildingSrc prefers rows with SourceFullAddress NULL (identical when no R11 rewrite).
+Rows R10 already loaded elsewhere are NOT moved. Single-address C Number stays
+Property; APT counts as MultiFamily. Review grids: @ShowCNumberReview (default 1).
+Issue 2: leading zeros were already stripped; R11 also strips tab/CR/LF/NBSP.
+
+Also fixed latent R6+ bug: static UPDATE REF_ENTITY_IDENTIFICATION.EntityID failed
+compile (Msg 8102) when EntityID is IDENTITY (project DDL). Now sp_executesql.
+
+VERIFIED ON REAL SQL SERVER 2022 CU27 (udocker container, no docker/sudo here):
+new test/check_cnumber_buildings.py PASS (fixture, rerun idempotent, R10->R11
+upgrade, R10/R11 identical on standard seed 501 snapshot rows); check_closure_index_
+setup.py PASS (first native run of R10 index work); check_hierarchy_listing PASS;
+150k synthetic rows R10 1019s vs R11 935s (udocker, relative only). ScriptDom parse,
+audit coverage, static/offline checks PASS. check_ma_precedence and check_client_
+schema_load are stale (old audit layout/R8 banner/batch bugs) and were not fixed.
+Not run on client data. Delivery UPR_Main_Loader_2026-11-02_R11.zip (one SQL file
+identical to scripts/load_upr_master.sql). Guide CLIENT_MAIN_LOADER_2026-11-02.md
+with questions (C Number column?, APT?, single-address Complex?, unit zeros).
+
+---
+
+# Current — October 14 R10 closure index collision
+
+Client R9/400k screenshot in UPR7XDB_TEST fails custom50007 in Step12:
+IX_UPR_CLOSURE_Descendant exists incompatible. Actual definition unknown; this is
+name/definition guard, not evidence of capacity failure. Main CATCH rolls back.
+
+Changed load_upr_master.sql R10: same index compatibility predicates, reuse by
+metadata; if preferred name occupied choose _Loader1/_Loader2 etc. via quoted
+identifier dynamicDDL; preserve all existing definitions/constraints/Level. Moved
+setup after early duplicate-pair check inside transaction before Step1 businessDML.
+Both forwardunique and reverse indexes handled. Step12 distanceDML unchanged.
+Token comparison to deliveredR9 proves executable code outside index setup and
+release banner unchanged. Separate Condo sibling scenario remains unconfirmed.
+
+New scripts/check_upr_closure_indexes.sql read-only metadata flags/keys/includes
+and two compatibility verdicts. New native test/check_closure_index_setup.py needs
+SQLServercontainer; NOT RUN. Expanded offline index tests exercise predicates and
+collision naming/reuse; parser includes renderedDDL /tmp/upr-r10-index-ddl.sql.
+Closure, dependency, schema, R9 unit-parent regressions PASS. No SQLServerruntime
+or400kthroughput verification. Do not overstate validation or actual clientindex.
+
+Delivery UPR_Main_Loader_2026-10-14_R10.zip twoSQLfiles: datedcomplete loader and
+indexdiagnostic. Guide CLIENT_MAIN_LOADER_2026-10-14.md; instruct edit USE from
+UPRXDB_TEST to intended client DB before fullrerun. No step12-only run/dropindexes.
+R9ZIP retained. Prior Oct14selective listing work preserved; loader change separate.
+No uploads, client messages or database commands executed externally.
+
+---
+
+# Current — October 14 selective listing and Condo scenario
+
+Client confirms Oct13 listing ran successfully, requests editable entity selection
+for planned 300k test on Oct15. Added @FilterEntity to scripts/list_upr_hierarchy.sql:
+NULL/ALL/blank all; six singular entity names case-insensitive; clear validation on
+invalid/ambiguous/missing dictionary mapping. Resolve ID once. Build root context,
+then prune #ReportTree before detail lookups, optional metadata and association
+queries. Summary/checks filter selected entity too. @ShowCompletenessChecks optional,
+existing @ShowAllAssociations retained; both default1. Account/root cap semantics
+unchanged; cap precedes entity filter (can yield no matching rows). No loader edits.
+
+Package UPR_Full_Records_2026-10-14.zip is one dated SQL file byte-identical to source.
+Guide CLIENT_FULL_RECORDS_2026-10-14.md. Oct13 ZIP retained as successful prior version.
+Parser/offline actual-query tests PASS; SQLServer integration test extended but NOT
+run; no 300k performance claim. Default still traverses all roots for context.
+
+Scenario: client proposes SDAT Condo + MA Unit as siblings under Building. R9 assumes
+root Condo->Building->Unit; grouping/repair/matching need review. Report can traverse
+existing mixed children, but loader support NOT implemented. Asked asynchronously
+for sample SDAT account, MA record ID, building ID, unit number, and same vs different
+space determination. No answer yet. Source system alone cannot establish identity;
+legal/physical records may need links instead of duplicate siblings/automatic merge.
+
+---
+
 # Current — October 13 full-record listing
 
 Client wants the existing UPRID/account/owner/address/building/unit listing sent in
