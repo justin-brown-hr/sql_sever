@@ -55,7 +55,6 @@ try:
 SET QUOTED_IDENTIFIER ON;
 SET ANSI_NULLS ON;
 SET NOCOUNT ON;
-DROP TABLE dbo.UPR_CONDO_LEGACY;
 DROP TABLE dbo.ADU;
 DECLARE @Condo INT = (SELECT EntityTypeID FROM dbo.REF_ENTITYTYPE WHERE Description = 'Condo');
 DECLARE @Building INT = (SELECT EntityTypeID FROM dbo.REF_ENTITYTYPE WHERE Description = 'Building');
@@ -64,31 +63,32 @@ DECLARE @Unit INT = (SELECT EntityTypeID FROM dbo.REF_ENTITYTYPE WHERE Descripti
     SELECT TOP (50001) n = ROW_NUMBER() OVER (ORDER BY a.object_id, b.object_id)
     FROM sys.all_objects a CROSS JOIN sys.all_objects b
 )
-INSERT dbo.UPR (EntityTypeID, AccountNumber)
-SELECT @Condo, CASE n
+INSERT dbo.UPR (EntityTypeID, CreationUserID, LastUpdateUserID, LastUpdateDate, AccountNumber)
+SELECT @Condo, 'fixture', 'fixture', SYSUTCDATETIME(), CASE n
     WHEN 1 THEN '123456789' WHEN 2 THEN 'OTHER'
     WHEN 6 THEN '23456789' WHEN 3 THEN '1234567890123' WHEN 4 THEN 'ABC-123'
     ELSE RIGHT('00000000' + CONVERT(VARCHAR(8), n), 8) END
 FROM Numbers;
 DECLARE @Root1 BIGINT = (SELECT UPRID FROM dbo.UPR WHERE AccountNumber = '123456789');
 DECLARE @Root2 BIGINT = (SELECT UPRID FROM dbo.UPR WHERE AccountNumber = 'OTHER');
-INSERT dbo.CONDO (UPRID) SELECT UPRID FROM dbo.UPR;
-INSERT dbo.UPR (EntityTypeID, ParentUPRID) VALUES (@Building, @Root1);
+INSERT dbo.CONDO (UPRID, DeletedInd, CreationUserID, LastUpdateUserID, LastUpdateDate)
+SELECT UPRID, 0, 'fixture', 'fixture', SYSUTCDATETIME() FROM dbo.UPR;
+INSERT dbo.UPR (EntityTypeID, ParentUPRID, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@Building, @Root1, 'fixture', 'fixture', SYSUTCDATETIME());
 DECLARE @BU1 BIGINT = SCOPE_IDENTITY();
-INSERT dbo.BUILDING (UPRID) VALUES (@BU1);
+INSERT dbo.BUILDING (UPRID, DeletedInd, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@BU1, 0, 'fixture', 'fixture', SYSUTCDATETIME());
 DECLARE @B1 BIGINT = SCOPE_IDENTITY();
-INSERT dbo.UPR (EntityTypeID, ParentUPRID) VALUES (@Building, @Root2);
+INSERT dbo.UPR (EntityTypeID, ParentUPRID, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@Building, @Root2, 'fixture', 'fixture', SYSUTCDATETIME());
 DECLARE @BU2 BIGINT = SCOPE_IDENTITY();
-INSERT dbo.BUILDING (UPRID) VALUES (@BU2);
+INSERT dbo.BUILDING (UPRID, DeletedInd, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@BU2, 0, 'fixture', 'fixture', SYSUTCDATETIME());
 DECLARE @B2 BIGINT = SCOPE_IDENTITY();
-INSERT dbo.UPR (EntityTypeID, ParentUPRID) VALUES (@Unit, @BU1);
-INSERT dbo.UNIT (UPRID, BuildingID, UnitNumber) VALUES (SCOPE_IDENTITY(), @B1, 'VALID_BUILDING');
-INSERT dbo.UPR (EntityTypeID, ParentUPRID) VALUES (@Unit, @Root1);
-INSERT dbo.UNIT (UPRID, BuildingID, UnitNumber) VALUES (SCOPE_IDENTITY(), @B1, 'DIRECT_CONDO');
-INSERT dbo.UPR (EntityTypeID, ParentUPRID) VALUES (@Unit, @BU1);
-INSERT dbo.UNIT (UPRID, BuildingID, UnitNumber) VALUES (SCOPE_IDENTITY(), @B2, 'WRONG_BUILDING');
-INSERT dbo.UPR (EntityTypeID, ParentUPRID) VALUES (@Unit, @Root1);
-INSERT dbo.UNIT (UPRID, BuildingID, UnitNumber) VALUES (SCOPE_IDENTITY(), @B2, 'WRONG_CONDO');
+INSERT dbo.UPR (EntityTypeID, ParentUPRID, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@Unit, @BU1, 'fixture', 'fixture', SYSUTCDATETIME());
+INSERT dbo.UNIT (UPRID, UnitNumber, DeleteInd, CreationUserID, LastUpdateUserID) VALUES (SCOPE_IDENTITY(), 'VALID_BUILDING', 0, 'fixture', 'fixture');
+INSERT dbo.UPR (EntityTypeID, ParentUPRID, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@Unit, @Root1, 'fixture', 'fixture', SYSUTCDATETIME());
+INSERT dbo.UNIT (UPRID, UnitNumber, DeleteInd, CreationUserID, LastUpdateUserID) VALUES (SCOPE_IDENTITY(), 'DIRECT_CONDO', 0, 'fixture', 'fixture');
+INSERT dbo.UPR (EntityTypeID, ParentUPRID, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@Unit, @BU1, 'fixture', 'fixture', SYSUTCDATETIME());
+INSERT dbo.UNIT (UPRID, UnitNumber, DeleteInd, CreationUserID, LastUpdateUserID) VALUES (SCOPE_IDENTITY(), 'SECOND_BUILDING_UNIT', 0, 'fixture', 'fixture');
+INSERT dbo.UPR (EntityTypeID, ParentUPRID, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@Unit, @Root1, 'fixture', 'fixture', SYSUTCDATETIME());
+INSERT dbo.UNIT (UPRID, UnitNumber, DeleteInd, CreationUserID, LastUpdateUserID) VALUES (SCOPE_IDENTITY(), 'WRONG_CONDO', 0, 'fixture', 'fixture');
 ;WITH Closure AS (
     SELECT AncestorUPRID = UPRID, DescendantUPRID = UPRID, Distance = 0 FROM dbo.UPR
     UNION ALL
@@ -131,16 +131,17 @@ FROM Closure cl;
     filtered = report("123456789")
     issues = [line for line in filtered.splitlines()
               if line.startswith("Unit has invalid Building link|")]
-    assert len(issues) == 3
+    # No UNIT.BuildingID in the client layout: a Unit is valid when its parent is a Building.
+    assert len(issues) == 2
     assert any("DIRECT_CONDO" in line for line in issues)
-    assert any("WRONG_BUILDING" in line for line in issues)
     assert any("WRONG_CONDO" in line for line in issues)
-    assert all("VALID_" not in line for line in issues)
+    assert all("VALID_" not in line and "SECOND_BUILDING_UNIT" not in line for line in issues)
     units = [r for r in tree(filtered) if r[7] == "Unit"]
-    assert len(units) == 4 and all(r[-2] != "NULL" for r in units)
+    assert len(units) == 4
+    assert sum(r[-2] != "NULL" for r in units) == 2, "BuildingID shown for Units under a Building"
     assert len(tree(filtered)) == 6
     assert all(r[6] == "123456789" for r in units), "Units need root account context"
-    print("PASS: Building units accepted; direct Condo/wrong links flagged; BuildingID and account displayed")
+    print("PASS: Building units accepted; Units under a Condo flagged; parent BuildingID and account displayed")
     for entity, count in (("Condo",1),("Building",1),("Unit",4),("Complex",0),("Property",0),("ADU",0)):
         selected=tree(report("123456789",entity=entity))
         assert len(selected)==count and all(r[7]==entity for r in selected),entity

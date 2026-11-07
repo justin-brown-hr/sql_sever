@@ -1,3 +1,28 @@
+# Current — November 6 R13 client data structure changes
+
+Client sent temp/Data Structure Changes.docx + temp/DataStructureChanges_Layout_11_6_2026.txt
+(full DDL). That DDL is now ddl/03_new_upr_schema.sql (USE name, REF_ENTITY_IDENTIFICAION
+drop typo and trailing spaces fixed; old DDL in commit 1e77e58). R12 preflight on it listed
+36 gaps. R13: inserts fill CreationDate/CreationUserID/LastUpdateUserID/LastUpdateDate and
+DeletedInd|DeleteInd (names exactly per table) from @NowUtc/@AuditUser; updates set
+LastUpdate*; UPR/COMPLEX CreatedBy, UpdatedBy dropped; ChangedDate->ChangeDate (AuditLog,
+UPRSTATUSHISTORY); UNIT.BuildingID removed -> Unit's Building = UPR.ParentUPRID everywhere
+(unit reuse, overlap repair, address links, listing, demo, search). R9 direct Condo->Unit
+repair is now detect-and-THROW (no authority to pick a Building); CondoToComplex reparent
+statement removed (64 audited DML). No N/A unit numbers: NULL; earlier N/A cleared (audited).
+Reverse closure index check accepts leading DescendantUPRID + AncestorUPRID anywhere/included
+(client IX_UPR_CLOSURE_Descendant reused). Audit images regenerated from DDL
+(tools/regen_audit_images.py); preflight lists from diagnostic CORE (tools/regen_layout_preflight.py;
+CORE for audited tables = all their DDL columns).
+Tests on SQL Server 2022 (udocker): check_cnumber_buildings.py 12 PASS (client DDL), closure
+index setup incl. client_2026_11, listing; offline suites and ScriptDom PASS.
+Not changed: check_upr_unit_hierarchy.sql and list_upr_audit.sql (still old structures);
+diagnose_upr_accounts AUDIT_LOG and usp_UPR_Search UPR_CONDO_LEGACY issues remain.
+Open for client: DeleteInd vs DeletedInd naming; ADU LastUpdateUserID; dictionary PK;
+duplicate closure unique index; plus earlier open questions.
+
+---
+
 # Cleanup — November 3
 
 User asked to remove unnecessary md/zip files. Deleted superseded ZIPs (R9, R11, Full_Records

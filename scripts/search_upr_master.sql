@@ -231,12 +231,12 @@ BEGIN
     LEFT JOIN dbo.PROPERTY p ON p.UPRID = u.UPRID
     LEFT JOIN dbo.COMPLEX cx ON cx.UPRID = u.UPRID
     LEFT JOIN dbo.UNIT un ON un.UPRID = u.UPRID
-    LEFT JOIN dbo.BUILDING ub ON ub.BuildingID = un.BuildingID
+    LEFT JOIN dbo.BUILDING ub ON un.UnitID IS NOT NULL AND ub.UPRID = u.ParentUPRID
     LEFT JOIN dbo.CONDO co ON co.UPRID = u.UPRID
     LEFT JOIN dbo.UPR_CONDO_LEGACY old ON old.CondoID = co.CondoID AND old.UPRID = u.UPRID
     OUTER APPLY (SELECT TOP (1) h.ParcelID FROM dbo.UPRSTATUSHISTORY h
         WHERE co.CondoID IS NOT NULL AND h.UPRID = u.UPRID AND h.ChangeSource = N'HIER_LOAD'
-        ORDER BY h.ChangedDate DESC,h.UPRStatusHistoryID DESC) hist
+        ORDER BY h.ChangeDate DESC,h.UPRStatusHistoryID DESC) hist
     WHERE @IncludeReviewQOnly = 0
       AND (@UPRID IS NULL OR u.UPRID = @UPRID)
       AND (@EntityType IS NULL OR et.Description = @EntityType)
@@ -390,7 +390,7 @@ BEGIN
     LEFT JOIN dbo.COMPLEX cx ON cx.UPRID=u.UPRID
     LEFT JOIN dbo.BUILDING b ON b.UPRID=u.UPRID
     LEFT JOIN dbo.UNIT un ON un.UPRID=u.UPRID
-    LEFT JOIN dbo.BUILDING ub ON ub.BuildingID=un.BuildingID
+    LEFT JOIN dbo.BUILDING ub ON un.UnitID IS NOT NULL AND ub.UPRID=u.ParentUPRID
     OUTER APPLY (SELECT TOP (1) m.AddressID,m.MatchRank,m.MatchScore FROM #AddressMatches m
         WHERE m.UPRID=e.UPRID AND @HasAddress=1 ORDER BY m.MatchRank,m.MatchScore DESC,m.AddressID) am
     OUTER APPLY (SELECT TOP (1) a.* FROM #Addresses a WHERE a.UPRID=e.UPRID
@@ -547,7 +547,7 @@ BEGIN
        that authorized entity as related context without changing the tree. */
     IF @Full=1
         INSERT #Scope
-        SELECT b.UPRID,'BUILDING' FROM dbo.UNIT un JOIN dbo.BUILDING b ON b.BuildingID=un.BuildingID
+        SELECT b.UPRID,'BUILDING' FROM dbo.UNIT un JOIN dbo.UPR uu ON uu.UPRID=un.UPRID JOIN dbo.BUILDING b ON b.UPRID=uu.ParentUPRID
         JOIN #DetailAllowed a ON a.UPRID=b.UPRID
         WHERE un.UPRID=@UPRID AND NOT EXISTS(SELECT 1 FROM #Scope s WHERE s.UPRID=b.UPRID);
     IF (SELECT COUNT(*) FROM #Scope)>@MaxNodes
@@ -604,7 +604,8 @@ BEGIN
             CASE WHEN EXISTS(SELECT 1 FROM #DetailAllowed al WHERE al.UPRID=b.UPRID) THEN b.UPRID END AS buildingUprId,
             un.UnitTypeCode AS unitTypeCode,un.FloorNumber AS floorNumber,un.BedroomCount AS bedroomCount,
             un.BathroomCount AS bathroomCount,un.HasLegalIdentity AS hasLegalIdentity,un.StatusCode AS statusCode
-            FROM #Scope s JOIN dbo.UNIT un ON un.UPRID=s.UPRID JOIN dbo.BUILDING b ON b.BuildingID=un.BuildingID
+            FROM #Scope s JOIN dbo.UNIT un ON un.UPRID=s.UPRID JOIN dbo.UPR uu ON uu.UPRID=un.UPRID
+            JOIN dbo.BUILDING b ON b.UPRID=uu.ParentUPRID
             ORDER BY un.UPRID FOR JSON PATH) END) AS units,
         JSON_QUERY(CASE WHEN @Full=1 THEN (SELECT a.UPRID AS uprId,a.ADUID AS aduId,a.UnitNumber AS unitNumber,a.StatusCode AS statusCode
             FROM #Scope s JOIN dbo.ADU a ON a.UPRID=s.UPRID ORDER BY a.UPRID FOR JSON PATH) END) AS adus,

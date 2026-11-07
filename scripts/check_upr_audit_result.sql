@@ -16,9 +16,9 @@ IF @Payload IS NULL OR (COL_LENGTH(N'dbo.AuditLog',N'NewValue') IS NOT NULL AND 
 DECLARE @Prefix NVARCHAR(100)=N'RunID = '+CONVERT(NVARCHAR(36),@RunID)+NCHAR(10);
 IF OBJECT_ID('tempdb..#RunAuditCheck') IS NOT NULL DROP TABLE #RunAuditCheck;
 CREATE TABLE #RunAuditCheck(AuditID INT,UPRID BIGINT,EntityNameID INT,EntityRecordID BIGINT,
-    OperationType VARCHAR(20),ChangedBy NVARCHAR(100),ChangedDate DATETIME2(7),OldValues NVARCHAR(MAX),NewValue NVARCHAR(MAX));
+    OperationType VARCHAR(20),ChangedBy NVARCHAR(100),ChangeDate DATETIME2(7),OldValues NVARCHAR(MAX),NewValue NVARCHAR(MAX));
 DECLARE @Sql NVARCHAR(MAX)=N'INSERT #RunAuditCheck
-    SELECT AuditID,UPRID,EntityNameID,EntityRecordID,OperationType,ChangedBy,ChangedDate,OldValues,'+QUOTENAME(@Payload)+N'
+    SELECT AuditID,UPRID,EntityNameID,EntityRecordID,OperationType,ChangedBy,ChangeDate,OldValues,'+QUOTENAME(@Payload)+N'
     FROM dbo.AuditLog WHERE (@first IS NULL OR AuditID>=@first) AND (@last IS NULL OR AuditID<=@last)
       AND (LEFT('+QUOTENAME(@Payload)+N',LEN(@prefix))=@prefix OR LEFT(OldValues,LEN(@prefix))=@prefix);';
 EXEC sys.sp_executesql @Sql,N'@first INT,@last INT,@prefix NVARCHAR(100)',@FirstAuditID,@LastAuditID,@Prefix;
@@ -40,7 +40,7 @@ GROUP BY e.EntityName,a.OperationType ORDER BY e.EntityName,a.OperationType;
 SELECT COUNT_BIG(*) AS InvalidEntityMappings FROM #RunAuditCheck a WHERE
     (SELECT COUNT(*) FROM dbo.REF_ENTITY_IDENTIFICATION e WHERE e.EntityID=a.EntityNameID)<>1;
 SELECT COUNT_BIG(*) AS UnexpectedJsonRows FROM #RunAuditCheck WHERE ISJSON(OldValues)=1 OR ISJSON(NewValue)=1;
-SELECT TOP(50) a.AuditID,a.UPRID,e.EntityName AS TableName,a.EntityRecordID,a.OperationType,a.ChangedBy,a.ChangedDate,
+SELECT TOP(50) a.AuditID,a.UPRID,e.EntityName AS TableName,a.EntityRecordID,a.OperationType,a.ChangedBy,a.ChangeDate,
     CASE WHEN ISJSON(a.OldValues)=1 THEN N'Unexpected JSON value: not displayed' ELSE a.OldValues END AS OldValues,
     CASE WHEN ISJSON(a.NewValue)=1 THEN N'Unexpected JSON value: not displayed' ELSE a.NewValue END AS NewValue
 FROM #RunAuditCheck a LEFT JOIN dbo.REF_ENTITY_IDENTIFICATION e ON e.EntityID=a.EntityNameID ORDER BY a.AuditID;

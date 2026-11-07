@@ -52,13 +52,13 @@ IF @MaxMatches IS NULL OR @MaxMatches NOT BETWEEN 1 AND 5000
    Dynamic execution is fixed SQL; search values are passed as parameters. */
 DECLARE @Required TABLE(TableName SYSNAME,ColumnName SYSNAME);
 INSERT @Required VALUES
-    (N'UPR',N'UPRID'),(N'UPR',N'ParentUPRID'),(N'UPR',N'EntityTypeID'),(N'UPR',N'AccountNumber'),(N'UPR',N'StatusCode'),(N'UPR',N'CreationDate'),(N'UPR',N'UpdateDate'),
+    (N'UPR',N'UPRID'),(N'UPR',N'ParentUPRID'),(N'UPR',N'EntityTypeID'),(N'UPR',N'AccountNumber'),(N'UPR',N'StatusCode'),(N'UPR',N'CreationDate'),(N'UPR',N'LastUpdateDate'),
     (N'REF_ENTITYTYPE',N'EntityTypeID'),(N'REF_ENTITYTYPE',N'Description'),
     (N'PROPERTY',N'UPRID'),(N'PROPERTY',N'PropertyName'),(N'PROPERTY',N'OwnerName'),(N'PROPERTY',N'Parcel'),(N'PROPERTY',N'PropertyTypeID'),(N'PROPERTY',N'StatusCode'),
     (N'COMPLEX',N'UPRID'),(N'COMPLEX',N'CommunityName'),(N'COMPLEX',N'PropertyTypeID'),(N'COMPLEX',N'StatusCode'),
     (N'CONDO',N'UPRID'),(N'CONDO',N'OwnerName'),(N'CONDO',N'StatusCode'),
     (N'BUILDING',N'BuildingID'),(N'BUILDING',N'UPRID'),(N'BUILDING',N'BuildingName'),(N'BUILDING',N'YearBuilt'),(N'BUILDING',N'StatusCode'),
-    (N'UNIT',N'UnitID'),(N'UNIT',N'UPRID'),(N'UNIT',N'BuildingID'),(N'UNIT',N'UnitNumber'),(N'UNIT',N'StatusCode'),
+    (N'UNIT',N'UnitID'),(N'UNIT',N'UPRID'),(N'UNIT',N'UnitNumber'),(N'UNIT',N'StatusCode'),
     (N'REF_PROPERTYTYPE',N'PropertyTypeID'),(N'REF_PROPERTYTYPE',N'PropertyTypeName'),
     (N'UPR_ADDRESS',N'UPRID'),(N'UPR_ADDRESS',N'AddressID'),(N'UPR_ADDRESS',N'AddressRoleID'),(N'UPR_ADDRESS',N'PrimaryInd'),(N'UPR_ADDRESS',N'EffectiveDate'),(N'UPR_ADDRESS',N'EndDate'),
     (N'ADDRESS',N'AddressID'),(N'ADDRESS',N'StreetNumber'),(N'ADDRESS',N'StreetDirection'),(N'ADDRESS',N'StreetName'),(N'ADDRESS',N'StreetType'),(N'ADDRESS',N'StreetSuffix'),(N'ADDRESS',N'City'),(N'ADDRESS',N'State'),(N'ADDRESS',N'ZipCode'),(N'ADDRESS',N'XCoordinate'),(N'ADDRESS',N'YCoordinate'),
@@ -67,7 +67,7 @@ INSERT @Required VALUES
     (N'CONTACT',N'ContactID'),(N'CONTACT',N'FirstName'),(N'CONTACT',N'MiddleName'),(N'CONTACT',N'LastName'),(N'CONTACT',N'OrganizationName'),(N'CONTACT',N'Phone'),(N'CONTACT',N'Email'),(N'CONTACT',N'StatusCode'),
     (N'REF_ROLETYPE',N'RoleTypeID'),(N'REF_ROLETYPE',N'RoleTypeCode'),(N'REF_ROLETYPE',N'Description'),
     (N'EXTERNAL_IDENTIFIER_XREF',N'UPRID'),(N'EXTERNAL_IDENTIFIER_XREF',N'SourceSystem'),(N'EXTERNAL_IDENTIFIER_XREF',N'IdentifierType'),(N'EXTERNAL_IDENTIFIER_XREF',N'IdentifierValue'),(N'EXTERNAL_IDENTIFIER_XREF',N'CreationDate'),
-    (N'UPRSTATUSHISTORY',N'UPRID'),(N'UPRSTATUSHISTORY',N'UPRStatusHistoryID'),(N'UPRSTATUSHISTORY',N'OldStatusCode'),(N'UPRSTATUSHISTORY',N'NewStatusCode'),(N'UPRSTATUSHISTORY',N'ChangeReason'),(N'UPRSTATUSHISTORY',N'ChangeSource'),(N'UPRSTATUSHISTORY',N'ChangedBy'),(N'UPRSTATUSHISTORY',N'ChangedDate');
+    (N'UPRSTATUSHISTORY',N'UPRID'),(N'UPRSTATUSHISTORY',N'UPRStatusHistoryID'),(N'UPRSTATUSHISTORY',N'OldStatusCode'),(N'UPRSTATUSHISTORY',N'NewStatusCode'),(N'UPRSTATUSHISTORY',N'ChangeReason'),(N'UPRSTATUSHISTORY',N'ChangeSource'),(N'UPRSTATUSHISTORY',N'ChangedBy'),(N'UPRSTATUSHISTORY',N'ChangeDate');
 IF EXISTS(SELECT 1 FROM @Required r WHERE COL_LENGTH(N'dbo.'+QUOTENAME(r.TableName),r.ColumnName) IS NULL)
 BEGIN
     SELECT N'Missing required demo column' AS Finding,r.TableName,r.ColumnName
@@ -201,7 +201,7 @@ BEGIN
                   AND (uc.EffectiveDate IS NULL OR uc.EffectiveDate<=@AsOfDate) AND (uc.EndDate IS NULL OR uc.EndDate>=@AsOfDate)
                   AND (CHARINDEX(@SearchValue,c.OrganizationName)>0
                     OR CHARINDEX(@SearchValue,LTRIM(RTRIM(CONCAT(c.FirstName,N'' '',c.LastName))))>0))))
-        OR (@SearchBy=''UNIT'' AND EXISTS(SELECT 1 FROM dbo.UNIT un JOIN dbo.BUILDING b ON b.BuildingID=un.BuildingID
+        OR (@SearchBy=''UNIT'' AND EXISTS(SELECT 1 FROM dbo.UNIT un JOIN dbo.BUILDING b ON b.UPRID=u.ParentUPRID
             WHERE un.UPRID=u.UPRID AND un.UnitNumber=@SearchValue AND (@BuildingUPRID IS NULL OR b.UPRID=@BuildingUPRID)))
         OR (@SearchBy IN (''MPDU'',''MULTIFAMILY_LOANS'',''CASE'',''LICENSE'',''EXTERNAL'') AND EXISTS(
             SELECT 1 FROM dbo.EXTERNAL_IDENTIFIER_XREF x WHERE x.UPRID=u.UPRID
@@ -292,7 +292,7 @@ SELECT N''2. Hierarchy and property details'' AS Section,c.RootLevel,c.UPRID,c.P
         CONCAT(et.Description,N'' '',c.UPRID)) AS PropertyOrEntity,
     u.AccountNumber,pt.PropertyTypeName,p.Parcel,un.UnitNumber,b.YearBuilt,
     u.StatusCode AS UPRStatus,COALESCE(p.StatusCode,cx.StatusCode,b.StatusCode,un.StatusCode,co.StatusCode) AS EntityStatus,
-    u.CreationDate,u.UpdateDate
+    u.CreationDate,u.LastUpdateDate
 FROM #Context c JOIN dbo.UPR u ON u.UPRID=c.UPRID JOIN dbo.REF_ENTITYTYPE et ON et.EntityTypeID=u.EntityTypeID
 LEFT JOIN #Ancestors an ON an.UPRID=c.UPRID
 LEFT JOIN dbo.PROPERTY p ON p.UPRID=c.UPRID LEFT JOIN dbo.COMPLEX cx ON cx.UPRID=c.UPRID
@@ -338,9 +338,9 @@ SELECT N''8. History and status'' AS Section,@HistoryCount AS AvailableStatusEve
     CASE WHEN @HistoryCount>@MaxHistoryRows THEN N''Most recent events shown; history exceeds display limit''
          ELSE N''All loaded status events shown; created/updated dates and current UPR statuses are in the hierarchy grid'' END AS Coverage;
 SELECT TOP(@MaxHistoryRows) N''8. Status history'' AS Section,h.UPRID,h.UPRStatusHistoryID,
-    h.OldStatusCode,h.NewStatusCode,h.ChangeReason,h.ChangeSource,h.ChangedBy,h.ChangedDate
+    h.OldStatusCode,h.NewStatusCode,h.ChangeReason,h.ChangeSource,h.ChangedBy,h.ChangeDate
 FROM dbo.UPRSTATUSHISTORY h JOIN #Context c ON c.UPRID=h.UPRID
-ORDER BY h.ChangedDate DESC,h.UPRStatusHistoryID DESC;
+ORDER BY h.ChangeDate DESC,h.UPRStatusHistoryID DESC;
 ';
 EXEC sys.sp_executesql @DemoSql,
  N'@Mode VARCHAR(12),@SearchBy VARCHAR(24),@SearchValue NVARCHAR(300),@SelectedUPRID BIGINT,

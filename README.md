@@ -5,15 +5,17 @@ SQL Server integration that loads **AddressMaster** and **SDAT** into the **hier
 **Model:** `docs/NewUPRTABLEUSED.docx` + `docs/Response.docx` (COMPLEX).  
 **Old flat model** archived under `legacy/` for reference only - do not run it.
 
-Latest delivery: [November 3 R12 record layout names](CLIENT_MAIN_LOADER_2026-11-03.md).
-Send `UPR_Main_Loader_2026-11-03_R12.zip`: complete loader, full-records listing
-(`@FilterEntity`), Search / Property 360 demo and read-only schema check, all on the
-client's November 2026 column names. A record layout check stops before any change.
+Latest delivery: [November 6 R13 data structure changes](CLIENT_MAIN_LOADER_2026-11-06.md).
+Send `UPR_Main_Loader_2026-11-06_R13.zip`: complete loader, full-records listing,
+Search / Property 360 demo, read-only schema check and closure index report, all for
+the client's record layout of 11/6/2026 (now `ddl/03_new_upr_schema.sql`). The
+guide includes the requested index review.
 
-C Number Complex / Building / Unit rule: [November 2 R11 guide](CLIENT_MAIN_LOADER_2026-11-02.md)
-(included in R12). `UPR_Main_Loader_2026-10-14_R10.zip` is kept only as the baseline
-for `test/check_cnumber_buildings.py`. Earlier guides were removed; see git history
-and `SESSION_HANDOVER.md` for past releases.
+Earlier rules still in force: [R11 C Number Complex / Building / Unit](CLIENT_MAIN_LOADER_2026-11-02.md),
+[R12 layout check](CLIENT_MAIN_LOADER_2026-11-03.md). `UPR_Main_Loader_2026-10-14_R10.zip`
+is kept only as the baseline for `test/check_cnumber_buildings.py`. Audit images and the
+layout-check lists are regenerated from the DDL with `tools/regen_audit_images.py` and
+`tools/regen_layout_preflight.py`. Earlier guides: git history and `SESSION_HANDOVER.md`.
 
 ## Requirements
 
@@ -25,7 +27,7 @@ and `SESSION_HANDOVER.md` for past releases.
 ```
 SQL/
 ├── DELIVERY.md                    # Delivery package overview
-├── CLIENT_MAIN_LOADER_2026-11-03.md # Current client run guide (R12)
+├── CLIENT_MAIN_LOADER_2026-11-06.md # Current client run guide (R13)
 ├── ddl/
 │   └── 03_new_upr_schema.sql      # Hierarchical schema (run first)
 ├── scripts/
@@ -48,7 +50,7 @@ SQL/
 └── docs/                          # Client specs (NewUPRTABLEUSED, Response, Program Spec)
 ```
 
-For an existing client database, follow the [R12 run steps](CLIENT_MAIN_LOADER_2026-11-03.md).
+For an existing client database, follow the [R13 run steps](CLIENT_MAIN_LOADER_2026-11-06.md).
 Do not recreate the schema or install the historical audit extensions for this update.
 The client's source-only requirements supersede older generated-name conventions.
 

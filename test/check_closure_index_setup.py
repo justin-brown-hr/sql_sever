@@ -33,11 +33,12 @@ def names():
 
 sql(f'CREATE DATABASE [{DATABASE}];',master=True)
 try:
-    for existing in ('none','legacy','occupied_suffix','disabled','filtered','compatible_alternate'):
+    for existing in ('none','legacy','occupied_suffix','disabled','filtered','compatible_alternate',
+                     'client_2026_11','include_only'):
         sql('DROP TABLE IF EXISTS dbo.UPR_CLOSURE; CREATE TABLE dbo.UPR_CLOSURE('
             'AncestorUPRID BIGINT NOT NULL,DescendantUPRID BIGINT NOT NULL,[Level] INT NULL);'
             'INSERT dbo.UPR_CLOSURE VALUES(24,24,0),(24,88788,1),(88788,88788,0);')
-        if existing!='none':
+        if existing not in ('none','client_2026_11','include_only'):
             sql('CREATE INDEX IX_UPR_CLOSURE_Descendant ON dbo.UPR_CLOSURE(DescendantUPRID);'
                 'CREATE INDEX UX_UPR_CLOSURE_AncestorDescendant ON dbo.UPR_CLOSURE(AncestorUPRID);')
         if existing=='occupied_suffix':
@@ -51,12 +52,21 @@ try:
         if existing=='compatible_alternate':
             sql('ALTER TABLE dbo.UPR_CLOSURE ADD CONSTRAINT ClientPair PRIMARY KEY(AncestorUPRID,DescendantUPRID);'
                 'CREATE INDEX ClientReverse ON dbo.UPR_CLOSURE(DescendantUPRID,AncestorUPRID);')
+        if existing=='client_2026_11':
+            # Exact index set of the client's November 6 2026 UPR_CLOSURE layout.
+            sql('ALTER TABLE dbo.UPR_CLOSURE ADD CONSTRAINT PK_UPR_CLOSURE PRIMARY KEY CLUSTERED(AncestorUPRID,DescendantUPRID);'
+                'CREATE INDEX IX_UPR_CLOSURE_Ancestor ON dbo.UPR_CLOSURE(AncestorUPRID,[Level],DescendantUPRID);'
+                'CREATE INDEX IX_UPR_CLOSURE_Descendant ON dbo.UPR_CLOSURE(DescendantUPRID,[Level],AncestorUPRID);'
+                'CREATE UNIQUE INDEX UX_UPR_CLOSURE_Ancestor_Descendant ON dbo.UPR_CLOSURE(AncestorUPRID,DescendantUPRID);')
+        if existing=='include_only':
+            sql('ALTER TABLE dbo.UPR_CLOSURE ADD CONSTRAINT ClientPair PRIMARY KEY(AncestorUPRID,DescendantUPRID);'
+                'CREATE INDEX ClientReverse ON dbo.UPR_CLOSURE(DescendantUPRID) INCLUDE(AncestorUPRID);')
         before=names()
         setup(rollback=True)
         assert names()==before,'Failed rollback of added indexes'
         setup();after=names();setup();assert names()==after,'Rerun accumulated indexes'
         assert set(before.splitlines())<=set(after.splitlines()),'Existing index removed'
-        if existing=='compatible_alternate':assert after==before
+        if existing in ('compatible_alternate','client_2026_11','include_only'):assert after==before,(existing,after)
         elif existing=='none':assert len(after.splitlines())==2
         else:
             assert len(after.splitlines())==len(before.splitlines())+2

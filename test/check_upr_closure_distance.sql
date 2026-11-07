@@ -41,7 +41,8 @@ IF NOT EXISTS (
     SELECT 1 FROM sys.indexes i
     JOIN sys.index_columns d ON d.object_id=i.object_id AND d.index_id=i.index_id AND d.key_ordinal=1
     JOIN sys.columns dc ON dc.object_id=d.object_id AND dc.column_id=d.column_id
-    JOIN sys.index_columns a ON a.object_id=i.object_id AND a.index_id=i.index_id AND a.key_ordinal=2
+    JOIN sys.index_columns a ON a.object_id=i.object_id AND a.index_id=i.index_id
+        AND (a.key_ordinal>1 OR a.is_included_column=1)
     JOIN sys.columns ac ON ac.object_id=a.object_id AND ac.column_id=a.column_id
     WHERE i.object_id=@ClosureObjectID AND i.[type] IN (1,2)
       AND i.is_disabled=0 AND i.has_filter=0 AND i.is_hypothetical=0

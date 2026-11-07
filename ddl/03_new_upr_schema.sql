@@ -1,13 +1,20 @@
+/* Client record layout received 2026-11-06 (DataStructureChanges_Layout_11_6_2026.txt).
+   Project copy: USE database name and the REF_ENTITY_IDENTIFICATION drop-name typo fixed.
+   Earlier project DDL: git history (commit 1e77e58). */
 /*
-================================================================================
-  UPR Hierarchical Schema (NewUPRTABLEUSED + client Response.docx COMPLEX)
-  SQL Server 2016+
+===============================================================================
+ DHCA UPR - Physical SQL Server DDL
+   Baseline: Revised UPR relational model
 
-  Source of truth: docs/NewUPRTABLEUSED.docx
-  COMPLEX table:   docs/Response.docx (was omitted from NewUPRTABLEUSED)
-
-  Replaces the flat UPROPERTYRECORDS model completely.
-  Change USE database name to match your environment.
+   Core principles:
+     1. Every first-class entity gets a UPRID.
+     2. ParentUPRID is nullable.
+     3. UPRID numbering has NO hierarchy meaning.
+     4. ParentUPRID identifies the immediate parent.
+     5. Entity-specific attributes live in entity tables.
+     6. Address is NOT stored in UPR.
+     7. AccountNumber is nullable and is NOT globally unique.
+     8. UPR_CLOSURE is derived from UPR.ParentUPRID.
 ================================================================================
 */
 USE UPRXDB_TEST;
@@ -32,17 +39,7 @@ GO
    ============================================================================ */
 IF OBJECT_ID(N'dbo.UPRSTATUSHISTORY', N'U') IS NOT NULL DROP TABLE dbo.UPRSTATUSHISTORY;
 IF OBJECT_ID(N'dbo.UPRMATCHREVIEW_Q', N'U') IS NOT NULL DROP TABLE dbo.UPRMATCHREVIEW_Q;
-IF OBJECT_ID(N'dbo.AUDIT_LOG', N'V') IS NOT NULL DROP VIEW dbo.AUDIT_LOG;
-IF OBJECT_ID(N'dbo.AUDIT_LOG_CONTEXT', N'U') IS NOT NULL DROP TABLE dbo.AUDIT_LOG_CONTEXT;
-IF OBJECT_ID(N'dbo.AUDIT_LOG_PreClientLayout', N'U') IS NOT NULL DROP TABLE dbo.AUDIT_LOG_PreClientLayout;
-IF OBJECT_ID(N'dbo.AuditLog', N'V') IS NOT NULL DROP VIEW dbo.AuditLog;
 IF OBJECT_ID(N'dbo.AuditLog', N'U') IS NOT NULL DROP TABLE dbo.AuditLog;
-IF OBJECT_ID(N'dbo.AUDIT_LOG', N'U') IS NOT NULL DROP TABLE dbo.AUDIT_LOG;
-IF OBJECT_ID(N'dbo.AuditLog_PreSept17', N'U') IS NOT NULL DROP TABLE dbo.AuditLog_PreSept17;
-IF OBJECT_ID(N'dbo.AUDIT_ENTITY_RECORD', N'U') IS NOT NULL DROP TABLE dbo.AUDIT_ENTITY_RECORD;
-IF OBJECT_ID(N'dbo.REF_ENTITY_IDENTIFICATION', N'U') IS NOT NULL DROP TABLE dbo.REF_ENTITY_IDENTIFICATION;
-IF OBJECT_ID(N'dbo.UPR_CONDO_LEGACY', N'U') IS NOT NULL DROP TABLE dbo.UPR_CONDO_LEGACY;
-IF OBJECT_ID(N'dbo.UPR_LOAD_RUN', N'U') IS NOT NULL DROP TABLE dbo.UPR_LOAD_RUN;
 IF OBJECT_ID(N'dbo.UPR_CLOSURE', N'U') IS NOT NULL DROP TABLE dbo.UPR_CLOSURE;
 IF OBJECT_ID(N'dbo.UPR_CONTACT', N'U') IS NOT NULL DROP TABLE dbo.UPR_CONTACT;
 IF OBJECT_ID(N'dbo.EXTERNAL_IDENTIFIER_XREF', N'U') IS NOT NULL DROP TABLE dbo.EXTERNAL_IDENTIFIER_XREF;
@@ -63,6 +60,7 @@ IF OBJECT_ID(N'dbo.REF_CONTACTTYPE', N'U') IS NOT NULL DROP TABLE dbo.REF_CONTAC
 IF OBJECT_ID(N'dbo.REF_PROPERTY_STATUSCODE', N'U') IS NOT NULL DROP TABLE dbo.REF_PROPERTY_STATUSCODE;
 IF OBJECT_ID(N'dbo.REF_PROPERTYTYPE', N'U') IS NOT NULL DROP TABLE dbo.REF_PROPERTYTYPE;
 IF OBJECT_ID(N'dbo.REF_ENTITYTYPE', N'U') IS NOT NULL DROP TABLE dbo.REF_ENTITYTYPE;
+IF OBJECT_ID(N'dbo.REF_ENTITY_IDENTIFICATION', N'U') IS NOT NULL DROP TABLE dbo.REF_ENTITY_IDENTIFICATION;
 GO
 
 /* ============================================================================
@@ -72,8 +70,8 @@ CREATE TABLE dbo.REF_ENTITYTYPE
 (
     EntityTypeID INT IDENTITY(1,1) NOT NULL,
     Description  VARCHAR(50) NOT NULL,
-    ActiveInd     BIT NOT NULL CONSTRAINT DF_REF_ENTITYTYPE_IsActive DEFAULT (1),
-    CreationDate  DATETIME2(0) NOT NULL CONSTRAINT DF_REF_ENTITYTYPE_CreatedDate DEFAULT (SYSUTCDATETIME()),
+    ActiveInd    BIT NOT NULL CONSTRAINT DF_REF_ENTITYTYPE_ActiveInd DEFAULT (1),
+    CreationDate  DATETIME2(0) NOT NULL CONSTRAINT DF_REF_ENTITYTYPE_CreationDate DEFAULT (SYSUTCDATETIME()),
     CONSTRAINT PK_REF_ENTITYTYPE PRIMARY KEY CLUSTERED (EntityTypeID),
     CONSTRAINT UQ_REF_ENTITYTYPE_Description UNIQUE (Description)
 );
@@ -85,15 +83,15 @@ GO
 CREATE TABLE dbo.REF_PROPERTYTYPE
 (
     PropertyTypeID    INT IDENTITY(1,1) NOT NULL,
-    PropertyTypeCode  NVARCHAR(128) NOT NULL,
-    PropertyTypeName  NVARCHAR(128) NOT NULL,
+    PropertyTypeCode  VARCHAR(128) NOT NULL,
+    PropertyTypeName  VARCHAR(128) NOT NULL,
     AllowsBuildings   BIT NOT NULL CONSTRAINT DF_REF_PROPERTYTYPE_AllowsBuildings DEFAULT (0),
     AllowsUnits       BIT NOT NULL CONSTRAINT DF_REF_PROPERTYTYPE_AllowsUnits DEFAULT (0),
     DeletedInd        BIT NOT NULL CONSTRAINT DF_REF_PROPERTYTYPE_DeletedInd DEFAULT (0),
-    CreationUserID    NVARCHAR(128) NOT NULL,
+    CreationUserID    VARCHAR(128) NOT NULL,
     CreationDate      DATETIME2(0) NOT NULL CONSTRAINT DF_REF_PROPERTYTYPE_CreationDate DEFAULT (SYSDATETIME()),
-    LastUpdateUserID NVARCHAR(128) NOT NULL,
-    LastUpdateDate   DATETIME2(0) NOT NULL CONSTRAINT DF_REF_PROPERTYTYPE_LastUpdatedDate DEFAULT (SYSDATETIME()),
+    LastUpdateUserID VARCHAR(128) NOT NULL,
+    LastUpdateDate   DATETIME2(0) NOT NULL CONSTRAINT DF_REF_PROPERTYTYPE_LastUpdateDate DEFAULT (SYSDATETIME()),
     CONSTRAINT PK_REF_PROPERTYTYPE PRIMARY KEY CLUSTERED (PropertyTypeID),
     CONSTRAINT UQ_REF_PROPERTYTYPE_Code UNIQUE (PropertyTypeCode),
     CONSTRAINT CK_REF_PROPERTYTYPE_AllowsBuildings CHECK (AllowsBuildings IN (0,1)),
@@ -109,12 +107,12 @@ GO
 CREATE TABLE dbo.REF_PROPERTY_STATUSCODE
 (
     PropertyStatusCodeID INT IDENTITY(1,1) NOT NULL,
-    StatusCode           NVARCHAR(30) NOT NULL,
-    Description          NVARCHAR(128) NOT NULL,
+    StatusCode           VARCHAR(30) NOT NULL,
+    Description          VARCHAR(128) NOT NULL,
     DeletedInd           BIT NOT NULL CONSTRAINT DF_REF_Property_STATUSCODE_DeletedInd DEFAULT (0),
-    CreationUserID       NVARCHAR(128) NOT NULL,
+    CreationUserID       VARCHAR(128) NOT NULL,
     CreationDate         DATETIME2(0) NOT NULL CONSTRAINT DF_REF_Property_STATUSCODE_CreationDate DEFAULT (SYSDATETIME()),
-    LastUpdateUserID    NVARCHAR(128) NOT NULL,
+    LastUpdateUserID    VARCHAR(128) NOT NULL,
     LastUpdateDate      DATETIME2(0) NOT NULL CONSTRAINT DF_REF_Property_STATUSCODE_LastUpdatedDate DEFAULT (SYSDATETIME()),
     CONSTRAINT PK_REF_PROPERTY_STATUSCODE PRIMARY KEY CLUSTERED (PropertyStatusCodeID),
     CONSTRAINT UQ_REF_Property_STATUSCODE_StatusCode UNIQUE (StatusCode),
@@ -131,7 +129,7 @@ CREATE TABLE dbo.REF_CONTACTTYPE
     ContactTypeID   INT IDENTITY(1,1) NOT NULL,
     ContactTypeCode VARCHAR(30) NOT NULL,
     Description     VARCHAR(100) NOT NULL,
-    ActiveInd        BIT NOT NULL CONSTRAINT DF_REF_CONTACTTYPE_IsActive DEFAULT (1),
+    ActiveInd       BIT NOT NULL CONSTRAINT DF_REF_CONTACTTYPE_ActiveInd DEFAULT (1),
     CONSTRAINT PK_REF_CONTACTTYPE PRIMARY KEY CLUSTERED (ContactTypeID),
     CONSTRAINT UQ_REF_CONTACTTYPE_Code UNIQUE (ContactTypeCode)
 );
@@ -145,7 +143,7 @@ CREATE TABLE dbo.REF_ROLETYPE
     RoleTypeID   INT IDENTITY(1,1) NOT NULL,
     RoleTypeCode VARCHAR(50) NOT NULL,
     Description  VARCHAR(100) NOT NULL,
-    ActiveInd     BIT NOT NULL CONSTRAINT DF_REF_ROLETYPE_IsActive DEFAULT (1),
+    ActiveInd    BIT NOT NULL CONSTRAINT DF_REF_ROLETYPE_ActiveInd DEFAULT (1),
     CONSTRAINT PK_REF_ROLETYPE PRIMARY KEY CLUSTERED (RoleTypeID),
     CONSTRAINT UQ_REF_ROLETYPE_Code UNIQUE (RoleTypeCode)
 );
@@ -159,7 +157,7 @@ CREATE TABLE dbo.REF_ADDRESSROLE
     AddressRoleID   INT IDENTITY(1,1) NOT NULL,
     AddressRoleCode VARCHAR(30) NOT NULL,
     Description     VARCHAR(100) NOT NULL,
-    ActiveInd        BIT NOT NULL CONSTRAINT DF_REF_ADDRESSROLE_IsActive DEFAULT (1),
+    ActiveInd       BIT NOT NULL CONSTRAINT DF_REF_ADDRESSROLE_ActiveInd DEFAULT (1),
     CONSTRAINT PK_REF_ADDRESSROLE PRIMARY KEY CLUSTERED (AddressRoleID),
     CONSTRAINT UQ_REF_ADDRESSROLE_Code UNIQUE (AddressRoleCode)
 );
@@ -171,15 +169,15 @@ GO
 CREATE TABLE dbo.REF_UNITTYPECODE
 (
     UnitTypeCodeID    INT IDENTITY(1,1) NOT NULL,
-    UnitTypeCode      NVARCHAR(30) NOT NULL,
-    UnitTypeName      NVARCHAR(100) NOT NULL,
-    Description       NVARCHAR(128) NULL,
-    ActiveInd          BIT NOT NULL CONSTRAINT DF_REF_UNITTYPECODE_IsActive DEFAULT (1),
+    UnitTypeCode      VARCHAR(30) NOT NULL,
+    UnitTypeName      VARCHAR(100) NOT NULL,
+    Description       VARCHAR(128) NULL,
+    ActiveInd          BIT NOT NULL CONSTRAINT DF_REF_UNITTYPECODE_ActiveInd DEFAULT (1),
     DeletedInd        BIT NOT NULL CONSTRAINT DF_REF_UNITTYPECODE_DeletedInd DEFAULT (0),
-    CreationUserID    NVARCHAR(128) NOT NULL,
+    CreationUserID    VARCHAR(128) NOT NULL,
     CreationDate      DATETIME2(0) NOT NULL CONSTRAINT DF_REF_UNITTYPECODE_CreationDate DEFAULT (SYSDATETIME()),
-    LastUpdateUserID NVARCHAR(128) NOT NULL,
-    LastUpdateDate   DATETIME2(0) NOT NULL CONSTRAINT DF_REF_UNITTYPECODE_LastUpdatedDate DEFAULT (SYSDATETIME()),
+    LastUpdateUserID VARCHAR(128) NOT NULL,
+    LastUpdateDate   DATETIME2(0) NOT NULL CONSTRAINT DF_REF_UNITTYPECODE_LastUpdateDate DEFAULT (SYSDATETIME()),
     CONSTRAINT PK_REF_UNITTYPECODE PRIMARY KEY CLUSTERED (UnitTypeCodeID),
     CONSTRAINT UQ_REF_UNITTYPECODE_Code UNIQUE (UnitTypeCode),
     CONSTRAINT UQ_REF_UNITTYPECODE_Name UNIQUE (UnitTypeName),
@@ -198,10 +196,12 @@ CREATE TABLE dbo.UPR
     EntityTypeID  INT NOT NULL,
     AccountNumber VARCHAR(50) NULL,
     StatusCode    VARCHAR(20) NOT NULL CONSTRAINT DF_UPR_StatusCode DEFAULT ('ACTIVE'),
-    CreationDate   DATETIME2(0) NOT NULL CONSTRAINT DF_UPR_CreatedDate DEFAULT (SYSUTCDATETIME()),
-    CreatedBy     VARCHAR(100) NOT NULL CONSTRAINT DF_UPR_CreatedBy DEFAULT (SUSER_SNAME()),
-    UpdateDate   DATETIME2(0) NULL,
-    UpdatedBy     VARCHAR(100) NULL,
+    CreationDate  DATETIME2(0) NOT NULL CONSTRAINT DF_UPR_CreationDate DEFAULT (SYSUTCDATETIME()),
+    --CreatedBy     VARCHAR(100) NOT NULL CONSTRAINT DF_UPR_CreatedBy DEFAULT (SUSER_SNAME()),
+    CreationUserID VARCHAR (128) NOT NULL,
+    LastUpdateUserID  VARCHAR(128) NOT NULL,
+    LastUpdateDate    DATETIME2(0) NOT NULL,
+
     CONSTRAINT PK_UPR PRIMARY KEY CLUSTERED (UPRID),
     CONSTRAINT FK_UPR_Parent FOREIGN KEY (ParentUPRID) REFERENCES dbo.UPR (UPRID),
     CONSTRAINT FK_UPR_Ref_EntityType FOREIGN KEY (EntityTypeID) REFERENCES dbo.REF_ENTITYTYPE (EntityTypeID),
@@ -234,7 +234,11 @@ CREATE TABLE dbo.ADDRESS
     NormalizedAddress VARCHAR(300) NULL,
     YCoordinate       INT NULL,
     XCoordinate       INT NULL,
-    CreationDate       DATETIME2(0) NOT NULL CONSTRAINT DF_ADDRESS_CreatedDate DEFAULT (SYSUTCDATETIME()),
+    DeleteInd    BIT NOT NULL,
+    CreationDate       DATETIME2(0) NOT NULL CONSTRAINT DF_ADDRESS_CreationDate DEFAULT (SYSUTCDATETIME()),
+    CreationUserID    VARCHAR(128) NOT NULL,
+    LastUpdateUserID  VARCHAR(128) NOT NULL,
+    LastUpdateDate    DATETIME2(0) NOT NULL CONSTRAINT DF_ADDRESS_LastUpdateDate DEFAULT (SYSUTCDATETIME()),
     CONSTRAINT PK_ADDRESS PRIMARY KEY CLUSTERED (AddressID),
     CONSTRAINT CK_ADDRESS_State CHECK (State IS NULL OR State LIKE '[A-Z][A-Z]'),
     CONSTRAINT CK_ADDRESS_ZipCode CHECK (
@@ -250,7 +254,7 @@ CREATE INDEX IX_ADDRESS_Location ON dbo.ADDRESS (StreetNumber, StreetName, City,
 GO
 
 /* ============================================================================
-   10. COMPLEX  (client Response.docx - omitted from NewUPRTABLEUSED)
+   10. COMPLEX  (Response.docx - omitted from NewUPRTABLEUSED)
        Hierarchy fields live on dbo.UPR; this table holds Complex-specific attrs.
    ============================================================================ */
 CREATE TABLE dbo.COMPLEX
@@ -260,9 +264,12 @@ CREATE TABLE dbo.COMPLEX
     CommunityName   VARCHAR(200) NULL,
     PropertyTypeID  INT NULL,
     StatusCode      VARCHAR(20) NOT NULL CONSTRAINT DF_COMPLEX_StatusCode DEFAULT ('ACTIVE'),
-    CreationDate     DATETIME2(0) NOT NULL CONSTRAINT DF_COMPLEX_CreatedDate DEFAULT (SYSUTCDATETIME()),
-    CreatedBy       VARCHAR(100) NOT NULL CONSTRAINT DF_COMPLEX_CreatedBy DEFAULT (SUSER_SNAME()),
-    UpdateDate     DATETIME2(0) NULL,
+    CreationDate     DATETIME2(0) NOT NULL CONSTRAINT DF_COMPLEX_CreationDate DEFAULT (SYSUTCDATETIME()),
+    --CreatedBy       VARCHAR(100) NOT NULL CONSTRAINT DF_COMPLEX_CreatedBy DEFAULT (SUSER_SNAME()),
+    DeletedInd   BIT NOT NULL,
+    CreationUserID VARCHAR (128) NOT NULL,
+    LastUpdateUserID  VARCHAR(128) NOT NULL,
+    LastUpdateDate    DATETIME2(0) NOT NULL,
     CONSTRAINT PK_COMPLEX PRIMARY KEY CLUSTERED (ComplexID),
     CONSTRAINT UQ_COMPLEX_UPRID UNIQUE (UPRID),
     CONSTRAINT FK_COMPLEX_UPR FOREIGN KEY (UPRID) REFERENCES dbo.UPR (UPRID),
@@ -283,8 +290,11 @@ CREATE TABLE dbo.PROPERTY
     OwnerName      VARCHAR(200) NULL,
     Parcel         VARCHAR(20) NULL,
     StatusCode     VARCHAR(20) NOT NULL CONSTRAINT DF_PROPERTY_StatusCode DEFAULT ('ACTIVE'),
-    CreationDate    DATETIME2(0) NOT NULL CONSTRAINT DF_PROPERTY_CreatedDate DEFAULT (SYSUTCDATETIME()),
-    UpdateDate    DATETIME2(0) NULL,
+    CreationDate    DATETIME2(0) NOT NULL CONSTRAINT DF_PROPERTY_CreationDate DEFAULT (SYSUTCDATETIME()),
+    DeletedInd   BIT NOT NULL,
+    CreationUserID VARCHAR (128) NOT NULL,
+    LastUpdateUserID  VARCHAR(128) NOT NULL,
+    LastUpdateDate    DATETIME2(0) NOT NULL,
     CONSTRAINT PK_PROPERTY PRIMARY KEY CLUSTERED (PropertyID),
     CONSTRAINT UQ_PROPERTY_UPRID UNIQUE (UPRID),
     CONSTRAINT FK_PROPERTY_UPR FOREIGN KEY (UPRID) REFERENCES dbo.UPR (UPRID),
@@ -305,8 +315,11 @@ CREATE TABLE dbo.CONDO
     UPRID       BIGINT NOT NULL,
     OwnerName   VARCHAR(200) NULL,
     StatusCode  VARCHAR(20) NOT NULL CONSTRAINT DF_CONDO_StatusCode DEFAULT ('ACTIVE'),
-    CreationDate DATETIME2(0) NOT NULL CONSTRAINT DF_CONDO_CreatedDate DEFAULT (SYSUTCDATETIME()),
-    UpdateDate DATETIME2(0) NULL,
+    CreationDate DATETIME2(0) NOT NULL CONSTRAINT DF_CONDO_CreationDate DEFAULT (SYSUTCDATETIME()),
+    DeletedInd   BIT NOT NULL,
+    CreationUserID VARCHAR (128) NOT NULL,
+    LastUpdateUserID  VARCHAR(128) NOT NULL,
+    LastUpdateDate    DATETIME2(0) NOT NULL,
     CONSTRAINT PK_CONDO PRIMARY KEY CLUSTERED (CondoID),
     CONSTRAINT UQ_CONDO_UPRID UNIQUE (UPRID),
     CONSTRAINT FK_CONDO_UPR FOREIGN KEY (UPRID) REFERENCES dbo.UPR (UPRID),
@@ -324,8 +337,11 @@ CREATE TABLE dbo.BUILDING
     BuildingName VARCHAR(200) NULL,
     YearBuilt    SMALLINT NULL,
     StatusCode   VARCHAR(20) NOT NULL CONSTRAINT DF_BUILDING_StatusCode DEFAULT ('ACTIVE'),
-    CreationDate  DATETIME2(0) NOT NULL CONSTRAINT DF_BUILDING_CreatedDate DEFAULT (SYSUTCDATETIME()),
-    UpdateDate  DATETIME2(0) NULL,
+    DeletedInd   BIT NOT NULL,
+    CreationUserID VARCHAR (128) NOT NULL,
+    CreationDate  DATETIME2(0) NOT NULL CONSTRAINT DF_BUILDING_CreationDate DEFAULT (SYSUTCDATETIME()),
+    LastUpdateUserID  VARCHAR(128) NOT NULL,
+    LastUpdateDate    DATETIME2(0) NOT NULL,
     CONSTRAINT PK_BUILDING PRIMARY KEY CLUSTERED (BuildingID),
     CONSTRAINT UQ_BUILDING_UPRID UNIQUE (UPRID),
     CONSTRAINT FK_BUILDING_UPR FOREIGN KEY (UPRID) REFERENCES dbo.UPR (UPRID),
@@ -343,28 +359,32 @@ CREATE TABLE dbo.UNIT
 (
     UnitID           BIGINT IDENTITY(1,1) NOT NULL,
     UPRID            BIGINT NOT NULL,
-    BuildingID       BIGINT NOT NULL,
+  --  BuildingID       BIGINT NOT NULL,
     UnitNumber       VARCHAR(50) NULL,
     UnitTypeCode     VARCHAR(20) NULL,
     FloorNumber      VARCHAR(20) NULL,
     BedroomCount     INT NULL,
     BathroomCount    DECIMAL(4,1) NULL,
     HasLegalIdentity BIT NULL,
+    DeleteInd        BIT NOT NULL,
     StatusCode       VARCHAR(20) NOT NULL CONSTRAINT DF_UNIT_StatusCode DEFAULT ('ACTIVE'),
-    CreationDate      DATETIME2(0) NOT NULL CONSTRAINT DF_UNIT_CreatedDate DEFAULT (SYSUTCDATETIME()),
-    UpdateDate      DATETIME2(0) NULL,
+    CreationDate     DATETIME2(0) NOT NULL CONSTRAINT DF_UNIT_CreationDate DEFAULT (SYSUTCDATETIME()),
+    CreationUserID   VARCHAR(128) NOT NULL,
+    LastUpdateUserID VARCHAR (128) NOT NULL,
+    LastUpdateDate       DATETIME2(0) NULL,
     CONSTRAINT PK_UNIT PRIMARY KEY CLUSTERED (UnitID),
     CONSTRAINT UQ_UNIT_UPRID UNIQUE (UPRID),
     CONSTRAINT FK_UNIT_UPR FOREIGN KEY (UPRID) REFERENCES dbo.UPR (UPRID),
-    CONSTRAINT FK_UNIT_BUILDING FOREIGN KEY (BuildingID) REFERENCES dbo.BUILDING (BuildingID),
+   -- CONSTRAINT FK_UNIT_BUILDING FOREIGN KEY (BuildingID) REFERENCES dbo.BUILDING (BuildingID),
     CONSTRAINT CK_UNIT_BedroomCount CHECK (BedroomCount IS NULL OR BedroomCount >= 0),
     CONSTRAINT CK_UNIT_BathroomCount CHECK (BathroomCount IS NULL OR BathroomCount >= 0),
     CONSTRAINT CK_UNIT_StatusCode CHECK (StatusCode IN ('ACTIVE', 'INACTIVE', 'RETIRED'))
 );
 GO
 
-CREATE INDEX IX_UNIT_BuildingID ON dbo.UNIT (BuildingID);
-CREATE INDEX IX_UNIT_Building_UnitNumber ON dbo.UNIT (BuildingID, UnitNumber);
+--CREATE INDEX IX_UNIT_BuildingID ON dbo.UNIT (BuildingID);
+--CREATE INDEX IX_UNIT_Building_UnitNumber ON dbo.UNIT (BuildingID, UnitNumber);
+CREATE INDEX IX_UNIT_Building_UnitNumber ON dbo.UNIT (UnitNumber);
 GO
 
 /* ============================================================================
@@ -376,8 +396,9 @@ CREATE TABLE dbo.ADU
     UPRID       BIGINT NOT NULL,
     UnitNumber  VARCHAR(50) NULL,
     StatusCode  VARCHAR(20) NOT NULL CONSTRAINT DF_ADU_StatusCode DEFAULT ('ACTIVE'),
-    CreationDate DATETIME2(0) NOT NULL CONSTRAINT DF_ADU_CreatedDate DEFAULT (SYSUTCDATETIME()),
-    UpdateDate DATETIME2(0) NULL,
+    CreationDate DATETIME2(0) NOT NULL CONSTRAINT DF_ADU_CreationDate DEFAULT (SYSUTCDATETIME()),
+    LastUpdateDate   DATETIME2(0) NOT NULL,
+
     CONSTRAINT PK_ADU PRIMARY KEY CLUSTERED (ADUID),
     CONSTRAINT UQ_ADU_UPRID UNIQUE (UPRID),
     CONSTRAINT FK_ADU_UPR FOREIGN KEY (UPRID) REFERENCES dbo.UPR (UPRID),
@@ -394,7 +415,7 @@ CREATE TABLE dbo.UPR_ADDRESS
     UPRID         BIGINT NOT NULL,
     AddressID     BIGINT NOT NULL,
     AddressRoleID INT NOT NULL,
-    PrimaryInd     BIT NOT NULL CONSTRAINT DF_UPR_ADDRESS_IsPrimary DEFAULT (0),
+    PrimaryInd     BIT NOT NULL CONSTRAINT DF_UPR_ADDRESS_PrimaryInd DEFAULT (0),
     EffectiveDate DATE NULL,
     EndDate       DATE NULL,
     CONSTRAINT PK_UPR_ADDRESS PRIMARY KEY CLUSTERED (UPRAddressID),
@@ -422,14 +443,14 @@ CREATE TABLE dbo.EXTERNAL_IDENTIFIER_XREF
     SourceSystem         VARCHAR(50) NOT NULL,
     IdentifierType       VARCHAR(50) NOT NULL,
     IdentifierValue      VARCHAR(150) NOT NULL,
-    CreationDate          DATETIME2(0) NOT NULL CONSTRAINT DF_EXTERNAL_IDENTIFIER_CreatedDate DEFAULT (SYSUTCDATETIME()),
+    CreationDate         DATETIME2(0) NOT NULL CONSTRAINT DF_EXTERNAL_IDENTIFIER_CreationDate DEFAULT (SYSUTCDATETIME()),
     CONSTRAINT PK_EXTERNAL_IDENTIFIER PRIMARY KEY CLUSTERED (ExternalIdentifierID),
     CONSTRAINT FK_EXTERNAL_IDENTIFIER_UPR FOREIGN KEY (UPRID) REFERENCES dbo.UPR (UPRID)
 );
 GO
 
 /* One source record maps to exactly one UPR. AccountNumber is NOT unique
-   (client rule), so it is only protected against exact duplicate rows. */
+   (DHCA rule), so it is only protected against exact duplicate rows. */
 CREATE UNIQUE INDEX UX_EXTERNAL_IDENTIFIER_SourceRecord
     ON dbo.EXTERNAL_IDENTIFIER_XREF (SourceSystem, IdentifierValue)
     WHERE IdentifierType = 'SOURCE_RECORD_ID';
@@ -460,8 +481,10 @@ CREATE TABLE dbo.CONTACT
     State            CHAR(2) NULL,
     ZipCode          VARCHAR(10) NULL,
     StatusCode       VARCHAR(20) NOT NULL CONSTRAINT DF_CONTACT_StatusCode DEFAULT ('ACTIVE'),
-    CreationDate      DATETIME2(0) NOT NULL CONSTRAINT DF_CONTACT_CreatedDate DEFAULT (SYSUTCDATETIME()),
-    UpdateDate      DATETIME2(0) NULL,
+    DeleteInd BIT NOT NULL,
+    CreationDate     DATETIME2(0) NOT NULL CONSTRAINT DF_CONTACT_CreationDate DEFAULT (SYSUTCDATETIME()),
+    LastUpdateDate       DATETIME2(0) NULL,
+    LastUpdateUserID   VARCHAR(128) NOT NULL,
     CONSTRAINT PK_CONTACT PRIMARY KEY CLUSTERED (ContactID),
     CONSTRAINT FK_CONTACT_ContactType FOREIGN KEY (ContactTypeID) REFERENCES dbo.REF_CONTACTTYPE (ContactTypeID),
     CONSTRAINT CK_CONTACT_State CHECK (State IS NULL OR State LIKE '[A-Z][A-Z]'),
@@ -511,118 +534,42 @@ GO
    ============================================================================ */
 CREATE TABLE dbo.UPR_CLOSURE
 (
-    AncestorUPRID   BIGINT NOT NULL,
+    Level         INT,
+    AncestorUPRID     BIGINT NOT NULL,
     DescendantUPRID BIGINT NOT NULL,
-    /* Parent-edge distance from AncestorUPRID to DescendantUPRID; self = 0. */
-    [Level]        INT NOT NULL,
-    CONSTRAINT CK_UPR_CLOSURE_Level CHECK ([Level] >= 0),
-    /* Composite uniqueness prevents duplicate paths and serves ancestor-first traversal. */
     CONSTRAINT PK_UPR_CLOSURE PRIMARY KEY CLUSTERED (AncestorUPRID, DescendantUPRID),
     CONSTRAINT FK_UPR_CLOSURE_Ancestor FOREIGN KEY (AncestorUPRID) REFERENCES dbo.UPR (UPRID),
     CONSTRAINT FK_UPR_CLOSURE_Descendant FOREIGN KEY (DescendantUPRID) REFERENCES dbo.UPR (UPRID)
 );
 GO
 
-/* Reverse traversal by descendant; pair uniqueness is already enforced by the PK. */
-CREATE INDEX IX_UPR_CLOSURE_Descendant ON dbo.UPR_CLOSURE (DescendantUPRID, AncestorUPRID) INCLUDE ([Level]);
-CREATE INDEX IX_UPR_CLOSURE_Ancestor ON dbo.UPR_CLOSURE (AncestorUPRID) INCLUDE (DescendantUPRID);
+CREATE INDEX IX_UPR_CLOSURE_Ancestor ON dbo.UPR_CLOSURE (AncestorUPRID, Level,DescendantUPRID);
+CREATE INDEX IX_UPR_CLOSURE_Descendant ON dbo.UPR_CLOSURE (DescendantUPRID, Level, AncestorUPRID);
+CREATE UNIQUE INDEX UX_UPR_CLOSURE_Ancestor_Descendant
+ON dbo.UPR_CLOSURE (AncestorUPRID, DescendantUPRID);
 GO
 
 /* ============================================================================
    21. AuditLog
    ============================================================================ */
-CREATE TABLE dbo.UPR_CONDO_LEGACY
-(
-    CondoID BIGINT NOT NULL CONSTRAINT PK_UPR_CONDO_LEGACY PRIMARY KEY,
-    UPRID BIGINT NOT NULL,
-    CondoName VARCHAR(200) NULL,
-    Parcel VARCHAR(20) NULL,
-    ArchivedDate DATETIME2 NOT NULL DEFAULT (SYSUTCDATETIME())
-);
-GO
-CREATE TABLE dbo.REF_ENTITY_IDENTIFICATION
-(
-    EntityID INT IDENTITY(1,1) NOT NULL CONSTRAINT PK_REF_ENTITY_IDENTIFICATION PRIMARY KEY,
-    EntityName VARCHAR(100) NOT NULL CONSTRAINT UQ_REF_ENTITY_IDENTIFICATION_Name UNIQUE,
-    EntityDescription VARCHAR(250) NULL,
-    ActiveInd BIT NOT NULL DEFAULT (1),
-    CreationDate DATETIME2 NOT NULL DEFAULT (SYSUTCDATETIME()),
-    CreatedBy VARCHAR(100) NOT NULL DEFAULT (ORIGINAL_LOGIN())
-);
-GO
-/* Negative IDs identify composite/text keys; nonnegative IDs are native row IDs.
-   The original key is always retained, including every closure-key component. */
-CREATE TABLE dbo.AUDIT_ENTITY_RECORD
-(
-    RecordID BIGINT IDENTITY(1,1) NOT NULL CONSTRAINT PK_AUDIT_ENTITY_RECORD PRIMARY KEY,
-    EntityID INT NOT NULL REFERENCES dbo.REF_ENTITY_IDENTIFICATION (EntityID),
-    EntityKey NVARCHAR(200) NOT NULL,
-    CONSTRAINT UQ_AUDIT_ENTITY_RECORD UNIQUE (EntityID, EntityKey)
-);
-GO
 CREATE TABLE dbo.AuditLog
 (
-    AuditID INT IDENTITY(1,1) NOT NULL,
-    UPRID BIGINT NULL,
-    EntityNameID INT NOT NULL,
-    EntityRecordID BIGINT NOT NULL,
-    OperationType NVARCHAR(20) NOT NULL,
-    ChangedBy NVARCHAR(100) NOT NULL,
-    ChangedDate DATETIME2(3) NOT NULL CONSTRAINT DF_AuditLog_Client_ChangedDate DEFAULT (SYSDATETIME()),
-    OldValues NVARCHAR(MAX) NULL,
-    NewValues NVARCHAR(MAX) NULL,
-    CONSTRAINT PK_AuditLog_Client PRIMARY KEY CLUSTERED (AuditID),
-    CONSTRAINT CK_AuditLog_Client_OperationType CHECK (OperationType IN
-        ('INSERT','UPDATE','DELETE','MERGE','STATUS_CHANGE')),
-    CONSTRAINT CK_AuditLog_Client_ChangedDate CHECK (ChangedDate <= DATEADD(MINUTE,1,SYSDATETIME()))
-);
-GO
-/* Technical event context stays outside the client's nine-column AuditLog.
-   EntityKey is nullable: historical client-layout rows did not record it. */
-CREATE TABLE dbo.AUDIT_LOG_CONTEXT
-(
-    AuditID INT NOT NULL CONSTRAINT PK_AUDIT_LOG_CONTEXT PRIMARY KEY,
-    OriginalUPRID BIGINT NULL,
-    EntityKey NVARCHAR(200) NULL,
-    RunID UNIQUEIDENTIFIER NULL,
-    SessionID INT NULL,
-    ChangeSummary NVARCHAR(2000) NULL,
-    CONSTRAINT FK_AUDIT_LOG_CONTEXT_Event FOREIGN KEY (AuditID) REFERENCES dbo.AuditLog(AuditID) ON DELETE CASCADE
-);
-GO
-CREATE INDEX IX_AuditLog_Entity ON dbo.AuditLog(EntityNameID,EntityRecordID,AuditID);
-CREATE INDEX IX_AuditLog_UPRID ON dbo.AuditLog(UPRID,AuditID);
-CREATE INDEX IX_AUDIT_LOG_CONTEXT_Run ON dbo.AUDIT_LOG_CONTEXT(RunID,AuditID);
-CREATE INDEX IX_AUDIT_LOG_CONTEXT_OriginalUPRID ON dbo.AUDIT_LOG_CONTEXT(OriginalUPRID,AuditID);
-GO
-CREATE OR ALTER VIEW dbo.AUDIT_LOG AS
-SELECT a.AuditID AS AuditLogID,
-    /* Compatibility UPRID remains a live link. The main table retains the
-       event's original association even after deletion of that UPR. */
-    live.UPRID, COALESCE(c.OriginalUPRID,a.UPRID) AS OriginalUPRID,
-    a.EntityNameID AS EntityID, a.EntityRecordID, c.EntityKey,
-    a.OperationType AS ActionType, a.ChangedDate, a.ChangedBy, a.OldValues, a.NewValues,
-    c.RunID, c.SessionID, c.ChangeSummary,
-    a.AuditID, e.EntityName, a.OperationType
-FROM dbo.AuditLog a
-LEFT JOIN dbo.AUDIT_LOG_CONTEXT c ON c.AuditID=a.AuditID
-LEFT JOIN dbo.UPR live ON live.UPRID=a.UPRID
-LEFT JOIN dbo.REF_ENTITY_IDENTIFICATION e ON e.EntityID=a.EntityNameID;
-GO
-
-/* Load-run history is separate from row events, including empty/failed runs. */
-CREATE TABLE dbo.UPR_LOAD_RUN
-(
-    RunID UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_UPR_LOAD_RUN PRIMARY KEY,
-    StartedAt DATETIME2(3) NOT NULL,
-    FinishedAt DATETIME2(3) NULL,
-    RunStatus VARCHAR(12) NOT NULL,
-    StartedBy NVARCHAR(100) NOT NULL,
-    SessionID INT NOT NULL,
-    SourceRowsRead INT NULL,
-    RejectedRows INT NULL,
-    ErrorMessage NVARCHAR(4000) NULL,
-    CONSTRAINT CK_UPR_LOAD_RUN_Status CHECK (RunStatus IN ('RUNNING', 'COMPLETED', 'FAILED'))
+    AuditID       INT IDENTITY(1,1) NOT NULL,
+    UPRID         BIGINT NULL,
+    EntityNameID  INT NOT NULL,
+    EntityRecordID  BIGINT NOT NULL,
+    OperationType VARCHAR(20) NOT NULL,
+    ChangedBy     VARCHAR(100) NOT NULL,
+    ChangeDate   DATETIME2(3) NOT NULL CONSTRAINT DF_AuditLog_ChangeDate DEFAULT (SYSDATETIME()),
+    OldValues     VARCHAR(MAX) NULL,
+    NewValue      VARCHAR(MAX) NULL,
+    CONSTRAINT PK_AuditLog PRIMARY KEY CLUSTERED (AuditID),
+    CONSTRAINT CK_AuditLog_OperationType CHECK (OperationType IN (
+        'INSERT', 'UPDATE', 'DELETE', 'MERGE', 'STATUS_CHANGE'
+    )),
+    /* 1-minute tolerance: DATETIME2(0) rounds up, so a value written as
+       SYSDATETIME() can land just after 'now' and fail a strict check */
+    CONSTRAINT CK_AuditLog_ChangeDate CHECK (ChangeDate <= DATEADD(MINUTE, 1, SYSDATETIME()))
 );
 GO
 
@@ -634,18 +581,18 @@ CREATE TABLE dbo.UPRMATCHREVIEW_Q
 (
     UPRMatchReviewID               INT IDENTITY(1,1) NOT NULL,
     UPRID                          BIGINT NULL,
-    IncomingSourceSystem           NVARCHAR(100) NOT NULL,
-    SDAT_NormalizedIncomingAddress NVARCHAR(300) NOT NULL,
-    MA_NormalizedIncomingAddress   NVARCHAR(300) NOT NULL,
-    SDAT_ParcelID                  NVARCHAR(50) NULL,
-    MA_ParcelID                    NVARCHAR(50) NULL,
-    SDAT_AccountNumber             NVARCHAR(50) NULL,
-    MA_Account                     NVARCHAR(50) NULL,
-    ReasonForNoMatch               NVARCHAR(255) NOT NULL,
+    IncomingSourceSystem           VARCHAR(100) NOT NULL,
+    SDAT_NormalizedIncomingAddress VARCHAR(300) NOT NULL,
+    MA_NormalizedIncomingAddress   VARCHAR(300) NOT NULL,
+    SDAT_ParcelID                  VARCHAR(50) NULL,
+    MA_ParcelID                    VARCHAR(50) NULL,
+    SDAT_AccountNumber             VARCHAR(50) NULL,
+    MA_Account                     VARCHAR(50) NULL,
+    ReasonForNoMatch               VARCHAR(255) NOT NULL,
     ProcessingTimestamp            DATETIME2(0) NOT NULL CONSTRAINT DF_UPRMATCHREVIEW_Q_ProcessingTimestamp DEFAULT (SYSDATETIME()),
-    Reviewer                       NVARCHAR(100) NULL,
-    ReviewStatus                   NVARCHAR(128) NOT NULL CONSTRAINT DF_UPRMATCHREVIEW_Q_ReviewStatus DEFAULT ('PENDING_REVIEW'),
-    Decision                       NVARCHAR(200) NULL,
+    Reviewer                       VARCHAR(100) NULL,
+    ReviewStatus                   VARCHAR(128) NOT NULL CONSTRAINT DF_UPRMATCHREVIEW_Q_ReviewStatus DEFAULT ('PENDING_REVIEW'),
+    Decision                       VARCHAR(200) NULL,
     CONSTRAINT PK_UPRMATCHREVIEW_Q PRIMARY KEY CLUSTERED (UPRMatchReviewID),
     CONSTRAINT CK_UPRMATCHREVIEW_Q_ReviewStatus CHECK (ReviewStatus IN (
         'PENDING_REVIEW', 'IN_REVIEW', 'MATCHED_TO_EXISTING', 'APPROVED_AS_NEW',
@@ -667,35 +614,35 @@ CREATE TABLE dbo.UPRSTATUSHISTORY
 (
     UPRStatusHistoryID INT IDENTITY(1,1) NOT NULL,
     UPRID              BIGINT NOT NULL,
-    SDATAccountNumber  NVARCHAR(50) NULL,
-    CNumber            NVARCHAR(50) NULL,
-    OldStatusCode      NVARCHAR(30) NULL,
-    NewStatusCode      NVARCHAR(30) NOT NULL,
-    ChangeReason       NVARCHAR(255) NULL,
-    ParcelID           NVARCHAR(50) NULL,
-    PropertyName       NVARCHAR(100) NULL,
-    Owner              NVARCHAR(100) NULL,
-    StreetNumber       NVARCHAR(20) NULL,
-    StreetName         NVARCHAR(100) NULL,
-    StreetType         NVARCHAR(4) NULL,
-    City               NVARCHAR(100) NULL,
-    State              NVARCHAR(2) NULL,
-    ZipCode            NVARCHAR(10) NULL,
-    PropertyTypeCode   NVARCHAR(30) NULL,
-    ChangeSource       NVARCHAR(50) NULL,
-    ChangedBy          NVARCHAR(100) NULL,
-    ChangedDate        DATETIME2(0) NOT NULL CONSTRAINT DF_UPRStatusHistory_ChangedDate DEFAULT (SYSDATETIME()),
-    Notes              NVARCHAR(1000) NULL,
+    SDATAccountNumber  VARCHAR(50) NULL,
+    CNumber            VARCHAR(50) NULL,
+    OldStatusCode      VARCHAR(30) NULL,
+    NewStatusCode      VARCHAR(30) NOT NULL,
+    ChangeReason       VARCHAR(255) NULL,
+    ParcelID           VARCHAR(50) NULL,
+    PropertyName       VARCHAR(100) NULL,
+    Owner              VARCHAR(100) NULL,
+    StreetNumber       VARCHAR(20) NULL,
+    StreetName         VARCHAR(100) NULL,
+    StreetType         VARCHAR(4) NULL,
+    City               VARCHAR(100) NULL,
+    State              VARCHAR(2) NULL,
+    ZipCode            VARCHAR(10) NULL,
+    PropertyTypeCode   VARCHAR(30) NULL,
+    ChangeSource       VARCHAR(50) NULL,
+    ChangedBy          VARCHAR(100) NULL,
+    ChangeDate        DATETIME2(0) NOT NULL CONSTRAINT DF_UPRStatusHistory_ChangeDate DEFAULT (SYSDATETIME()),
+    Notes              VARCHAR(1000) NULL,
     LevelInd           BIT NOT NULL CONSTRAINT DF_UPRStatusHistory_LevelInd DEFAULT (0),
     BuildingID         INT NULL,
-    UnitNumber         NVARCHAR(50) NULL,
-    UnitType           NVARCHAR(30) NULL,
+    UnitNumber         VARCHAR(50) NULL,
+    UnitType           VARCHAR(30) NULL,
     OwnershipStartDate DATETIME2(0) NULL,
     OwnershipEndDate   DATETIME2(0) NULL,
-    Email              NVARCHAR(150) NULL,
-    Phone              NVARCHAR(30) NULL,
-    MaillingAddress1   NVARCHAR(200) NULL,
-    MaillingAddress2   NVARCHAR(200) NULL,
+    Email              VARCHAR(150) NULL,
+    Phone              VARCHAR(30) NULL,
+    MaillingAddress1   VARCHAR(200) NULL,
+    MaillingAddress2   VARCHAR(200) NULL,
     CONSTRAINT PK_UPRSTATUSHISTORY PRIMARY KEY CLUSTERED (UPRStatusHistoryID),
     CONSTRAINT FK_UPRStatusHistory_UPR FOREIGN KEY (UPRID) REFERENCES dbo.UPR (UPRID),
     CONSTRAINT CK_UPRStatusHistory_NewStatus CHECK (NewStatusCode IN (
@@ -706,11 +653,24 @@ CREATE TABLE dbo.UPRSTATUSHISTORY
             'PENDING', 'ACTIVE', 'INACTIVE', 'UNDER_REVIEW', 'MERGED', 'SPLIT', 'RETIRED', 'REJECTED'
         )
     ),
-    CONSTRAINT CK_UPRStatusHistory_ChangedDate CHECK (ChangedDate <= DATEADD(MINUTE, 1, SYSDATETIME()))
+    CONSTRAINT CK_UPRStatusHistory_ChangedDate CHECK (ChangeDate <= DATEADD(MINUTE, 1, SYSDATETIME()))
 );
 GO
-CREATE INDEX IX_UPRSTATUSHISTORY_ParcelLookup ON dbo.UPRSTATUSHISTORY (UPRID, ChangeSource, ChangedDate DESC, UPRStatusHistoryID DESC) INCLUDE (ParcelID);
-GO
+
+
+/* ============================================================================
+   24. REF_ENTITY_IDENTIFICATION
+   ============================================================================ */
+CREATE TABLE dbo.REF_ENTITY_IDENTIFICATION
+(
+  EntityID    INT,
+  EntityName	VARCHAR(100)   NOT NULL,
+  EntityDescription	VARCHAR(250)	NULL,
+  ActiveInd	    BIT	 NOT NULL,
+  CreationDate	DATETIME2	NOT NULL,
+  CreatedBy	VARCHAR(100)	NOT NULL
+);
+
 
 /* ============================================================================
    SEED REFERENCE DATA
@@ -766,6 +726,27 @@ INSERT INTO dbo.REF_ADDRESSROLE (AddressRoleCode, Description) VALUES
     ('MAILING', 'Mailing Address'),
     ('PHYSICAL', 'Physical Address'),
     ('OTHER', 'Other Address');
+GO
+
+INSERT INTO dbo.REF_ENTITY_IDENTIFICATION
+    (EntityID,
+    EntityName,
+    EntityDescription,
+    ActiveInd,
+    CreationDate,
+    CreatedBy
+    )
+
+    VALUES
+    (1, 'UPR', 'Unified Property Record',1, GETDATE(), 'System'),
+    (2,'PROPERTY', 'Property entity',1, GETDATE(), 'System'),
+    (3,'BUILDING', 'Building entity',1, GETDATE(), 'System'),
+    (4,'UNIT', 'Dwelling Unit entity',1, GETDATE(), 'System'),
+    (5,'CONDO', 'Condominium entity',1, GETDATE(), 'System'),
+    (6,'COMPLEX', 'Complex entity',2, GETDATE(), 'System'),
+    (7,'ADU', 'Accesory Dwelling entity',1, GETDATE(), 'System'),
+    (8,'ADDRESS', 'Address entity',1, GETDATE(), 'System'),
+    (9,'CONTACT', 'Contact entity',1, GETDATE(), 'System');
 GO
 
 PRINT N'New hierarchical UPR schema created (NewUPRTABLEUSED + COMPLEX).';

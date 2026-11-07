@@ -39,7 +39,7 @@ row_sql=re.sub(r'OUTPUT inserted.AuditID INTO #PersistedAuditIDs\(AuditID\)','',
 row_sql=row_sql.split(';')[0].replace('INSERT dbo.','INSERT INTO dbo.').replace('#','').replace('@prefix+','@prefix||')
 db.executescript('''ATTACH ':memory:' AS dbo;
 CREATE TABLE dbo.AuditLog(AuditID INTEGER PRIMARY KEY,UPRID BIGINT,EntityNameID INT NOT NULL,EntityRecordID BIGINT NOT NULL,
-OperationType TEXT,ChangedBy TEXT,ChangedDate TEXT,OldValues TEXT,NewValue TEXT);
+OperationType TEXT,ChangedBy TEXT,ChangeDate TEXT,OldValues TEXT,NewValue TEXT);
 CREATE TABLE AuditEntityMap(EntityName TEXT PRIMARY KEY,EntityID INT NOT NULL);
 INSERT INTO AuditEntityMap VALUES('UPR',1),('UNIT',2);
 CREATE TABLE AuditEvents(EventID INTEGER PRIMARY KEY,EntityName TEXT,UPRID BIGINT,EntityRecordID BIGINT,OperationType TEXT,OldValues TEXT,NewValue TEXT);

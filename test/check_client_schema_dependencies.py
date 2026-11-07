@@ -122,12 +122,12 @@ for payload_column in ('NewValue', 'NewValues'):
         CREATE TABLE dbo.AuditLog(AuditID INTEGER PRIMARY KEY,UPRID BIGINT NULL,
             EntityNameID INT NOT NULL,EntityRecordID BIGINT NOT NULL,
             OperationType VARCHAR(20) NOT NULL,ChangedBy VARCHAR(100) NOT NULL,
-            ChangedDate TEXT NOT NULL,OldValues VARCHAR NULL,{payload_column} VARCHAR NULL);
+            ChangeDate TEXT NOT NULL,OldValues VARCHAR NULL,{payload_column} VARCHAR NULL);
         CREATE TABLE dbo.REF_ENTITY_IDENTIFICATION(EntityID INT,EntityName TEXT);
         INSERT INTO dbo.REF_ENTITY_IDENTIFICATION VALUES(1,'UPR_HIER_LOAD');
         CREATE TABLE PersistedAuditIDs(AuditID INT); CREATE TABLE AuditEntityMap(EntityID INT,EntityName TEXT);
         CREATE TABLE RunAuditRows(AuditID INT,RunID TEXT,EntityName TEXT,EntityKey TEXT,
-            OperationType TEXT,ChangedDate TEXT,ChangedBy TEXT,OldValues TEXT,NewValues TEXT);
+            OperationType TEXT,ChangeDate TEXT,ChangedBy TEXT,OldValues TEXT,NewValues TEXT);
     ''')
     payload = 'RunID = test-run\nClosure rows = 3'
     native.execute(insert.split(';')[0].replace("N'", "'"),
@@ -225,7 +225,7 @@ preflight = source[source.index('BEGIN TRANSACTION;\n/* Create the batch-summary
 assert 'IF @ResolvedAuditEntityID IS NULL' in preflight
 assert 'WHERE EntityID=@ResolvedAuditEntityID)<>1' in preflight
 assert source.index('IF @SummaryEntityID IS NULL',source.index("PRINT N'Step 14:")) < source.index('DECLARE @AuditInsertSql')
-nullable.execute("CREATE TABLE dbo.AuditLog(AuditID INTEGER PRIMARY KEY,EntityNameID INT NOT NULL,EntityRecordID BIGINT NOT NULL,OperationType TEXT NOT NULL,ChangedBy TEXT NOT NULL,ChangedDate TEXT NOT NULL,NewValue TEXT)")
+nullable.execute("CREATE TABLE dbo.AuditLog(AuditID INTEGER PRIMARY KEY,EntityNameID INT NOT NULL,EntityRecordID BIGINT NOT NULL,OperationType TEXT NOT NULL,ChangedBy TEXT NOT NULL,ChangeDate TEXT NOT NULL,NewValue TEXT)")
 audit_statement=render_audit('AuditInsertSql','NewValue').split(';')[0].replace("N'","'")
 parameters={'entity':None,'who':'Ade','at':'2026-10-06','payload':'{}'}
 try:
@@ -249,7 +249,7 @@ catalog.execute('CREATE TABLE Columns(name TEXT,is_nullable INT,is_identity INT,
 rows=[('AuditID',0,1,0,0,56,0),('UPRID',1,0,0,0,127,0),
       ('EntityNameID',0,0,0,0,56,0),('EntityRecordID',0,0,0,0,127,0),
       ('OperationType',0,0,0,0,167,0),('ChangedBy',0,0,0,0,167,0),
-      ('ChangedDate',0,0,0,1,42,0),('OldValues',1,0,0,0,167,0),('NewValue',1,0,0,0,167,0)]
+      ('ChangeDate',0,0,0,1,42,0),('OldValues',1,0,0,0,167,0),('NewValue',1,0,0,0,167,0)]
 def audit_issues(extra=(),replacement=None):
     catalog.execute('DELETE FROM Columns')
     data=rows.copy()

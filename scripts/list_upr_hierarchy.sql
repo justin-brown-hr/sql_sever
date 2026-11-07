@@ -205,7 +205,7 @@ IF COL_LENGTH(N'dbo.BUILDING',N'BuildingNumber') IS NOT NULL
     EXEC sys.sp_executesql N'INSERT #ReportBuildingNumber(BuildingID,BuildingNumber)
         SELECT BuildingID,CONVERT(NVARCHAR(200),BuildingNumber) FROM dbo.BUILDING b
         WHERE EXISTS(SELECT 1 FROM #ReportTree t WHERE t.UPRID=b.UPRID)
-           OR EXISTS(SELECT 1 FROM dbo.UNIT u JOIN #ReportTree t ON t.UPRID=u.UPRID WHERE u.BuildingID=b.BuildingID);';
+           OR EXISTS(SELECT 1 FROM dbo.UNIT u JOIN #ReportTree t ON t.UPRID=u.UPRID WHERE t.ParentUPRID=b.UPRID);';
 IF OBJECT_ID('tempdb..#ReportADU') IS NOT NULL DROP TABLE #ReportADU;
 CREATE TABLE #ReportADU(UPRID BIGINT,UnitNumber NVARCHAR(50));
 IF COL_LENGTH(N'dbo.ADU',N'UPRID') IS NOT NULL AND COL_LENGTH(N'dbo.ADU',N'UnitNumber') IS NOT NULL
@@ -277,7 +277,7 @@ SELECT
     BuildingNumberAvailability = CASE WHEN COL_LENGTH(N'dbo.BUILDING',N'BuildingNumber') IS NULL
         THEN N'No separate BuildingNumber column; BuildingID is shown separately'
         WHEN bn.BuildingNumber IS NULL THEN N'Not recorded' ELSE N'Recorded value' END,
-    BuildingID    = COALESCE(b.BuildingID, un.BuildingID),
+    BuildingID    = COALESCE(b.BuildingID, linkedBuilding.BuildingID),
     UnitID        = un.UnitID
 FROM #ReportTree t
 INNER JOIN dbo.REF_ENTITYTYPE e ON e.EntityTypeID = t.EntityTypeID
@@ -288,13 +288,14 @@ OUTER APPLY (
     SELECT TOP (1) h.ParcelID
     FROM dbo.UPRSTATUSHISTORY h
     WHERE d.CondoID IS NOT NULL AND h.UPRID = t.UPRID AND h.ChangeSource = N'HIER_LOAD'
-    ORDER BY h.ChangedDate DESC, h.UPRStatusHistoryID DESC
+    ORDER BY h.ChangeDate DESC, h.UPRStatusHistoryID DESC
 ) condoHistory
 LEFT JOIN dbo.BUILDING b  ON b.UPRID  = t.UPRID
 LEFT JOIN dbo.UNIT     un ON un.UPRID = t.UPRID
 LEFT JOIN #ReportADU ad ON ad.UPRID=t.UPRID
-LEFT JOIN dbo.BUILDING linkedBuilding ON linkedBuilding.BuildingID=un.BuildingID
-LEFT JOIN #ReportBuildingNumber bn ON bn.BuildingID=COALESCE(b.BuildingID,un.BuildingID)
+/* A Unit's Building is its parent UPR (the client layout has no UNIT.BuildingID). */
+LEFT JOIN dbo.BUILDING linkedBuilding ON un.UnitID IS NOT NULL AND linkedBuilding.UPRID=t.ParentUPRID
+LEFT JOIN #ReportBuildingNumber bn ON bn.BuildingID=COALESCE(b.BuildingID,linkedBuilding.BuildingID)
 LEFT JOIN dbo.REF_PROPERTYTYPE pt  ON pt.PropertyTypeID  = p.PropertyTypeID
 LEFT JOIN dbo.REF_PROPERTYTYPE cxt ON cxt.PropertyTypeID = cx.PropertyTypeID
 OUTER APPLY (
@@ -438,24 +439,20 @@ FROM (
 
     UNION ALL
 
-    /* R9: a Unit parent must be the Building referenced by UNIT.BuildingID. */
+    /* A Unit's parent must be a Building (UNIT has no BuildingID in the client layout). */
     SELECT
         Issue  = N'Unit has invalid Building link',
         un.UPRID,
         Detail = N'Unit ' + COALESCE(un.UnitNumber, N'(no unit number)')
-               + N': BuildingID must identify the immediate Building parent'
+               + N': its parent UPR must be a Building'
     FROM dbo.UNIT un
     INNER JOIN dbo.UPR u ON u.UPRID = un.UPRID
     WHERE NOT EXISTS (
             SELECT 1
             FROM dbo.BUILDING linked
-            INNER JOIN dbo.UPR bu ON bu.UPRID = linked.UPRID
-            INNER JOIN dbo.REF_ENTITYTYPE be ON be.EntityTypeID = bu.EntityTypeID
-            INNER JOIN dbo.UPR parent ON parent.UPRID = u.ParentUPRID
+            INNER JOIN dbo.UPR parent ON parent.UPRID = linked.UPRID
             INNER JOIN dbo.REF_ENTITYTYPE pe ON pe.EntityTypeID = parent.EntityTypeID
-            WHERE linked.BuildingID = un.BuildingID
-              AND be.Description = N'Building'
-              AND pe.Description=N'Building' AND parent.UPRID=linked.UPRID
+            WHERE linked.UPRID = u.ParentUPRID AND pe.Description = N'Building'
           )
       AND (@NormAccount IS NULL
            OR u.AccountNumber = @NormAccount

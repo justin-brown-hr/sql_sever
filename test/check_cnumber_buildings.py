@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""SQL Server regression for the R11 C Number rule and R12 record layout names.
+"""SQL Server regression for the R11 C Number rule on the client record layout.
 
-Runs only in disposable databases in the existing test container
-(CONTAINER=uprtest). Three parts:
-  1. C Number fixture on a fresh client-layout database, then an unchanged rerun.
-  2. Upgrade: the same fixture loaded by delivered R10 on the earlier layout,
-     columns renamed to the November 2026 layout, then R12.
-  3. Differential: the standard hostile seed (no C Numbers) loaded by R10 and by
-     R12 into separate databases must produce identical hierarchies.
-  4. R12 on an un-renamed database stops in the layout check, changing nothing.
+The schema is ddl/03_new_upr_schema.sql (client layout of 2026-11-06). Runs only
+in disposable databases in the existing test container (CONTAINER=uprtest):
+  1. C Number fixture on a fresh client-layout database: hierarchy, record
+     metadata, no N/A unit numbers, client closure indexes reused, unchanged
+     rerun, earlier N/A values cleared, client read scripts.
+  2. SDAT condos loaded before their C Number arrived: LOADED_ELSEWHERE, not moved.
+  3. Differential: the standard hostile seed (no C Numbers) loaded by delivered R10
+     on its layout and by the current loader on the client layout must produce the
+     same hierarchy (R10's N/A placeholder counted as NULL).
+  4. The loader on the November 3 (R12) layout stops in the layout check.
 """
 import os
 import re
@@ -101,12 +103,16 @@ EARLIER_DDL = subprocess.run(['git', '-C', str(ROOT), 'show', '1e77e58:ddl/03_ne
 
 
 def client_layout(database, earlier=False):
-    """Hostile seed + project DDL reduced to the client's audit layout."""
-    names = earlier_names if earlier else (lambda text: text)
-    ddl = EARLIER_DDL if earlier else (ROOT / 'ddl/03_new_upr_schema.sql').read_text()
+    """Hostile seed + schema: the client layout, or (earlier=True) the project DDL
+    of commit 1e77e58 reduced to the client's October audit layout."""
     sql(database, (ROOT / 'test/local_it_setup.sql').read_text().replace('UPRXDB_TEST', database))
-    sql(database, ddl.replace('UPRXDB_TEST', database))
-    sql(database, names("""
+    if not earlier:
+        sql(database, (ROOT / 'ddl/03_new_upr_schema.sql').read_text().replace('UPRXDB_TEST', database))
+        sql(database, """IF COL_LENGTH(N'dbo.SDATIncomingTableX1', N'CondoUnit') IS NULL
+    ALTER TABLE dbo.SDATIncomingTableX1 ADD CondoUnit NVARCHAR(50) NULL;""")
+        return
+    sql(database, EARLIER_DDL.replace('UPRXDB_TEST', database))
+    sql(database, earlier_names("""
 DROP VIEW dbo.AUDIT_LOG;
 DROP TABLE dbo.AUDIT_LOG_CONTEXT;
 DROP TABLE dbo.UPR_LOAD_RUN;
@@ -257,7 +263,7 @@ try:
     client_layout(db)
     cnumber_fixture(db)
     output = load(db)
-    assert 'UPR MAIN LOADER 2026-11-03 R12' in output and 'Record layout check passed.' in output and 'C Number: groups=' in output, output[-3000:]
+    assert 'UPR MAIN LOADER 2026-11-06 R13' in output and 'Record layout check passed.' in output and 'C Number: groups=' in output, output[-3000:]
     run_id = re.search(r'Audit RunID: ([0-9a-fA-F-]{36})', output)[1]
     audit = sql(db, (ROOT / 'scripts/check_upr_audit_result.sql').read_text().replace(
         'DECLARE @RunID UNIQUEIDENTIFIER=NULL;', f"DECLARE @RunID UNIQUEIDENTIFIER='{run_id}';"))
@@ -307,17 +313,35 @@ try:
           "AND r.AccountNumber = 'C000901' AND cl.[Level] = 2)", 'Unit closure level is not 2.')
     print('PASS: Unit keeps its SDAT account, owner and parcel; parent does not; closure level 2', flush=True)
 
-    # MA MultiFamily rows without a unit number keep their R10 N/A Unit (rule 9).
+    # MA MultiFamily rows without a unit number get a Unit with NULL UnitNumber (no N/A).
     assert sql(db, unit_under('C000902') + ' ORDER BY a.NormalizedAddress, un.UnitNumber;').splitlines() == [
-        'N/A|NULL|500 SHARED WAY TEST CITY 20850',
-        '2|07000007|502 SHARED WAY TEST CITY 20850',
-        'N/A|NULL|502 SHARED WAY TEST CITY 20850'], sql(db, unit_under('C000902') + ';')
+        'NULL|NULL|500 SHARED WAY TEST CITY 20850',
+        'NULL|NULL|502 SHARED WAY TEST CITY 20850',
+        '2|07000007|502 SHARED WAY TEST CITY 20850'], sql(db, unit_under('C000902') + ';')
     assert roots(db, 'C000906') == ['Property']
     assert sql(db, unit_under('C000906') + " WHERE un.UnitNumber = 'A';") == 'A|07000010|1000 SOLO LN TEST CITY 20850'
     assert sql(db, "SELECT COUNT(*) FROM dbo.UPR b JOIN dbo.UPR r ON r.UPRID = b.ParentUPRID "
                "WHERE r.AccountNumber = 'C000905' AND b.EntityTypeID = (SELECT EntityTypeID FROM dbo.REF_ENTITYTYPE "
                "WHERE Description = 'Building');") == '3', 'ZIP conflict must not be consolidated'
     print('PASS: shared address blocks only that Building; single-address C Number Property gets its Unit', flush=True)
+
+    assert sql(db, "SELECT COUNT(*) FROM dbo.UNIT WHERE UnitNumber = 'N/A';") == '0'
+    assert sql(db, "SELECT COUNT(*) FROM sys.columns WHERE object_id = OBJECT_ID('dbo.UNIT') AND name = 'BuildingID';") == '0'
+    check(db, "NOT EXISTS (SELECT 1 FROM dbo.UNIT un JOIN dbo.UPR u ON u.UPRID = un.UPRID "
+          "LEFT JOIN dbo.BUILDING b ON b.UPRID = u.ParentUPRID WHERE b.UPRID IS NULL)", 'Unit parent is not a Building.')
+    for table, user_columns in (('UPR', ('CreationUserID',)), ('ADDRESS', ('CreationUserID',)),
+                                ('COMPLEX', ('CreationUserID',)), ('PROPERTY', ('CreationUserID',)),
+                                ('CONDO', ('CreationUserID',)), ('BUILDING', ('CreationUserID',)),
+                                ('UNIT', ('CreationUserID',)), ('CONTACT', ())):
+        deleted = 'DeleteInd' if table in ('ADDRESS', 'UNIT', 'CONTACT') else 'DeletedInd' if table != 'UPR' else None
+        conditions = ' OR '.join([f'{c} IS NULL' for c in user_columns + ('LastUpdateUserID',)]
+                                 + ['LastUpdateDate IS NULL OR LastUpdateDate <> CreationDate']
+                                 + ([f'{deleted} <> 0'] if deleted else []))
+        assert sql(db, f'SELECT COUNT(*) FROM dbo.{table} WHERE {conditions};') == '0', table
+        assert int(sql(db, f'SELECT COUNT(*) FROM dbo.{table};')) > 0, table
+    assert sql(db, "SELECT COUNT(*) FROM sys.indexes WHERE object_id = OBJECT_ID('dbo.UPR_CLOSURE') "
+               "AND name LIKE '%Loader%';") == '0', 'client closure indexes were not reused'
+    print('PASS: record metadata filled; no N/A; Unit parent is its Building; client closure indexes reused', flush=True)
 
     before = sql(db, SNAPSHOT)
     last_audit = sql(db, 'SELECT MAX(AuditID) FROM dbo.AuditLog;')
@@ -327,6 +351,19 @@ try:
                    f"ON e.EntityID = a.EntityNameID WHERE a.AuditID > {last_audit} AND e.EntityName <> 'UPR_HIER_LOAD';")
     assert business == '0', f'unchanged rerun wrote {business} business audit rows'
     print('PASS: unchanged rerun is idempotent (no business audit events)', flush=True)
+
+    # An N/A left by an earlier loader is cleared to NULL, with metadata and audit.
+    sql(db, "UPDATE un SET UnitNumber = 'N/A' FROM dbo.UNIT un JOIN dbo.UPR u ON u.UPRID = un.UPRID "
+            "WHERE un.UnitNumber IS NULL AND u.ParentUPRID IN (SELECT b.UPRID FROM dbo.UPR b JOIN dbo.UPR r "
+            "ON r.UPRID = b.ParentUPRID WHERE r.AccountNumber = 'C000902');")
+    last_audit = sql(db, 'SELECT MAX(AuditID) FROM dbo.AuditLog;')
+    load(db)
+    assert sql(db, "SELECT COUNT(*) FROM dbo.UNIT WHERE UnitNumber = 'N/A';") == '0'
+    assert sql(db, "SELECT COUNT(*) FROM dbo.UNIT WHERE LastUpdateDate > CreationDate;") == '2'
+    assert sql(db, f"SELECT COUNT(*) FROM dbo.AuditLog a JOIN dbo.REF_ENTITY_IDENTIFICATION e ON e.EntityID = a.EntityNameID "
+               f"WHERE a.AuditID > {last_audit} AND e.EntityName = 'UNIT' AND a.OperationType = 'UPDATE' "
+               "AND a.NewValue LIKE '%UnitNumber = <NULL>%';") == '2'
+    print('PASS: earlier N/A unit numbers are cleared to NULL with LastUpdate metadata and audit', flush=True)
 
     # Client read/search scripts compile and run against the November 2026 names.
     unit_101 = sql(db, "SELECT u.UPRID FROM dbo.UPR u WHERE u.AccountNumber = '07000001';")
@@ -347,52 +384,57 @@ try:
     # (absent from the client layout) - a separate, pre-R12 limitation.
     print('PASS: listing, Property 360 demo and schema check run, search procedure compiles, on the new names', flush=True)
 
-    # 2. Upgrade: R10 on the earlier layout, client renames columns, then R12.
-    up = new_database('CNumberUpgrade')
-    client_layout(up, earlier=True)
+    # 2. SDAT condos loaded before their C Number arrived are not moved.
+    up = new_database('CNumberLater')
+    client_layout(up)
     cnumber_fixture(up)
-    load(up, R10)
-    rename_to_november(up)
+    held = sql(up, "SELECT COUNT(*) FROM dbo.MAIncomingTableX1 WHERE Account = 'C000901';")
+    sql(up, "SELECT * INTO dbo.HeldMA FROM dbo.MAIncomingTableX1 WHERE Account = 'C000901'; "
+            "DELETE FROM dbo.MAIncomingTableX1 WHERE Account = 'C000901';")
+    load(up)
+    assert roots(up, '07000001') == ['Condo']
     unit_9601 = sql(up, "SELECT UPRID FROM dbo.EXTERNAL_IDENTIFIER_XREF WHERE SourceSystem = 'KDAT' "
                     "AND IdentifierType = 'SOURCE_RECORD_ID' AND IdentifierValue = '9601';")
-    r10_units = sql(up, 'SELECT COUNT(*) FROM dbo.UNIT;')
+    sql(up, "INSERT dbo.MAIncomingTableX1 SELECT * FROM dbo.HeldMA; DROP TABLE dbo.HeldMA;")
+    assert sql(up, "SELECT COUNT(*) FROM dbo.MAIncomingTableX1 WHERE Account = 'C000901';") == held
     output = load(up)
     assert '|LOADED_ELSEWHERE|' in output
-    assert roots(up, '07000001') == ['Condo']
+    assert roots(up, '07000001') == ['Condo'] and roots(up, 'C000901') == ['Complex']
     assert sql(up, "SELECT UPRID FROM dbo.EXTERNAL_IDENTIFIER_XREF WHERE SourceSystem = 'KDAT' "
                "AND IdentifierType = 'SOURCE_RECORD_ID' AND IdentifierValue = '9601';") == unit_9601
-    assert sql(up, 'SELECT COUNT(*) FROM dbo.UNIT;') == r10_units, 'R12 duplicated units loaded by R10'
-    upgraded = sql(up, SNAPSHOT)
+    later = sql(up, SNAPSHOT)
     load(up)
-    assert sql(up, SNAPSHOT) == upgraded
-    print('PASS: rows loaded by R10 are reported LOADED_ELSEWHERE, not moved or duplicated; rerun idempotent', flush=True)
+    assert sql(up, SNAPSHOT) == later
+    print('PASS: condos loaded before their C Number are reported LOADED_ELSEWHERE, not moved; rerun idempotent', flush=True)
 
     # 3. Differential: no C Numbers in the standard seed -> identical results.
-    a, b = new_database('SeedR10'), new_database('SeedR12')
+    a, b = new_database('SeedR10'), new_database('SeedR13')
     client_layout(a, earlier=True)
     load(a, R10)
-    rename_to_november(a)
     client_layout(b)
     load(b)
-    snap_a, snap_b = sql(a, SNAPSHOT), sql(b, SNAPSHOT)
+    # R10 wrote an N/A placeholder for blank MA units; the client layout stores NULL.
+    snap_a = re.sub(r':N/A(?=$| > |\|)', ':-', sql(a, SNAPSHOT.replace('PrimaryInd', 'IsPrimary')), flags=re.M)
+    snap_a = '\n'.join(sorted(snap_a.splitlines()))  # mapping N/A changes sort order only
+    snap_b = '\n'.join(sorted(sql(b, SNAPSHOT).splitlines()))
     assert snap_a == snap_b, '\n'.join(
         line for line in __import__('difflib').unified_diff(snap_a.splitlines(), snap_b.splitlines(), lineterm=''))
-    print(f'PASS: standard hostile seed gives identical R10/R12 results ({len(snap_b.splitlines())} snapshot rows)', flush=True)
+    print(f'PASS: standard hostile seed gives identical R10/R13 results ({len(snap_b.splitlines())} snapshot rows)', flush=True)
 
-    # 4. Un-renamed database: the layout check lists the names and changes nothing.
-    stale = new_database('EarlierLayout')
+    # 4. November 3 (R12) layout: the layout check lists the gaps and changes nothing.
+    stale = new_database('R12Layout')
     client_layout(stale, earlier=True)
+    rename_to_november(stale)
     cnumber_fixture(stale)
     output = sql(stale, LOADER.replace('UPRXDB_TEST', stale), error=True)
     assert 'Record layout check FAILED' in output, output[-3000:]
-    for table, column in (('UPR', 'UpdateDate'), ('UPR_ADDRESS', 'PrimaryInd'), ('BUILDING', 'UpdateDate'),
-                          ('UNIT', 'UpdateDate'), ('REF_PROPERTYTYPE', 'LastUpdateUserID'),
-                          ('REF_PROPERTYTYPE', 'LastUpdateDate')):
+    for table, column in (('UPR', 'LastUpdateUserID'), ('UPR', 'CreationUserID'), ('UNIT', 'DeleteInd'),
+                          ('BUILDING', 'LastUpdateDate'), ('ADDRESS', 'DeleteInd'), ('AuditLog', 'ChangeDate')):
         assert f'{table}|{column}|Column used by the loader is missing' in output, (table, column)
     assert 'Invalid column name' not in output, 'later batches were compiled into errors'
     assert sql(stale, "SELECT COUNT(*) FROM dbo.UPR; SELECT COUNT(*) FROM sys.objects WHERE name LIKE 'fn[_]UPR[_]%';"
                ).splitlines() == ['0', '0'], 'layout check let the script change the database'
-    print('PASS: un-renamed database stops in the layout check with every missing name; nothing changed', flush=True)
+    print('PASS: R12-layout database stops in the layout check with the missing names; nothing changed', flush=True)
 finally:
     for database in CREATED:
         sql('master', f"ALTER DATABASE [{database}] SET SINGLE_USER WITH ROLLBACK IMMEDIATE; "

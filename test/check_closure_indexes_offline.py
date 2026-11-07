@@ -16,7 +16,7 @@ db.executescript("""
 ATTACH ':memory:' AS sys;
 CREATE TABLE sys.indexes(object_id INT,index_id INT,type INT,is_unique INT,
     ignore_dup_key INT,is_disabled INT,has_filter INT,is_hypothetical INT);
-CREATE TABLE sys.index_columns(object_id INT,index_id INT,column_id INT,key_ordinal INT);
+CREATE TABLE sys.index_columns(object_id INT,index_id INT,column_id INT,key_ordinal INT,is_included_column INT);
 CREATE TABLE sys.columns(object_id INT,column_id INT,name TEXT);
 INSERT INTO sys.columns VALUES(42,1,'AncestorUPRID'),(42,2,'DescendantUPRID'),(42,3,'Level');
 """)
@@ -36,9 +36,9 @@ def match(keys, unique=True, included=(), **flags):
                 flags.get('is_disabled', 0), flags.get('has_filter', 0),
                 flags.get('is_hypothetical', 0)))
     for ordinal, column in enumerate(keys, 1):
-        db.execute('INSERT INTO sys.index_columns VALUES(42,1,?,?)', (column, ordinal))
+        db.execute('INSERT INTO sys.index_columns VALUES(42,1,?,?,0)', (column, ordinal))
     for column in included:
-        db.execute('INSERT INTO sys.index_columns VALUES(42,1,?,0)', (column,))
+        db.execute('INSERT INTO sys.index_columns VALUES(42,1,?,0,1)', (column,))
     return tuple(bool(db.execute(q, {'ClosureObjectID': 42}).fetchone()) for q in queries)
 
 assert match([1, 2], type=1) == (True, False)  # clustered PK
@@ -50,6 +50,10 @@ assert match([2]) == (False, False)
 assert match([2, 1], unique=False) == (False, True)
 assert match([2, 1], included=[3]) == (False, True)
 assert match([2, 1, 3], unique=False) == (False, True)  # leading keys suffice
+assert match([2, 3, 1], unique=False) == (False, True)  # client layout (Descendant, Level, Ancestor)
+assert match([2], unique=False, included=[1]) == (False, True)  # ancestor as included column
+assert match([2, 3], unique=False) == (False, False)  # no ancestor at all
+assert match([1, 3, 2], unique=False) == (False, False)  # ancestor-first is not descendant-first
 assert match([1, 2], ignore_dup_key=1) == (False, False)
 for flag in ('is_disabled', 'has_filter', 'is_hypothetical'):
     assert match([1, 2], **{flag: 1}) == (False, False)
@@ -90,7 +94,7 @@ for direction,q,requiredkeys,unique in [('Forward',queries[0],[1,2],True),('Reve
         i=db.execute('SELECT COALESCE(MAX(index_id),0)+1 FROM sys.indexes').fetchone()[0]
         db.execute('INSERT INTO sys.indexes VALUES(42,?,?,?,?,?,?,?,?)',
           (i,2,int(is_unique),flags.get('ignore_dup_key',0),flags.get('is_disabled',0),flags.get('has_filter',0),0,name))
-        for ordinal,col in enumerate(keys,1): db.execute('INSERT INTO sys.index_columns VALUES(42,?,?,?)',(i,col,ordinal))
+        for ordinal,col in enumerate(keys,1): db.execute('INSERT INTO sys.index_columns VALUES(42,?,?,?,0)',(i,col,ordinal))
     def ensure():
         if db.execute(q,dict(ClosureObjectID=42)).fetchone(): return None
         name=base;n=0

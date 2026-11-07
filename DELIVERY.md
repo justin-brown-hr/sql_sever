@@ -1,8 +1,8 @@
-> Current: November 3 R12 - [record layout metadata names](CLIENT_MAIN_LOADER_2026-11-03.md).
-> Send `UPR_Main_Loader_2026-11-03_R12.zip` (loader + listing + Property 360 demo + schema check, new names).
-> Layout check stops before any change and lists every missing/unfilled column. Native SQL Server tests pass.
-> Includes the November 2 R11 [C Number Complex/Building/Unit rule](CLIENT_MAIN_LOADER_2026-11-02.md).
-> Earlier delivery notes were removed; see git history and `SESSION_HANDOVER.md`.
+> Current: November 6 R13 - [data structure changes and index review](CLIENT_MAIN_LOADER_2026-11-06.md).
+> Send `UPR_Main_Loader_2026-11-06_R13.zip` (loader, listing, Property 360 demo, schema check,
+> closure index report) for the client's 11/6/2026 record layout. Native SQL Server tests pass.
+> Includes R11 [C Number rule](CLIENT_MAIN_LOADER_2026-11-02.md) and R12 [layout check](CLIENT_MAIN_LOADER_2026-11-03.md).
+> Earlier delivery notes: git history and `SESSION_HANDOVER.md`.
 > The sections below describe the original September 2026 package.
 
 # UPR Master Load - Delivery Package (Hierarchical Model)
@@ -23,7 +23,7 @@
 | 2 | **Load script** (MA + SDAT to full hierarchy) | `scripts/load_upr_master.sql` |
 | 3 | **Search procedure** | `scripts/search_upr_master.sql` -> `dbo.usp_UPR_Search` |
 | 4 | **Validation report** (PASS/FAIL checks, works with real data) | `test/run_test_and_results.sql` |
-| 5 | **Current client run guide** | `CLIENT_MAIN_LOADER_2026-11-03.md` |
+| 5 | **Current client run guide** | `CLIENT_MAIN_LOADER_2026-11-06.md` |
 | 6 | **README** (structure, run steps, assumptions) | `README.md` |
 | 7 | **Persistent row auditing** (install before loading) | `scripts/install_upr_audit.sql` |
 | 8 | **Account diagnostics** | `scripts/diagnose_upr_accounts.sql` |
@@ -41,7 +41,7 @@ Supporting files:
 
 ---
 
-For an **existing database**, follow [CLIENT_MAIN_LOADER_2026-11-03.md](CLIENT_MAIN_LOADER_2026-11-03.md)
+For an **existing database**, follow [CLIENT_MAIN_LOADER_2026-11-06.md](CLIENT_MAIN_LOADER_2026-11-06.md)
 instead of the clean-schema setup below.
 
 ## Quick Start (SSMS)
