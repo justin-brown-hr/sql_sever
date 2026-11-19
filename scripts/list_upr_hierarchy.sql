@@ -1,6 +1,6 @@
 /*
 ================================================================================
-  UPR Full Records / Hierarchy Listing - 2026-11-11 (no UPRSTATUSHISTORY index needed)
+  UPR Full Records / Hierarchy Listing - 2026-11-19 (record layout of 11/17/2026)
   Read existing loaded UPR data; no loader rerun or audit installation required.
 
   Lists every UPR record as Parent followed by its children, so you can confirm
@@ -214,7 +214,7 @@ IF OBJECT_ID('tempdb..#ReportCondoParcel') IS NOT NULL DROP TABLE #ReportCondoPa
 SELECT x.UPRID,x.ParcelID INTO #ReportCondoParcel
 FROM (
     SELECT h.UPRID,h.ParcelID,
-        rn=ROW_NUMBER() OVER(PARTITION BY h.UPRID ORDER BY h.ChangeDate DESC,h.UPRStatusHistoryID DESC)
+        rn=ROW_NUMBER() OVER(PARTITION BY h.UPRID ORDER BY h.LastUpdated DESC,h.UPRStatusHistoryID DESC)
     FROM dbo.UPRSTATUSHISTORY h
     WHERE h.ChangeSource=N'HIER_LOAD'
       AND EXISTS(SELECT 1 FROM dbo.CONDO d JOIN #ReportTree rt ON rt.UPRID=d.UPRID WHERE d.UPRID=h.UPRID)

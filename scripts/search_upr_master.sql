@@ -236,7 +236,7 @@ BEGIN
     LEFT JOIN dbo.UPR_CONDO_LEGACY old ON old.CondoID = co.CondoID AND old.UPRID = u.UPRID
     OUTER APPLY (SELECT TOP (1) h.ParcelID FROM dbo.UPRSTATUSHISTORY h
         WHERE co.CondoID IS NOT NULL AND h.UPRID = u.UPRID AND h.ChangeSource = N'HIER_LOAD'
-        ORDER BY h.ChangeDate DESC,h.UPRStatusHistoryID DESC) hist
+        ORDER BY h.LastUpdated DESC,h.UPRStatusHistoryID DESC) hist
     WHERE @IncludeReviewQOnly = 0
       AND (@UPRID IS NULL OR u.UPRID = @UPRID)
       AND (@EntityType IS NULL OR et.Description = @EntityType)

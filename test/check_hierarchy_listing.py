@@ -63,32 +63,32 @@ DECLARE @Unit INT = (SELECT EntityTypeID FROM dbo.REF_ENTITYTYPE WHERE Descripti
     SELECT TOP (50001) n = ROW_NUMBER() OVER (ORDER BY a.object_id, b.object_id)
     FROM sys.all_objects a CROSS JOIN sys.all_objects b
 )
-INSERT dbo.UPR (EntityTypeID, CreationUserID, LastUpdateUserID, LastUpdateDate, AccountNumber)
-SELECT @Condo, 'fixture', 'fixture', SYSUTCDATETIME(), CASE n
+INSERT dbo.UPR (EntityTypeID, DeletedInd, CreationUserID, LastUpdateUserID, LastUpdateDate, AccountNumber)
+SELECT @Condo, 0, 'fixture', 'fixture', SYSUTCDATETIME(), CASE n
     WHEN 1 THEN '123456789' WHEN 2 THEN 'OTHER'
     WHEN 6 THEN '23456789' WHEN 3 THEN '1234567890123' WHEN 4 THEN 'ABC-123'
     ELSE RIGHT('00000000' + CONVERT(VARCHAR(8), n), 8) END
 FROM Numbers;
 DECLARE @Root1 BIGINT = (SELECT UPRID FROM dbo.UPR WHERE AccountNumber = '123456789');
 DECLARE @Root2 BIGINT = (SELECT UPRID FROM dbo.UPR WHERE AccountNumber = 'OTHER');
-INSERT dbo.CONDO (UPRID, DeleteInd, CreationUserID, LastUpdateUserID, LastUpdateDate)
+INSERT dbo.CONDO (UPRID, DeletedInd, CreationUserID, LastUpdateUserID, LastUpdateDate)
 SELECT UPRID, 0, 'fixture', 'fixture', SYSUTCDATETIME() FROM dbo.UPR;
-INSERT dbo.UPR (EntityTypeID, ParentUPRID, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@Building, @Root1, 'fixture', 'fixture', SYSUTCDATETIME());
+INSERT dbo.UPR (EntityTypeID, ParentUPRID, DeletedInd, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@Building, @Root1, 0, 'fixture', 'fixture', SYSUTCDATETIME());
 DECLARE @BU1 BIGINT = SCOPE_IDENTITY();
-INSERT dbo.BUILDING (UPRID, DeleteInd, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@BU1, 0, 'fixture', 'fixture', SYSUTCDATETIME());
+INSERT dbo.BUILDING (UPRID, DeletedInd, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@BU1, 0, 'fixture', 'fixture', SYSUTCDATETIME());
 DECLARE @B1 BIGINT = SCOPE_IDENTITY();
-INSERT dbo.UPR (EntityTypeID, ParentUPRID, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@Building, @Root2, 'fixture', 'fixture', SYSUTCDATETIME());
+INSERT dbo.UPR (EntityTypeID, ParentUPRID, DeletedInd, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@Building, @Root2, 0, 'fixture', 'fixture', SYSUTCDATETIME());
 DECLARE @BU2 BIGINT = SCOPE_IDENTITY();
-INSERT dbo.BUILDING (UPRID, DeleteInd, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@BU2, 0, 'fixture', 'fixture', SYSUTCDATETIME());
+INSERT dbo.BUILDING (UPRID, DeletedInd, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@BU2, 0, 'fixture', 'fixture', SYSUTCDATETIME());
 DECLARE @B2 BIGINT = SCOPE_IDENTITY();
-INSERT dbo.UPR (EntityTypeID, ParentUPRID, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@Unit, @BU1, 'fixture', 'fixture', SYSUTCDATETIME());
-INSERT dbo.UNIT (UPRID, UnitNumber, DeleteInd, CreationUserID, LastUpdateUserID) VALUES (SCOPE_IDENTITY(), 'VALID_BUILDING', 0, 'fixture', 'fixture');
-INSERT dbo.UPR (EntityTypeID, ParentUPRID, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@Unit, @Root1, 'fixture', 'fixture', SYSUTCDATETIME());
-INSERT dbo.UNIT (UPRID, UnitNumber, DeleteInd, CreationUserID, LastUpdateUserID) VALUES (SCOPE_IDENTITY(), 'DIRECT_CONDO', 0, 'fixture', 'fixture');
-INSERT dbo.UPR (EntityTypeID, ParentUPRID, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@Unit, @BU1, 'fixture', 'fixture', SYSUTCDATETIME());
-INSERT dbo.UNIT (UPRID, UnitNumber, DeleteInd, CreationUserID, LastUpdateUserID) VALUES (SCOPE_IDENTITY(), 'SECOND_BUILDING_UNIT', 0, 'fixture', 'fixture');
-INSERT dbo.UPR (EntityTypeID, ParentUPRID, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@Unit, @Root1, 'fixture', 'fixture', SYSUTCDATETIME());
-INSERT dbo.UNIT (UPRID, UnitNumber, DeleteInd, CreationUserID, LastUpdateUserID) VALUES (SCOPE_IDENTITY(), 'WRONG_CONDO', 0, 'fixture', 'fixture');
+INSERT dbo.UPR (EntityTypeID, ParentUPRID, DeletedInd, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@Unit, @BU1, 0, 'fixture', 'fixture', SYSUTCDATETIME());
+INSERT dbo.UNIT (UPRID, UnitNumber, DeletedInd, CreationUserID, LastUpdateUserID) VALUES (SCOPE_IDENTITY(), 'VALID_BUILDING', 0, 'fixture', 'fixture');
+INSERT dbo.UPR (EntityTypeID, ParentUPRID, DeletedInd, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@Unit, @Root1, 0, 'fixture', 'fixture', SYSUTCDATETIME());
+INSERT dbo.UNIT (UPRID, UnitNumber, DeletedInd, CreationUserID, LastUpdateUserID) VALUES (SCOPE_IDENTITY(), 'DIRECT_CONDO', 0, 'fixture', 'fixture');
+INSERT dbo.UPR (EntityTypeID, ParentUPRID, DeletedInd, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@Unit, @BU1, 0, 'fixture', 'fixture', SYSUTCDATETIME());
+INSERT dbo.UNIT (UPRID, UnitNumber, DeletedInd, CreationUserID, LastUpdateUserID) VALUES (SCOPE_IDENTITY(), 'SECOND_BUILDING_UNIT', 0, 'fixture', 'fixture');
+INSERT dbo.UPR (EntityTypeID, ParentUPRID, DeletedInd, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@Unit, @Root1, 0, 'fixture', 'fixture', SYSUTCDATETIME());
+INSERT dbo.UNIT (UPRID, UnitNumber, DeletedInd, CreationUserID, LastUpdateUserID) VALUES (SCOPE_IDENTITY(), 'WRONG_CONDO', 0, 'fixture', 'fixture');
 ;WITH Closure AS (
     SELECT AncestorUPRID = UPRID, DescendantUPRID = UPRID, Distance = 0 FROM dbo.UPR
     UNION ALL

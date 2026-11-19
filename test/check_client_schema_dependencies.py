@@ -121,17 +121,19 @@ for payload_column in ('NewValue', 'NewValues'):
         ATTACH ':memory:' AS dbo;
         CREATE TABLE dbo.AuditLog(AuditID INTEGER PRIMARY KEY,UPRID BIGINT NULL,
             EntityNameID INT NOT NULL,EntityRecordID BIGINT NOT NULL,
-            OperationType VARCHAR(20) NOT NULL,ChangedBy VARCHAR(100) NOT NULL,
-            ChangeDate TEXT NOT NULL,OldValues VARCHAR NULL,{payload_column} VARCHAR NULL);
+            OperationType VARCHAR(20) NOT NULL,UpdatedBy VARCHAR(100) NOT NULL,
+            LastUpdated TEXT NOT NULL,OldValues VARCHAR NULL,{payload_column} VARCHAR NULL,
+            CreationUserID TEXT NOT NULL,CreationDate TEXT NOT NULL,
+            LastUpdateUserID TEXT NOT NULL,LastUpdateDate TEXT NOT NULL);
         CREATE TABLE dbo.REF_ENTITY_IDENTIFICATION(EntityID INT,EntityName TEXT);
         INSERT INTO dbo.REF_ENTITY_IDENTIFICATION VALUES(1,'UPR_HIER_LOAD');
         CREATE TABLE PersistedAuditIDs(AuditID INT); CREATE TABLE AuditEntityMap(EntityID INT,EntityName TEXT);
         CREATE TABLE RunAuditRows(AuditID INT,RunID TEXT,EntityName TEXT,EntityKey TEXT,
-            OperationType TEXT,ChangeDate TEXT,ChangedBy TEXT,OldValues TEXT,NewValues TEXT);
+            OperationType TEXT,LastUpdated TEXT,UpdatedBy TEXT,OldValues TEXT,NewValues TEXT);
     ''')
     payload = 'RunID = test-run\nClosure rows = 3'
     native.execute(insert.split(';')[0].replace("N'", "'"),
-        {'entity':1,'who':'Ade','at':'2026-10-05 12:00:00','payload':payload})
+        {'entity':1,'who':'Ade','at':'2026-10-05 12:00:00','utc':'2026-10-05 16:00:00','payload':payload})
     assert native.execute(f'SELECT {payload_column},EntityRecordID FROM dbo.AuditLog').fetchone()==(payload,0)
     native.execute("INSERT INTO PersistedAuditIDs VALUES(1)")
     native.execute("INSERT INTO AuditEntityMap VALUES(1,'UPR_HIER_LOAD')")
@@ -225,9 +227,9 @@ preflight = source[source.index('BEGIN TRANSACTION;\n/* Create the batch-summary
 assert 'IF @ResolvedAuditEntityID IS NULL' in preflight
 assert 'WHERE EntityID=@ResolvedAuditEntityID)<>1' in preflight
 assert source.index('IF @SummaryEntityID IS NULL',source.index("PRINT N'Step 14:")) < source.index('DECLARE @AuditInsertSql')
-nullable.execute("CREATE TABLE dbo.AuditLog(AuditID INTEGER PRIMARY KEY,EntityNameID INT NOT NULL,EntityRecordID BIGINT NOT NULL,OperationType TEXT NOT NULL,ChangedBy TEXT NOT NULL,ChangeDate TEXT NOT NULL,NewValue TEXT)")
+nullable.execute("CREATE TABLE dbo.AuditLog(AuditID INTEGER PRIMARY KEY,EntityNameID INT NOT NULL,EntityRecordID BIGINT NOT NULL,OperationType TEXT NOT NULL,UpdatedBy TEXT NOT NULL,LastUpdated TEXT NOT NULL,NewValue TEXT,CreationUserID TEXT NOT NULL,CreationDate TEXT NOT NULL,LastUpdateUserID TEXT NOT NULL,LastUpdateDate TEXT NOT NULL)")
 audit_statement=render_audit('AuditInsertSql','NewValue').split(';')[0].replace("N'","'")
-parameters={'entity':None,'who':'Ade','at':'2026-10-06','payload':'{}'}
+parameters={'entity':None,'who':'Ade','at':'2026-10-06','utc':'2026-10-06','payload':'{}'}
 try:
     nullable.execute(audit_statement,parameters)
     raise AssertionError('Old NULL key unexpectedly accepted by AuditLog')
@@ -248,8 +250,10 @@ catalog=sqlite3.connect(':memory:')
 catalog.execute('CREATE TABLE Columns(name TEXT,is_nullable INT,is_identity INT,is_computed INT,default_object_id INT,system_type_id INT,generated_always_type INT)')
 rows=[('AuditID',0,1,0,0,56,0),('UPRID',1,0,0,0,127,0),
       ('EntityNameID',0,0,0,0,56,0),('EntityRecordID',0,0,0,0,127,0),
-      ('OperationType',0,0,0,0,167,0),('ChangedBy',0,0,0,0,167,0),
-      ('ChangeDate',0,0,0,1,42,0),('OldValues',1,0,0,0,167,0),('NewValue',1,0,0,0,167,0)]
+      ('OperationType',0,0,0,0,167,0),('UpdatedBy',0,0,0,0,167,0),
+      ('LastUpdated',0,0,0,1,42,0),('OldValues',1,0,0,0,167,0),('NewValue',1,0,0,0,167,0),
+      ('CreationUserID',0,0,0,0,167,0),('CreationDate',0,0,0,1,42,0),
+      ('LastUpdateUserID',0,0,0,0,167,0),('LastUpdateDate',0,0,0,1,42,0)]
 def audit_issues(extra=(),replacement=None):
     catalog.execute('DELETE FROM Columns')
     data=rows.copy()

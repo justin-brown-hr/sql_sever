@@ -1,3 +1,25 @@
+# Current — November 19 R15 layout 11/17/2026 + valid records in Review
+
+Client (temp/): UPR_Layout_11_17_2026.txt (now ddl/03; DeletedInd everywhere again, REF_CONTACTTYPE
+still DeleteInd; metadata on REF_*, UPR, UPR_ADDRESS, UPR_CONTACT, CONTACT, ADU, AuditLog; AuditLog and
+UPRSTATUSHISTORY ChangedBy/ChangeDate -> UpdatedBy/LastUpdated; IX_AuditLog_UPRID and
+IX_UPRSTATUSHISTORY_UPRID added). As sent its REF_ENTITYTYPE/CONTACTTYPE/ROLETYPE/ADDRESSROLE seed
+INSERTs fail (Msg 515, NOT NULL CreationUserID); project copy fixes only those INSERTs.
+Valid_Records_in_Review.docx: SDAT samples (CondoUnit NULL) rejected. Real cause (reproduced with R14,
+test/client_review_samples.sql): SDAT account exists in MA but no MA row of the account has the same
+street -> NO_ADDRESS_MATCH. R15 SDAT_MA_MATCH tiers: 3 STREET_SPELLING (fn_UPR_LooseStreetKey: base
+number + name w/o spaces/punct/direction), 4 ACCOUNT_ONLY (account has one MA group), else OWN_PROPERTY;
+tiers 3-4 consolidate to the MA address (SourceFullAddress kept). Only multi-group ties -> review.
+Also: source text 'NULL' = no value (fn_UPR_SourceText via derived source tables), MA StreetSuffix part
+of street number (822-H; loader adds the column if absent), @SdatOnlyWithoutCondoUnit switch (default
+CONDO, client to confirm), review detail + match-method grids. Tools: tools/sync_schema_check_core.py
+(checker CORE from DDL) then regen_layout_preflight.py and regen_audit_images.py.
+Tests: check_review_samples.py (new, 5 PASS), check_cnumber_buildings.py 12 PASS (R10 identical on seed).
+Test env: scratchpad was wiped; mssql/server:2022-latest (16.0.4325) aborts under udocker -> use
+2022-CU27-ubuntu-22.04.
+
+---
+
 # Current — November 11 R14 DeleteInd, listing speed, search by address
 
 Client (temp/): ran R13 OK after renaming DeletedInd->DeleteInd in their layout and their R13

@@ -67,7 +67,7 @@ INSERT @Required VALUES
     (N'CONTACT',N'ContactID'),(N'CONTACT',N'FirstName'),(N'CONTACT',N'MiddleName'),(N'CONTACT',N'LastName'),(N'CONTACT',N'OrganizationName'),(N'CONTACT',N'Phone'),(N'CONTACT',N'Email'),(N'CONTACT',N'StatusCode'),
     (N'REF_ROLETYPE',N'RoleTypeID'),(N'REF_ROLETYPE',N'RoleTypeCode'),(N'REF_ROLETYPE',N'Description'),
     (N'EXTERNAL_IDENTIFIER_XREF',N'UPRID'),(N'EXTERNAL_IDENTIFIER_XREF',N'SourceSystem'),(N'EXTERNAL_IDENTIFIER_XREF',N'IdentifierType'),(N'EXTERNAL_IDENTIFIER_XREF',N'IdentifierValue'),(N'EXTERNAL_IDENTIFIER_XREF',N'CreationDate'),
-    (N'UPRSTATUSHISTORY',N'UPRID'),(N'UPRSTATUSHISTORY',N'UPRStatusHistoryID'),(N'UPRSTATUSHISTORY',N'OldStatusCode'),(N'UPRSTATUSHISTORY',N'NewStatusCode'),(N'UPRSTATUSHISTORY',N'ChangeReason'),(N'UPRSTATUSHISTORY',N'ChangeSource'),(N'UPRSTATUSHISTORY',N'ChangedBy'),(N'UPRSTATUSHISTORY',N'ChangeDate');
+    (N'UPRSTATUSHISTORY',N'UPRID'),(N'UPRSTATUSHISTORY',N'UPRStatusHistoryID'),(N'UPRSTATUSHISTORY',N'OldStatusCode'),(N'UPRSTATUSHISTORY',N'NewStatusCode'),(N'UPRSTATUSHISTORY',N'ChangeReason'),(N'UPRSTATUSHISTORY',N'ChangeSource'),(N'UPRSTATUSHISTORY',N'UpdatedBy'),(N'UPRSTATUSHISTORY',N'LastUpdated');
 IF EXISTS(SELECT 1 FROM @Required r WHERE COL_LENGTH(N'dbo.'+QUOTENAME(r.TableName),r.ColumnName) IS NULL)
 BEGIN
     SELECT N'Missing required demo column' AS Finding,r.TableName,r.ColumnName
@@ -338,9 +338,9 @@ SELECT N''8. History and status'' AS Section,@HistoryCount AS AvailableStatusEve
     CASE WHEN @HistoryCount>@MaxHistoryRows THEN N''Most recent events shown; history exceeds display limit''
          ELSE N''All loaded status events shown; created/updated dates and current UPR statuses are in the hierarchy grid'' END AS Coverage;
 SELECT TOP(@MaxHistoryRows) N''8. Status history'' AS Section,h.UPRID,h.UPRStatusHistoryID,
-    h.OldStatusCode,h.NewStatusCode,h.ChangeReason,h.ChangeSource,h.ChangedBy,h.ChangeDate
+    h.OldStatusCode,h.NewStatusCode,h.ChangeReason,h.ChangeSource,h.UpdatedBy,h.LastUpdated
 FROM dbo.UPRSTATUSHISTORY h JOIN #Context c ON c.UPRID=h.UPRID
-ORDER BY h.ChangeDate DESC,h.UPRStatusHistoryID DESC;
+ORDER BY h.LastUpdated DESC,h.UPRStatusHistoryID DESC;
 ';
 EXEC sys.sp_executesql @DemoSql,
  N'@Mode VARCHAR(12),@SearchBy VARCHAR(24),@SearchValue NVARCHAR(300),@SelectedUPRID BIGINT,

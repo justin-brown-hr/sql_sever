@@ -1,6 +1,7 @@
-> Current: November 11 R14 - [DeleteInd, listing speed, search by address](CLIENT_MAIN_LOADER_2026-11-11.md).
-> Send `UPR_Main_Loader_2026-11-11_R14.zip` (loader, listing, search by address, Property 360 demo,
-> schema check). Builds on R13 [data structure changes and index review](CLIENT_MAIN_LOADER_2026-11-06.md).
+> Current: November 19 R15 - [layout of 11/17/2026, valid records sent to Review](CLIENT_MAIN_LOADER_2026-11-19.md).
+> Send `UPR_Main_Loader_2026-11-19_R15.zip` (loader, fixed layout script, listing, search by address,
+> Property 360 demo, schema check). Earlier: R14 [listing speed, search by address](CLIENT_MAIN_LOADER_2026-11-11.md),
+> R13 [data structure changes and index review](CLIENT_MAIN_LOADER_2026-11-06.md).
 > Includes R11 [C Number rule](CLIENT_MAIN_LOADER_2026-11-02.md) and R12 [layout check](CLIENT_MAIN_LOADER_2026-11-03.md).
 > Earlier delivery notes: git history and `SESSION_HANDOVER.md`.
 > The sections below describe the original September 2026 package.
@@ -23,7 +24,7 @@
 | 2 | **Load script** (MA + SDAT to full hierarchy) | `scripts/load_upr_master.sql` |
 | 3 | **Search procedure** | `scripts/search_upr_master.sql` -> `dbo.usp_UPR_Search` |
 | 4 | **Validation report** (PASS/FAIL checks, works with real data) | `test/run_test_and_results.sql` |
-| 5 | **Current client run guide** | `CLIENT_MAIN_LOADER_2026-11-11.md` |
+| 5 | **Current client run guide** | `CLIENT_MAIN_LOADER_2026-11-19.md` |
 | 6 | **README** (structure, run steps, assumptions) | `README.md` |
 | 7 | **Persistent row auditing** (install before loading) | `scripts/install_upr_audit.sql` |
 | 8 | **Account diagnostics** | `scripts/diagnose_upr_accounts.sql` |

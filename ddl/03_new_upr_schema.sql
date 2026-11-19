@@ -1,8 +1,10 @@
-/* Client record layout received 2026-11-06 (DataStructureChanges_Layout_11_6_2026.txt).
-   Project copy: USE database name and the REF_ENTITY_IDENTIFICATION drop-name typo fixed.
-   Earlier project DDL: git history (commit 1e77e58). */
+/* Client record layout received 2026-11-17 (UPR_Layout_11_17_2026.txt).
+   Project copy: USE database name; the seed INSERTs for REF_ENTITYTYPE,
+   REF_CONTACTTYPE, REF_ROLETYPE and REF_ADDRESSROLE also supply the new NOT NULL
+   CreationUserID / LastUpdateUserID columns (as sent they fail with Msg 515 and
+   leave those tables empty). Earlier layouts: git history. */
 /*
-===============================================================================
+================================================================================
  DHCA UPR - Physical SQL Server DDL
    Baseline: Revised UPR relational model
 
@@ -72,6 +74,11 @@ CREATE TABLE dbo.REF_ENTITYTYPE
     Description  VARCHAR(50) NOT NULL,
     ActiveInd    BIT NOT NULL CONSTRAINT DF_REF_ENTITYTYPE_ActiveInd DEFAULT (1),
     CreationDate  DATETIME2(0) NOT NULL CONSTRAINT DF_REF_ENTITYTYPE_CreationDate DEFAULT (SYSUTCDATETIME()),
+    DeletedInd           BIT NOT NULL CONSTRAINT DF_REF_ENTITYTYPE_DeletedInd DEFAULT (0),
+    CreationUserID       VARCHAR(128) NOT NULL,
+    LastUpdateUserID    VARCHAR(128) NOT NULL,
+    LastUpdateDate      DATETIME2(0) NOT NULL CONSTRAINT DF_REF_ENTITYTYPE_LastUpdatedDate DEFAULT (SYSDATETIME()),
+
     CONSTRAINT PK_REF_ENTITYTYPE PRIMARY KEY CLUSTERED (EntityTypeID),
     CONSTRAINT UQ_REF_ENTITYTYPE_Description UNIQUE (Description)
 );
@@ -87,7 +94,7 @@ CREATE TABLE dbo.REF_PROPERTYTYPE
     PropertyTypeName  VARCHAR(128) NOT NULL,
     AllowsBuildings   BIT NOT NULL CONSTRAINT DF_REF_PROPERTYTYPE_AllowsBuildings DEFAULT (0),
     AllowsUnits       BIT NOT NULL CONSTRAINT DF_REF_PROPERTYTYPE_AllowsUnits DEFAULT (0),
-    DeleteInd        BIT NOT NULL CONSTRAINT DF_REF_PROPERTYTYPE_DeletedInd DEFAULT (0),
+    DeletedInd        BIT NOT NULL CONSTRAINT DF_REF_PROPERTYTYPE_DeletedInd DEFAULT (0),
     CreationUserID    VARCHAR(128) NOT NULL,
     CreationDate      DATETIME2(0) NOT NULL CONSTRAINT DF_REF_PROPERTYTYPE_CreationDate DEFAULT (SYSDATETIME()),
     LastUpdateUserID VARCHAR(128) NOT NULL,
@@ -96,7 +103,7 @@ CREATE TABLE dbo.REF_PROPERTYTYPE
     CONSTRAINT UQ_REF_PROPERTYTYPE_Code UNIQUE (PropertyTypeCode),
     CONSTRAINT CK_REF_PROPERTYTYPE_AllowsBuildings CHECK (AllowsBuildings IN (0,1)),
     CONSTRAINT CK_REF_PROPERTYTYPE_AllowsUnits CHECK (AllowsUnits IN (0,1)),
-    CONSTRAINT CK_REF_PROPERTYTYPE_DeletedInd CHECK (DeleteInd IN (0,1)),
+    CONSTRAINT CK_REF_PROPERTYTYPE_DeleteInd CHECK (DeletedInd IN (0,1)),
     CONSTRAINT CK_REF_PROPERTYTYPE_Dates CHECK (LastUpdateDate >= CreationDate)
 );
 GO
@@ -109,14 +116,14 @@ CREATE TABLE dbo.REF_PROPERTY_STATUSCODE
     PropertyStatusCodeID INT IDENTITY(1,1) NOT NULL,
     StatusCode           VARCHAR(30) NOT NULL,
     Description          VARCHAR(128) NOT NULL,
-    DeleteInd           BIT NOT NULL CONSTRAINT DF_REF_Property_STATUSCODE_DeletedInd DEFAULT (0),
+    DeletedInd           BIT NOT NULL CONSTRAINT DF_REF_Property_STATUSCODE_DeletedInd DEFAULT (0),
     CreationUserID       VARCHAR(128) NOT NULL,
     CreationDate         DATETIME2(0) NOT NULL CONSTRAINT DF_REF_Property_STATUSCODE_CreationDate DEFAULT (SYSDATETIME()),
     LastUpdateUserID    VARCHAR(128) NOT NULL,
     LastUpdateDate      DATETIME2(0) NOT NULL CONSTRAINT DF_REF_Property_STATUSCODE_LastUpdatedDate DEFAULT (SYSDATETIME()),
     CONSTRAINT PK_REF_PROPERTY_STATUSCODE PRIMARY KEY CLUSTERED (PropertyStatusCodeID),
     CONSTRAINT UQ_REF_Property_STATUSCODE_StatusCode UNIQUE (StatusCode),
-    CONSTRAINT CK_REF_Property_STATUSCODE_DeletedInd CHECK (DeleteInd IN (0,1)),
+    CONSTRAINT CK_REF_Property_STATUSCODE_DeleteInd CHECK (DeletedInd IN (0,1)),
     CONSTRAINT CK_REF_Property_STATUSCODE_Dates CHECK (LastUpdateDate >= CreationDate)
 );
 GO
@@ -129,6 +136,11 @@ CREATE TABLE dbo.REF_CONTACTTYPE
     ContactTypeID   INT IDENTITY(1,1) NOT NULL,
     ContactTypeCode VARCHAR(30) NOT NULL,
     Description     VARCHAR(100) NOT NULL,
+    DeleteInd           BIT NOT NULL CONSTRAINT DF_REF_CONTACTTYPE_DeleteInd DEFAULT (0),
+    CreationUserID       VARCHAR(128) NOT NULL,
+    CreationDate         DATETIME2(0) NOT NULL CONSTRAINT DF_REF_CONTACTTYPE_CreationDate DEFAULT (SYSDATETIME()),
+    LastUpdateUserID    VARCHAR(128) NOT NULL,
+    LastUpdateDate      DATETIME2(0) NOT NULL CONSTRAINT DF_REF_CONTACTTYPE_LastUpdatedDate DEFAULT (SYSDATETIME()),
     ActiveInd       BIT NOT NULL CONSTRAINT DF_REF_CONTACTTYPE_ActiveInd DEFAULT (1),
     CONSTRAINT PK_REF_CONTACTTYPE PRIMARY KEY CLUSTERED (ContactTypeID),
     CONSTRAINT UQ_REF_CONTACTTYPE_Code UNIQUE (ContactTypeCode)
@@ -143,6 +155,11 @@ CREATE TABLE dbo.REF_ROLETYPE
     RoleTypeID   INT IDENTITY(1,1) NOT NULL,
     RoleTypeCode VARCHAR(50) NOT NULL,
     Description  VARCHAR(100) NOT NULL,
+    DeletedInd           BIT NOT NULL CONSTRAINT DF_REF_ROLETYPE_DeletedInd DEFAULT (0),
+    CreationUserID       VARCHAR(128) NOT NULL,
+    CreationDate         DATETIME2(0) NOT NULL CONSTRAINT DF_REF_ROLETYPE_CreationDate DEFAULT (SYSDATETIME()),
+    LastUpdateUserID    VARCHAR(128) NOT NULL,
+    LastUpdateDate      DATETIME2(0) NOT NULL CONSTRAINT DF_REF_ROLETYPE_LastUpdatedDate DEFAULT (SYSDATETIME()),
     ActiveInd    BIT NOT NULL CONSTRAINT DF_REF_ROLETYPE_ActiveInd DEFAULT (1),
     CONSTRAINT PK_REF_ROLETYPE PRIMARY KEY CLUSTERED (RoleTypeID),
     CONSTRAINT UQ_REF_ROLETYPE_Code UNIQUE (RoleTypeCode)
@@ -157,6 +174,11 @@ CREATE TABLE dbo.REF_ADDRESSROLE
     AddressRoleID   INT IDENTITY(1,1) NOT NULL,
     AddressRoleCode VARCHAR(30) NOT NULL,
     Description     VARCHAR(100) NOT NULL,
+    DeletedInd           BIT NOT NULL CONSTRAINT DF_REF_ADDRESSROLE_DeletedInd DEFAULT (0),
+    CreationUserID       VARCHAR(128) NOT NULL,
+    CreationDate         DATETIME2(0) NOT NULL CONSTRAINT DF_REF_ADDRESSROLE_CreationDate DEFAULT (SYSDATETIME()),
+    LastUpdateUserID    VARCHAR(128) NOT NULL,
+    LastUpdateDate      DATETIME2(0) NOT NULL CONSTRAINT DF_REF_ADDRESSROLE_LastUpdatedDate DEFAULT (SYSDATETIME()),
     ActiveInd       BIT NOT NULL CONSTRAINT DF_REF_ADDRESSROLE_ActiveInd DEFAULT (1),
     CONSTRAINT PK_REF_ADDRESSROLE PRIMARY KEY CLUSTERED (AddressRoleID),
     CONSTRAINT UQ_REF_ADDRESSROLE_Code UNIQUE (AddressRoleCode)
@@ -173,7 +195,7 @@ CREATE TABLE dbo.REF_UNITTYPECODE
     UnitTypeName      VARCHAR(100) NOT NULL,
     Description       VARCHAR(128) NULL,
     ActiveInd          BIT NOT NULL CONSTRAINT DF_REF_UNITTYPECODE_ActiveInd DEFAULT (1),
-    DeleteInd        BIT NOT NULL CONSTRAINT DF_REF_UNITTYPECODE_DeletedInd DEFAULT (0),
+    DeletedInd        BIT NOT NULL CONSTRAINT DF_REF_UNITTYPECODE_DeletedInd DEFAULT (0),
     CreationUserID    VARCHAR(128) NOT NULL,
     CreationDate      DATETIME2(0) NOT NULL CONSTRAINT DF_REF_UNITTYPECODE_CreationDate DEFAULT (SYSDATETIME()),
     LastUpdateUserID VARCHAR(128) NOT NULL,
@@ -181,7 +203,7 @@ CREATE TABLE dbo.REF_UNITTYPECODE
     CONSTRAINT PK_REF_UNITTYPECODE PRIMARY KEY CLUSTERED (UnitTypeCodeID),
     CONSTRAINT UQ_REF_UNITTYPECODE_Code UNIQUE (UnitTypeCode),
     CONSTRAINT UQ_REF_UNITTYPECODE_Name UNIQUE (UnitTypeName),
-    CONSTRAINT CK_REF_UNITTYPECODE_DeletedInd CHECK (DeleteInd IN (0,1)),
+    CONSTRAINT CK_REF_UNITTYPECODE_DeleteInd CHECK (DeletedInd IN (0,1)),
     CONSTRAINT CK_REF_UNITTYPECODE_Dates CHECK (LastUpdateDate >= CreationDate)
 );
 GO
@@ -198,6 +220,7 @@ CREATE TABLE dbo.UPR
     StatusCode    VARCHAR(20) NOT NULL CONSTRAINT DF_UPR_StatusCode DEFAULT ('ACTIVE'),
     CreationDate  DATETIME2(0) NOT NULL CONSTRAINT DF_UPR_CreationDate DEFAULT (SYSUTCDATETIME()),
     --CreatedBy     VARCHAR(100) NOT NULL CONSTRAINT DF_UPR_CreatedBy DEFAULT (SUSER_SNAME()),
+    DeletedInd    BIT NOT NULL,
     CreationUserID VARCHAR (128) NOT NULL,
     LastUpdateUserID  VARCHAR(128) NOT NULL,
     LastUpdateDate    DATETIME2(0) NOT NULL,
@@ -211,7 +234,7 @@ CREATE TABLE dbo.UPR
 GO
 
 CREATE INDEX IX_UPR_ParentUPRID ON dbo.UPR (ParentUPRID);
-CREATE INDEX IX_UPR_EntityTypeID ON dbo.UPR (EntityTypeID);
+--CREATE INDEX IX_UPR_EntityTypeID ON dbo.UPR (EntityTypeID);
 CREATE INDEX IX_UPR_AccountNumber ON dbo.UPR (AccountNumber) WHERE AccountNumber IS NOT NULL;
 CREATE INDEX IX_UPR_Parent_EntityType ON dbo.UPR (ParentUPRID, EntityTypeID)
     INCLUDE (UPRID, AccountNumber, StatusCode);
@@ -234,7 +257,7 @@ CREATE TABLE dbo.ADDRESS
     NormalizedAddress VARCHAR(300) NULL,
     YCoordinate       INT NULL,
     XCoordinate       INT NULL,
-    DeleteInd    BIT NOT NULL,
+    DeletedInd    BIT NOT NULL,
     CreationDate       DATETIME2(0) NOT NULL CONSTRAINT DF_ADDRESS_CreationDate DEFAULT (SYSUTCDATETIME()),
     CreationUserID    VARCHAR(128) NOT NULL,
     LastUpdateUserID  VARCHAR(128) NOT NULL,
@@ -266,7 +289,7 @@ CREATE TABLE dbo.COMPLEX
     StatusCode      VARCHAR(20) NOT NULL CONSTRAINT DF_COMPLEX_StatusCode DEFAULT ('ACTIVE'),
     CreationDate     DATETIME2(0) NOT NULL CONSTRAINT DF_COMPLEX_CreationDate DEFAULT (SYSUTCDATETIME()),
     --CreatedBy       VARCHAR(100) NOT NULL CONSTRAINT DF_COMPLEX_CreatedBy DEFAULT (SUSER_SNAME()),
-    DeleteInd   BIT NOT NULL,
+    DeletedInd   BIT NOT NULL,
     CreationUserID VARCHAR (128) NOT NULL,
     LastUpdateUserID  VARCHAR(128) NOT NULL,
     LastUpdateDate    DATETIME2(0) NOT NULL,
@@ -291,7 +314,7 @@ CREATE TABLE dbo.PROPERTY
     Parcel         VARCHAR(20) NULL,
     StatusCode     VARCHAR(20) NOT NULL CONSTRAINT DF_PROPERTY_StatusCode DEFAULT ('ACTIVE'),
     CreationDate    DATETIME2(0) NOT NULL CONSTRAINT DF_PROPERTY_CreationDate DEFAULT (SYSUTCDATETIME()),
-    DeleteInd   BIT NOT NULL,
+    DeletedInd   BIT NOT NULL,
     CreationUserID VARCHAR (128) NOT NULL,
     LastUpdateUserID  VARCHAR(128) NOT NULL,
     LastUpdateDate    DATETIME2(0) NOT NULL,
@@ -316,7 +339,7 @@ CREATE TABLE dbo.CONDO
     OwnerName   VARCHAR(200) NULL,
     StatusCode  VARCHAR(20) NOT NULL CONSTRAINT DF_CONDO_StatusCode DEFAULT ('ACTIVE'),
     CreationDate DATETIME2(0) NOT NULL CONSTRAINT DF_CONDO_CreationDate DEFAULT (SYSUTCDATETIME()),
-    DeleteInd   BIT NOT NULL,
+    DeletedInd   BIT NOT NULL,
     CreationUserID VARCHAR (128) NOT NULL,
     LastUpdateUserID  VARCHAR(128) NOT NULL,
     LastUpdateDate    DATETIME2(0) NOT NULL,
@@ -337,7 +360,7 @@ CREATE TABLE dbo.BUILDING
     BuildingName VARCHAR(200) NULL,
     YearBuilt    SMALLINT NULL,
     StatusCode   VARCHAR(20) NOT NULL CONSTRAINT DF_BUILDING_StatusCode DEFAULT ('ACTIVE'),
-    DeleteInd   BIT NOT NULL,
+    DeletedInd   BIT NOT NULL,
     CreationUserID VARCHAR (128) NOT NULL,
     CreationDate  DATETIME2(0) NOT NULL CONSTRAINT DF_BUILDING_CreationDate DEFAULT (SYSUTCDATETIME()),
     LastUpdateUserID  VARCHAR(128) NOT NULL,
@@ -366,7 +389,7 @@ CREATE TABLE dbo.UNIT
     BedroomCount     INT NULL,
     BathroomCount    DECIMAL(4,1) NULL,
     HasLegalIdentity BIT NULL,
-    DeleteInd        BIT NOT NULL,
+    DeletedInd        BIT NOT NULL,
     StatusCode       VARCHAR(20) NOT NULL CONSTRAINT DF_UNIT_StatusCode DEFAULT ('ACTIVE'),
     CreationDate     DATETIME2(0) NOT NULL CONSTRAINT DF_UNIT_CreationDate DEFAULT (SYSUTCDATETIME()),
     CreationUserID   VARCHAR(128) NOT NULL,
@@ -384,7 +407,7 @@ GO
 
 --CREATE INDEX IX_UNIT_BuildingID ON dbo.UNIT (BuildingID);
 --CREATE INDEX IX_UNIT_Building_UnitNumber ON dbo.UNIT (BuildingID, UnitNumber);
-CREATE INDEX IX_UNIT_Building_UnitNumber ON dbo.UNIT (UnitNumber);
+CREATE INDEX IX_UNIT_UnitNumber ON dbo.UNIT (UnitNumber);
 GO
 
 /* ============================================================================
@@ -397,7 +420,10 @@ CREATE TABLE dbo.ADU
     UnitNumber  VARCHAR(50) NULL,
     StatusCode  VARCHAR(20) NOT NULL CONSTRAINT DF_ADU_StatusCode DEFAULT ('ACTIVE'),
     CreationDate DATETIME2(0) NOT NULL CONSTRAINT DF_ADU_CreationDate DEFAULT (SYSUTCDATETIME()),
-    LastUpdateDate   DATETIME2(0) NOT NULL,
+    DeletedInd           BIT NOT NULL CONSTRAINT DF_ADU_DeletedInd DEFAULT (0),
+    CreationUserID       VARCHAR(128) NOT NULL,
+    LastUpdateUserID    VARCHAR(128) NOT NULL,
+    LastUpdateDate      DATETIME2(0) NOT NULL CONSTRAINT DF_ADU_LastUpdatedDate DEFAULT (SYSDATETIME()),
 
     CONSTRAINT PK_ADU PRIMARY KEY CLUSTERED (ADUID),
     CONSTRAINT UQ_ADU_UPRID UNIQUE (UPRID),
@@ -418,6 +444,12 @@ CREATE TABLE dbo.UPR_ADDRESS
     PrimaryInd     BIT NOT NULL CONSTRAINT DF_UPR_ADDRESS_PrimaryInd DEFAULT (0),
     EffectiveDate DATE NULL,
     EndDate       DATE NULL,
+    DeletedInd           BIT NOT NULL CONSTRAINT DF_UPR_ADDRESS_DeletedInd DEFAULT (0),
+    CreationUserID       VARCHAR(128) NOT NULL,
+    CreationDate         DATETIME2(0) NOT NULL CONSTRAINT DF_UPR_ADDRESS_CreationDate DEFAULT (SYSDATETIME()),
+    LastUpdateUserID    VARCHAR(128) NOT NULL,
+    LastUpdateDate      DATETIME2(0) NOT NULL CONSTRAINT DF_UPR_ADDRESS_LastUpdatedDate DEFAULT (SYSDATETIME()),
+
     CONSTRAINT PK_UPR_ADDRESS PRIMARY KEY CLUSTERED (UPRAddressID),
     CONSTRAINT FK_UPR_ADDRESS_UPR FOREIGN KEY (UPRID) REFERENCES dbo.UPR (UPRID),
     CONSTRAINT FK_UPR_ADDRESS_ADDRESS FOREIGN KEY (AddressID) REFERENCES dbo.ADDRESS (AddressID),
@@ -481,8 +513,9 @@ CREATE TABLE dbo.CONTACT
     State            CHAR(2) NULL,
     ZipCode          VARCHAR(10) NULL,
     StatusCode       VARCHAR(20) NOT NULL CONSTRAINT DF_CONTACT_StatusCode DEFAULT ('ACTIVE'),
-    DeleteInd BIT NOT NULL,
+    DeletedInd BIT NOT NULL,
     CreationDate     DATETIME2(0) NOT NULL CONSTRAINT DF_CONTACT_CreationDate DEFAULT (SYSUTCDATETIME()),
+    CreationUserID   VARCHAR(128) NOT NULL,
     LastUpdateDate       DATETIME2(0) NULL,
     LastUpdateUserID   VARCHAR(128) NOT NULL,
     CONSTRAINT PK_CONTACT PRIMARY KEY CLUSTERED (ContactID),
@@ -513,6 +546,12 @@ CREATE TABLE dbo.UPR_CONTACT
     RoleTypeID    INT NOT NULL,
     EffectiveDate DATE NULL,
     EndDate       DATE NULL,
+    DeletedInd           BIT NOT NULL CONSTRAINT DF_UPR_CONTACT_DeletedInd DEFAULT (0),
+    CreationUserID       VARCHAR(128) NOT NULL,
+    CreationDate         DATETIME2(0) NOT NULL CONSTRAINT DF_UPR_CONTACT_CreationDate DEFAULT (SYSDATETIME()),
+    LastUpdateUserID    VARCHAR(128) NOT NULL,
+    LastUpdateDate      DATETIME2(0) NOT NULL CONSTRAINT DF_UPR_CONTACT_LastUpdatedDate DEFAULT (SYSDATETIME()),
+
     CONSTRAINT PK_UPR_CONTACT PRIMARY KEY CLUSTERED (UPRContactID),
     CONSTRAINT FK_UPR_CONTACT_UPR FOREIGN KEY (UPRID) REFERENCES dbo.UPR (UPRID),
     CONSTRAINT FK_UPR_CONTACT_CONTACT FOREIGN KEY (ContactID) REFERENCES dbo.CONTACT (ContactID),
@@ -559,19 +598,30 @@ CREATE TABLE dbo.AuditLog
     EntityNameID  INT NOT NULL,
     EntityRecordID  BIGINT NOT NULL,
     OperationType VARCHAR(20) NOT NULL,
-    ChangedBy     VARCHAR(100) NOT NULL,
-    ChangeDate   DATETIME2(3) NOT NULL CONSTRAINT DF_AuditLog_ChangeDate DEFAULT (SYSDATETIME()),
+    UpdatedBy     VARCHAR(100) NOT NULL,
+    LastUpdated   DATETIME2(3) NOT NULL CONSTRAINT DF_AuditLog_LastUpdated DEFAULT (SYSDATETIME()),
     OldValues     VARCHAR(MAX) NULL,
     NewValue      VARCHAR(MAX) NULL,
+    DeletedInd           BIT NOT NULL CONSTRAINT DF_AuditLog_DeletedInd DEFAULT (0),
+    CreationUserID       VARCHAR(128) NOT NULL,
+    CreationDate         DATETIME2(0) NOT NULL CONSTRAINT DF_AuditLog_CreationDate DEFAULT (SYSDATETIME()),
+    LastUpdateUserID    VARCHAR(128) NOT NULL,
+    LastUpdateDate      DATETIME2(0) NOT NULL CONSTRAINT DF_AuditLog_LastUpdatedDate DEFAULT (SYSDATETIME()),
+
     CONSTRAINT PK_AuditLog PRIMARY KEY CLUSTERED (AuditID),
     CONSTRAINT CK_AuditLog_OperationType CHECK (OperationType IN (
         'INSERT', 'UPDATE', 'DELETE', 'MERGE', 'STATUS_CHANGE'
     )),
     /* 1-minute tolerance: DATETIME2(0) rounds up, so a value written as
        SYSDATETIME() can land just after 'now' and fail a strict check */
-    CONSTRAINT CK_AuditLog_ChangeDate CHECK (ChangeDate <= DATEADD(MINUTE, 1, SYSDATETIME()))
+    CONSTRAINT CK_AuditLog_LastUpdated CHECK (LastUpdated <= DATEADD(MINUTE, 1, SYSDATETIME()))
 );
 GO
+
+CREATE INDEX IX_AuditLog_UPRID ON dbo.AuditLog (UPRID, AuditID);
+
+GO
+
 
 /* ============================================================================
    22. UPRMATCHREVIEW_Q
@@ -630,8 +680,8 @@ CREATE TABLE dbo.UPRSTATUSHISTORY
     ZipCode            VARCHAR(10) NULL,
     PropertyTypeCode   VARCHAR(30) NULL,
     ChangeSource       VARCHAR(50) NULL,
-    ChangedBy          VARCHAR(100) NULL,
-    ChangeDate        DATETIME2(0) NOT NULL CONSTRAINT DF_UPRStatusHistory_ChangeDate DEFAULT (SYSDATETIME()),
+    UpdatedBy          VARCHAR(100) NULL,
+    LastUpdated        DATETIME2(0) NOT NULL CONSTRAINT DF_UPRStatusHistory_LastUpdated DEFAULT (SYSDATETIME()),
     Notes              VARCHAR(1000) NULL,
     LevelInd           BIT NOT NULL CONSTRAINT DF_UPRStatusHistory_LevelInd DEFAULT (0),
     BuildingID         INT NULL,
@@ -653,10 +703,14 @@ CREATE TABLE dbo.UPRSTATUSHISTORY
             'PENDING', 'ACTIVE', 'INACTIVE', 'UNDER_REVIEW', 'MERGED', 'SPLIT', 'RETIRED', 'REJECTED'
         )
     ),
-    CONSTRAINT CK_UPRStatusHistory_ChangedDate CHECK (ChangeDate <= DATEADD(MINUTE, 1, SYSDATETIME()))
+    CONSTRAINT CK_UPRStatusHistory_ChangedDate CHECK (LastUpdated <= DATEADD(MINUTE, 1, SYSDATETIME()))
 );
 GO
 
+CREATE INDEX IX_UPRSTATUSHISTORY_UPRID ON dbo.UPRSTATUSHISTORY (UPRID, ChangeSource, LastUpdated DESC)
+INCLUDE (ParcelID);
+
+GO
 
 /* ============================================================================
    24. REF_ENTITY_IDENTIFICATION
@@ -667,6 +721,7 @@ CREATE TABLE dbo.REF_ENTITY_IDENTIFICATION
   EntityName	VARCHAR(100)   NOT NULL,
   EntityDescription	VARCHAR(250)	NULL,
   ActiveInd	    BIT	 NOT NULL,
+  DeletedInd    BIT  NOT NULL,
   CreationDate	DATETIME2	NOT NULL,
   CreatedBy	VARCHAR(100)	NOT NULL
 );
@@ -675,15 +730,16 @@ CREATE TABLE dbo.REF_ENTITY_IDENTIFICATION
 /* ============================================================================
    SEED REFERENCE DATA
    ============================================================================ */
-INSERT INTO dbo.REF_ENTITYTYPE (Description) VALUES
-    ('Complex'), ('Property'), ('Building'), ('Unit'), ('Condo'), ('ADU');
+INSERT INTO dbo.REF_ENTITYTYPE (Description, CreationUserID, LastUpdateUserID)
+SELECT v.Description, SUSER_SNAME(), SUSER_SNAME()
+FROM (VALUES ('Complex'), ('Property'), ('Building'), ('Unit'), ('Condo'), ('ADU')) v(Description);
 GO
 
 DECLARE @User NVARCHAR(128) = SUSER_SNAME();
 DECLARE @Now  DATETIME2(0) = SYSDATETIME();
 
 INSERT INTO dbo.REF_PROPERTYTYPE
-    (PropertyTypeCode, PropertyTypeName, AllowsBuildings, AllowsUnits, DeleteInd,
+    (PropertyTypeCode, PropertyTypeName, AllowsBuildings, AllowsUnits, DeletedInd,
      CreationUserID, CreationDate, LastUpdateUserID, LastUpdateDate)
 VALUES
     (N'SF',       N'Single Family',      1, 1, 0, @User, @Now, @User, @Now),
@@ -699,33 +755,39 @@ VALUES
 GO
 
 INSERT INTO dbo.REF_PROPERTY_STATUSCODE
-    (StatusCode, Description, DeleteInd, CreationUserID, CreationDate, LastUpdateUserID, LastUpdateDate)
+    (StatusCode, Description, DeletedInd, CreationUserID, CreationDate, LastUpdateUserID, LastUpdateDate)
 VALUES
     (N'ACTIVE',   N'Active',   0, SUSER_SNAME(), SYSDATETIME(), SUSER_SNAME(), SYSDATETIME()),
     (N'INACTIVE', N'Inactive', 0, SUSER_SNAME(), SYSDATETIME(), SUSER_SNAME(), SYSDATETIME()),
     (N'RETIRED',  N'Retired',  0, SUSER_SNAME(), SYSDATETIME(), SUSER_SNAME(), SYSDATETIME());
 GO
 
-INSERT INTO dbo.REF_CONTACTTYPE (ContactTypeCode, Description) VALUES
+INSERT INTO dbo.REF_CONTACTTYPE (ContactTypeCode, Description, CreationUserID, LastUpdateUserID)
+SELECT v.Code, v.Description, SUSER_SNAME(), SUSER_SNAME()
+FROM (VALUES
     ('PERSON', 'Individual Person'),
     ('ORGANIZATION', 'Organization'),
-    ('UNKNOWN', 'Unknown / placeholder');
+    ('UNKNOWN', 'Unknown / placeholder')) v(Code, Description);
 GO
 
-INSERT INTO dbo.REF_ROLETYPE (RoleTypeCode, Description) VALUES
+INSERT INTO dbo.REF_ROLETYPE (RoleTypeCode, Description, CreationUserID, LastUpdateUserID)
+SELECT v.Code, v.Description, SUSER_SNAME(), SUSER_SNAME()
+FROM (VALUES
     ('OWNER', 'Owner'),
     ('PROPERTY_MANAGER', 'Property Manager'),
     ('LEGAL_AGENT', 'Legal Agent'),
     ('APPLICANT', 'Applicant'),
     ('LANDLORD', 'Landlord'),
-    ('AUTHORIZED_REP', 'Authorized Representative');
+    ('AUTHORIZED_REP', 'Authorized Representative')) v(Code, Description);
 GO
 
-INSERT INTO dbo.REF_ADDRESSROLE (AddressRoleCode, Description) VALUES
+INSERT INTO dbo.REF_ADDRESSROLE (AddressRoleCode, Description, CreationUserID, LastUpdateUserID)
+SELECT v.Code, v.Description, SUSER_SNAME(), SUSER_SNAME()
+FROM (VALUES
     ('SITE', 'Site Address'),
     ('MAILING', 'Mailing Address'),
     ('PHYSICAL', 'Physical Address'),
-    ('OTHER', 'Other Address');
+    ('OTHER', 'Other Address')) v(Code, Description);
 GO
 
 INSERT INTO dbo.REF_ENTITY_IDENTIFICATION
@@ -733,20 +795,21 @@ INSERT INTO dbo.REF_ENTITY_IDENTIFICATION
     EntityName,
     EntityDescription,
     ActiveInd,
+    DeletedInd,
     CreationDate,
     CreatedBy
     )
 
     VALUES
-    (1, 'UPR', 'Unified Property Record',1, GETDATE(), 'System'),
-    (2,'PROPERTY', 'Property entity',1, GETDATE(), 'System'),
-    (3,'BUILDING', 'Building entity',1, GETDATE(), 'System'),
-    (4,'UNIT', 'Dwelling Unit entity',1, GETDATE(), 'System'),
-    (5,'CONDO', 'Condominium entity',1, GETDATE(), 'System'),
-    (6,'COMPLEX', 'Complex entity',2, GETDATE(), 'System'),
-    (7,'ADU', 'Accesory Dwelling entity',1, GETDATE(), 'System'),
-    (8,'ADDRESS', 'Address entity',1, GETDATE(), 'System'),
-    (9,'CONTACT', 'Contact entity',1, GETDATE(), 'System');
+    (1, 'UPR', 'Unified Property Record',1, 0, GETDATE(), 'System'),
+    (2,'PROPERTY', 'Property entity',1, 0, GETDATE(), 'System'),
+    (3,'BUILDING', 'Building entity',1, 0, GETDATE(), 'System'),
+    (4,'UNIT', 'Dwelling Unit entity',1,0, GETDATE(), 'System'),
+    (5,'CONDO', 'Condominium entity',1, 0, GETDATE(), 'System'),
+    (6,'COMPLEX', 'Complex entity',2, 0, GETDATE(), 'System'),
+    (7,'ADU', 'Accesory Dwelling entity',1, 0,  GETDATE(), 'System'),
+    (8,'ADDRESS', 'Address entity',1, 0, GETDATE(), 'System'),
+    (9,'CONTACT', 'Contact entity',1, 0, GETDATE(), 'System');
 GO
 
 PRINT N'New hierarchical UPR schema created (NewUPRTABLEUSED + COMPLEX).';

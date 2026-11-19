@@ -263,7 +263,7 @@ try:
     client_layout(db)
     cnumber_fixture(db)
     output = load(db)
-    assert 'UPR MAIN LOADER 2026-11-11 R14' in output and 'Record layout check passed.' in output and 'C Number: groups=' in output, output[-3000:]
+    assert 'UPR MAIN LOADER 2026-11-19 R15' in output and 'Record layout check passed.' in output and 'C Number: groups=' in output, output[-3000:]
     run_id = re.search(r'Audit RunID: ([0-9a-fA-F-]{36})', output)[1]
     audit = sql(db, (ROOT / 'scripts/check_upr_audit_result.sql').read_text().replace(
         'DECLARE @RunID UNIQUEIDENTIFIER=NULL;', f"DECLARE @RunID UNIQUEIDENTIFIER='{run_id}';"))
@@ -332,13 +332,17 @@ try:
     for table, user_columns in (('UPR', ('CreationUserID',)), ('ADDRESS', ('CreationUserID',)),
                                 ('COMPLEX', ('CreationUserID',)), ('PROPERTY', ('CreationUserID',)),
                                 ('CONDO', ('CreationUserID',)), ('BUILDING', ('CreationUserID',)),
-                                ('UNIT', ('CreationUserID',)), ('CONTACT', ())):
-        deleted = 'DeleteInd' if table != 'UPR' else None
+                                ('UNIT', ('CreationUserID',)), ('CONTACT', ('CreationUserID',)),
+                                ('UPR_ADDRESS', ('CreationUserID',)), ('UPR_CONTACT', ('CreationUserID',))):
+        deleted = 'DeletedInd'
         conditions = ' OR '.join([f'{c} IS NULL' for c in user_columns + ('LastUpdateUserID',)]
                                  + ['LastUpdateDate IS NULL OR LastUpdateDate <> CreationDate']
                                  + ([f'{deleted} <> 0'] if deleted else []))
         assert sql(db, f'SELECT COUNT(*) FROM dbo.{table} WHERE {conditions};') == '0', table
         assert int(sql(db, f'SELECT COUNT(*) FROM dbo.{table};')) > 0, table
+    assert sql(db, "SELECT COUNT(*) FROM dbo.AuditLog WHERE UpdatedBy IS NULL OR LastUpdated IS NULL "
+               "OR CreationUserID IS NULL OR LastUpdateUserID IS NULL OR DeletedInd <> 0;") == '0', 'AuditLog metadata'
+    assert sql(db, "SELECT COUNT(*) FROM dbo.UPRSTATUSHISTORY WHERE UpdatedBy IS NULL;") == '0', 'history UpdatedBy'
     assert sql(db, "SELECT COUNT(*) FROM sys.indexes WHERE object_id = OBJECT_ID('dbo.UPR_CLOSURE') "
                "AND name LIKE '%Loader%';") == '0', 'client closure indexes were not reused'
     print('PASS: record metadata filled; no N/A; Unit parent is its Building; client closure indexes reused', flush=True)
@@ -395,7 +399,11 @@ try:
     assert roots(up, '07000001') == ['Condo']
     unit_9601 = sql(up, "SELECT UPRID FROM dbo.EXTERNAL_IDENTIFIER_XREF WHERE SourceSystem = 'KDAT' "
                     "AND IdentifierType = 'SOURCE_RECORD_ID' AND IdentifierValue = '9601';")
-    sql(up, "INSERT dbo.MAIncomingTableX1 SELECT * FROM dbo.HeldMA; DROP TABLE dbo.HeldMA;")
+    # The load may add MAIncomingTableX1.StreetSuffix (R15), so name the held columns.
+    sql(up, "DECLARE @c NVARCHAR(MAX) = (SELECT STRING_AGG(QUOTENAME(name), ',') FROM sys.columns "
+            "WHERE object_id = OBJECT_ID('dbo.HeldMA')); "
+            "EXEC (N'INSERT dbo.MAIncomingTableX1 (' + @c + N') SELECT ' + @c + N' FROM dbo.HeldMA'); "
+            "DROP TABLE dbo.HeldMA;")
     assert sql(up, "SELECT COUNT(*) FROM dbo.MAIncomingTableX1 WHERE Account = 'C000901';") == held
     output = load(up)
     assert '|LOADED_ELSEWHERE|' in output
@@ -408,7 +416,7 @@ try:
     print('PASS: condos loaded before their C Number are reported LOADED_ELSEWHERE, not moved; rerun idempotent', flush=True)
 
     # 3. Differential: no C Numbers in the standard seed -> identical results.
-    a, b = new_database('SeedR10'), new_database('SeedR13')
+    a, b = new_database('SeedR10'), new_database('SeedR15')
     client_layout(a, earlier=True)
     load(a, R10)
     client_layout(b)
@@ -419,7 +427,7 @@ try:
     snap_b = '\n'.join(sorted(sql(b, SNAPSHOT).splitlines()))
     assert snap_a == snap_b, '\n'.join(
         line for line in __import__('difflib').unified_diff(snap_a.splitlines(), snap_b.splitlines(), lineterm=''))
-    print(f'PASS: standard hostile seed gives identical R10/R13 results ({len(snap_b.splitlines())} snapshot rows)', flush=True)
+    print(f'PASS: standard hostile seed gives identical R10/R15 results ({len(snap_b.splitlines())} snapshot rows)', flush=True)
 
     # 4. November 3 (R12) layout: the layout check lists the gaps and changes nothing.
     stale = new_database('R12Layout')
@@ -428,8 +436,8 @@ try:
     cnumber_fixture(stale)
     output = sql(stale, LOADER.replace('UPRXDB_TEST', stale), error=True)
     assert 'Record layout check FAILED' in output, output[-3000:]
-    for table, column in (('UPR', 'LastUpdateUserID'), ('UPR', 'CreationUserID'), ('UNIT', 'DeleteInd'),
-                          ('BUILDING', 'LastUpdateDate'), ('ADDRESS', 'DeleteInd'), ('AuditLog', 'ChangeDate')):
+    for table, column in (('UPR', 'LastUpdateUserID'), ('UPR', 'CreationUserID'), ('UNIT', 'DeletedInd'),
+                          ('BUILDING', 'LastUpdateDate'), ('ADDRESS', 'DeletedInd'), ('AuditLog', 'LastUpdated')):
         assert f'{table}|{column}|Column used by the loader is missing' in output, (table, column)
     assert 'Invalid column name' not in output, 'later batches were compiled into errors'
     assert sql(stale, "SELECT COUNT(*) FROM dbo.UPR; SELECT COUNT(*) FROM sys.objects WHERE name LIKE 'fn[_]UPR[_]%';"
