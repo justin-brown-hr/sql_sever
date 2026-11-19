@@ -82,7 +82,7 @@ INSERT @Expected(TableName,ColumnName,Requirement) VALUES
     (N'CONDO',N'OwnerName',N'CORE'),
     (N'CONDO',N'StatusCode',N'CORE'),
     (N'CONDO',N'CreationDate',N'CORE'),
-    (N'CONDO',N'DeletedInd',N'CORE'),
+    (N'CONDO',N'DeleteInd',N'CORE'),
     (N'CONDO',N'CreationUserID',N'CORE'),
     (N'CONDO',N'LastUpdateUserID',N'CORE'),
     (N'CONDO',N'LastUpdateDate',N'CORE'),
@@ -94,7 +94,7 @@ INSERT @Expected(TableName,ColumnName,Requirement) VALUES
     (N'PROPERTY',N'Parcel',N'CORE'),
     (N'PROPERTY',N'StatusCode',N'CORE'),
     (N'PROPERTY',N'CreationDate',N'CORE'),
-    (N'PROPERTY',N'DeletedInd',N'CORE'),
+    (N'PROPERTY',N'DeleteInd',N'CORE'),
     (N'PROPERTY',N'CreationUserID',N'CORE'),
     (N'PROPERTY',N'LastUpdateUserID',N'CORE'),
     (N'PROPERTY',N'LastUpdateDate',N'CORE'),
@@ -104,7 +104,7 @@ INSERT @Expected(TableName,ColumnName,Requirement) VALUES
     (N'COMPLEX',N'PropertyTypeID',N'CORE'),
     (N'COMPLEX',N'StatusCode',N'CORE'),
     (N'COMPLEX',N'CreationDate',N'CORE'),
-    (N'COMPLEX',N'DeletedInd',N'CORE'),
+    (N'COMPLEX',N'DeleteInd',N'CORE'),
     (N'COMPLEX',N'CreationUserID',N'CORE'),
     (N'COMPLEX',N'LastUpdateUserID',N'CORE'),
     (N'COMPLEX',N'LastUpdateDate',N'CORE'),
@@ -117,7 +117,7 @@ INSERT @Expected(TableName,ColumnName,Requirement) VALUES
     (N'REF_PROPERTYTYPE',N'PropertyTypeName',N'CORE'),
     (N'REF_PROPERTYTYPE',N'AllowsBuildings',N'CORE'),
     (N'REF_PROPERTYTYPE',N'AllowsUnits',N'CORE'),
-    (N'REF_PROPERTYTYPE',N'DeletedInd',N'CORE'),
+    (N'REF_PROPERTYTYPE',N'DeleteInd',N'CORE'),
     (N'REF_PROPERTYTYPE',N'CreationUserID',N'CORE'),
     (N'REF_PROPERTYTYPE',N'CreationDate',N'CORE'),
     (N'REF_PROPERTYTYPE',N'LastUpdateUserID',N'CORE'),
@@ -166,7 +166,7 @@ INSERT @Expected(TableName,ColumnName,Requirement) VALUES
     (N'BUILDING',N'BuildingName',N'CORE'),
     (N'BUILDING',N'YearBuilt',N'CORE'),
     (N'BUILDING',N'StatusCode',N'CORE'),
-    (N'BUILDING',N'DeletedInd',N'CORE'),
+    (N'BUILDING',N'DeleteInd',N'CORE'),
     (N'BUILDING',N'CreationUserID',N'CORE'),
     (N'BUILDING',N'CreationDate',N'CORE'),
     (N'BUILDING',N'LastUpdateUserID',N'CORE'),
@@ -319,7 +319,7 @@ WHERE EXISTS(SELECT 1 FROM @Expected e WHERE OBJECT_ID(N'dbo.'+e.TableName)=pare
 -- Preflight for the summary dictionary seed (required fields with no defaults).
 SELECT c.name AS RequiredDictionaryColumn,TYPE_NAME(c.system_type_id) AS DataType,
     CASE WHEN c.name=N'EntityID' AND c.system_type_id=56 THEN N'LOADER ALLOCATES NEXT INT UNDER TABLE LOCK'
-         WHEN c.name IN(N'EntityName',N'EntityDescription',N'IsActive',N'ActiveInd',N'DeletedInd',N'CreatedDate',N'CreationDate',N'LastUpdateDate',N'CreatedBy',N'CreationUserID',N'LastUpdateUserID') THEN N'LOADER SUPPLIES VALUE'
+         WHEN c.name IN(N'EntityName',N'EntityDescription',N'IsActive',N'ActiveInd',N'DeleteInd',N'DeletedInd',N'CreatedDate',N'CreationDate',N'LastUpdateDate',N'CreatedBy',N'CreationUserID',N'LastUpdateUserID') THEN N'LOADER SUPPLIES VALUE'
          ELSE N'REVIEW: UNMAPPED REQUIRED COLUMN OR UNSUPPORTED KEY TYPE' END AS SeedHandling
 FROM sys.columns c WHERE c.object_id=OBJECT_ID(N'dbo.REF_ENTITY_IDENTIFICATION')
     AND (c.is_nullable=0 OR c.name=N'EntityID') AND c.is_identity=0 AND c.is_computed=0

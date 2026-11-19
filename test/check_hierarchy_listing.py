@@ -71,15 +71,15 @@ SELECT @Condo, 'fixture', 'fixture', SYSUTCDATETIME(), CASE n
 FROM Numbers;
 DECLARE @Root1 BIGINT = (SELECT UPRID FROM dbo.UPR WHERE AccountNumber = '123456789');
 DECLARE @Root2 BIGINT = (SELECT UPRID FROM dbo.UPR WHERE AccountNumber = 'OTHER');
-INSERT dbo.CONDO (UPRID, DeletedInd, CreationUserID, LastUpdateUserID, LastUpdateDate)
+INSERT dbo.CONDO (UPRID, DeleteInd, CreationUserID, LastUpdateUserID, LastUpdateDate)
 SELECT UPRID, 0, 'fixture', 'fixture', SYSUTCDATETIME() FROM dbo.UPR;
 INSERT dbo.UPR (EntityTypeID, ParentUPRID, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@Building, @Root1, 'fixture', 'fixture', SYSUTCDATETIME());
 DECLARE @BU1 BIGINT = SCOPE_IDENTITY();
-INSERT dbo.BUILDING (UPRID, DeletedInd, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@BU1, 0, 'fixture', 'fixture', SYSUTCDATETIME());
+INSERT dbo.BUILDING (UPRID, DeleteInd, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@BU1, 0, 'fixture', 'fixture', SYSUTCDATETIME());
 DECLARE @B1 BIGINT = SCOPE_IDENTITY();
 INSERT dbo.UPR (EntityTypeID, ParentUPRID, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@Building, @Root2, 'fixture', 'fixture', SYSUTCDATETIME());
 DECLARE @BU2 BIGINT = SCOPE_IDENTITY();
-INSERT dbo.BUILDING (UPRID, DeletedInd, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@BU2, 0, 'fixture', 'fixture', SYSUTCDATETIME());
+INSERT dbo.BUILDING (UPRID, DeleteInd, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@BU2, 0, 'fixture', 'fixture', SYSUTCDATETIME());
 DECLARE @B2 BIGINT = SCOPE_IDENTITY();
 INSERT dbo.UPR (EntityTypeID, ParentUPRID, CreationUserID, LastUpdateUserID, LastUpdateDate) VALUES (@Unit, @BU1, 'fixture', 'fixture', SYSUTCDATETIME());
 INSERT dbo.UNIT (UPRID, UnitNumber, DeleteInd, CreationUserID, LastUpdateUserID) VALUES (SCOPE_IDENTITY(), 'VALID_BUILDING', 0, 'fixture', 'fixture');

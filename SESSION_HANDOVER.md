@@ -1,3 +1,20 @@
+# Current — November 11 R14 DeleteInd, listing speed, search by address
+
+Client (temp/): ran R13 OK after renaming DeletedInd->DeleteInd in their layout and their R13
+copy (report UPRLoadvR13_Report_11_09_2026.docx: 847,675 UPRs, 1158 s). Said listing and their
+own UPR_BYAddress_Listing_GB.txt give no output/errors "because of index change and BuildingID".
+Findings: (1) their by-address script errors nowhere; it matches NormalizedAddress (full line incl.
+city+zip) against the street only, and its CONCAT leaves double spaces for NULL parts -> empty.
+Fixed copy: scripts/search_upr_by_address.sql (prefix match via IX_ADDRESS_NormalizedAddress, parts
+fallback, Unit's Building via ParentUPRID). (2) list_upr_hierarchy.sql: 11/6 layout dropped
+IX_UPRSTATUSHISTORY_ParcelLookup (no UPRID index left) -> per-Condo history scan; owner apply also
+not seekable. Now #ReportCondoParcel one pass (CONDO_PARCEL block) + owner joined to closure
+ancestors. 240k-UPR synthetic DB: R13 >15 min in Section 2, R14 227 s whole listing; small-DB
+output identical to R13. (3) Loader/DDL/checker: DeletedInd->DeleteInd everywhere (dictionary map
+accepts both). Banner 2026-11-11 R14. AuditLog indexes also dropped by client (advice in guide).
+
+---
+
 # Current — November 6 R13 client data structure changes
 
 Client sent temp/Data Structure Changes.docx + temp/DataStructureChanges_Layout_11_6_2026.txt

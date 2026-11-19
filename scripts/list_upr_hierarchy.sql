@@ -1,6 +1,6 @@
 /*
 ================================================================================
-  UPR Full Records / Hierarchy Listing - 2026-10-14
+  UPR Full Records / Hierarchy Listing - 2026-11-11 (no UPRSTATUSHISTORY index needed)
   Read existing loaded UPR data; no loader rerun or audit installation required.
 
   Lists every UPR record as Parent followed by its children, so you can confirm
@@ -206,6 +206,21 @@ IF COL_LENGTH(N'dbo.BUILDING',N'BuildingNumber') IS NOT NULL
         SELECT BuildingID,CONVERT(NVARCHAR(200),BuildingNumber) FROM dbo.BUILDING b
         WHERE EXISTS(SELECT 1 FROM #ReportTree t WHERE t.UPRID=b.UPRID)
            OR EXISTS(SELECT 1 FROM dbo.UNIT u JOIN #ReportTree t ON t.UPRID=u.UPRID WHERE t.ParentUPRID=b.UPRID);';
+/* CONDO_PARCEL_BEGIN
+   Latest HIER_LOAD parcel per listed Condo, read in ONE pass over UPRSTATUSHISTORY.
+   The 11/6/2026 layout has no UPRSTATUSHISTORY index on UPRID, so a per-row lookup
+   would scan the whole history table once for every Condo. */
+IF OBJECT_ID('tempdb..#ReportCondoParcel') IS NOT NULL DROP TABLE #ReportCondoParcel;
+SELECT x.UPRID,x.ParcelID INTO #ReportCondoParcel
+FROM (
+    SELECT h.UPRID,h.ParcelID,
+        rn=ROW_NUMBER() OVER(PARTITION BY h.UPRID ORDER BY h.ChangeDate DESC,h.UPRStatusHistoryID DESC)
+    FROM dbo.UPRSTATUSHISTORY h
+    WHERE h.ChangeSource=N'HIER_LOAD'
+      AND EXISTS(SELECT 1 FROM dbo.CONDO d JOIN #ReportTree rt ON rt.UPRID=d.UPRID WHERE d.UPRID=h.UPRID)
+) x WHERE x.rn=1;
+CREATE UNIQUE CLUSTERED INDEX IX_ReportCondoParcel ON #ReportCondoParcel(UPRID);
+/* CONDO_PARCEL_END */
 IF OBJECT_ID('tempdb..#ReportADU') IS NOT NULL DROP TABLE #ReportADU;
 CREATE TABLE #ReportADU(UPRID BIGINT,UnitNumber NVARCHAR(50));
 IF COL_LENGTH(N'dbo.ADU',N'UPRID') IS NOT NULL AND COL_LENGTH(N'dbo.ADU',N'UnitNumber') IS NOT NULL
@@ -284,12 +299,7 @@ INNER JOIN dbo.REF_ENTITYTYPE e ON e.EntityTypeID = t.EntityTypeID
 LEFT JOIN dbo.COMPLEX  cx ON cx.UPRID = t.UPRID
 LEFT JOIN dbo.PROPERTY p  ON p.UPRID  = t.UPRID
 LEFT JOIN dbo.CONDO    d  ON d.UPRID  = t.UPRID
-OUTER APPLY (
-    SELECT TOP (1) h.ParcelID
-    FROM dbo.UPRSTATUSHISTORY h
-    WHERE d.CondoID IS NOT NULL AND h.UPRID = t.UPRID AND h.ChangeSource = N'HIER_LOAD'
-    ORDER BY h.ChangeDate DESC, h.UPRStatusHistoryID DESC
-) condoHistory
+LEFT JOIN #ReportCondoParcel condoHistory ON condoHistory.UPRID = t.UPRID
 LEFT JOIN dbo.BUILDING b  ON b.UPRID  = t.UPRID
 LEFT JOIN dbo.UNIT     un ON un.UPRID = t.UPRID
 LEFT JOIN #ReportADU ad ON ad.UPRID=t.UPRID
@@ -327,8 +337,17 @@ OUTER APPLY (
         rel.Distance,rel.PrimaryInd DESC,rel.UPRAddressID
 ) a
 OUTER APPLY (
+    /* Owner: the record itself first, then its nearest ancestor. The candidate
+       list is joined to this record's own closure ancestors, so each lookup is
+       an index seek by UPRID instead of a pass over all owners. */
     SELECT TOP(1) oc.OwnerUPRID,oc.OwnerName,oc.OwnerSource,oc.ContactID
     FROM (
+        SELECT t.UPRID AS OwnerUPRID,0 AS Distance
+        UNION ALL
+        SELECT cl.AncestorUPRID,cl.[Level] FROM dbo.UPR_CLOSURE cl
+        WHERE cl.DescendantUPRID=t.UPRID AND cl.AncestorUPRID<>t.UPRID
+    ) anc
+    JOIN (
         /* OWNER_CANDIDATES_BEGIN */
         SELECT p.UPRID AS OwnerUPRID,NULLIF(LTRIM(RTRIM(p.OwnerName)),N'') AS OwnerName,
             N'PROPERTY.OwnerName' AS OwnerSource,CAST(NULL AS BIGINT) AS ContactID,0 AS SourcePriority
@@ -344,12 +363,9 @@ OUTER APPLY (
           AND (uc.EffectiveDate IS NULL OR uc.EffectiveDate<=@AsOfDate)
           AND (uc.EndDate IS NULL OR uc.EndDate>=@AsOfDate)
         /* OWNER_CANDIDATES_END */
-    ) oc
-    WHERE oc.OwnerName IS NOT NULL AND (oc.OwnerUPRID=t.UPRID OR EXISTS(
-        SELECT 1 FROM dbo.UPR_CLOSURE cl WHERE cl.DescendantUPRID=t.UPRID AND cl.AncestorUPRID=oc.OwnerUPRID))
-    ORDER BY CASE WHEN oc.OwnerUPRID=t.UPRID THEN 0 ELSE 1 END,
-        (SELECT MIN(cl.[Level]) FROM dbo.UPR_CLOSURE cl WHERE cl.DescendantUPRID=t.UPRID AND cl.AncestorUPRID=oc.OwnerUPRID),
-        oc.SourcePriority,oc.OwnerUPRID,oc.ContactID,oc.OwnerName
+    ) oc ON oc.OwnerUPRID=anc.OwnerUPRID
+    WHERE oc.OwnerName IS NOT NULL
+    ORDER BY anc.Distance,oc.SourcePriority,oc.OwnerUPRID,oc.ContactID,oc.OwnerName
 ) owner
 OUTER APPLY (
     /* General contact is separate from ownership; never label an agent as owner. */

@@ -122,10 +122,15 @@
     - AuditLog / UPRSTATUSHISTORY: ChangeDate (was ChangedDate).
     - Closure: an index leading with DescendantUPRID that contains AncestorUPRID
       (the layout's IX_UPR_CLOSURE_Descendant) is reused; no extra index.
+
+  November 11 R14: client renamed DeletedInd to DeleteInd in the record layout.
+    - COMPLEX, PROPERTY, CONDO, BUILDING and REF_PROPERTYTYPE inserts now write
+      DeleteInd (ADDRESS, UNIT and CONTACT already did). The audit entity
+      dictionary accepts DeleteInd or DeletedInd. No rule changes.
 */
 USE UPRXDB_TEST;
 GO
-PRINT N'UPR MAIN LOADER 2026-11-06 R13';
+PRINT N'UPR MAIN LOADER 2026-11-11 R14';
 GO
 
 /* Required for filtered indexes. SSMS sets these ON, sqlcmd does not:
@@ -183,7 +188,7 @@ INSERT @LoaderColumns(TableName,ColumnName) VALUES
     (N'BUILDING',N'BuildingName'),
     (N'BUILDING',N'CreationDate'),
     (N'BUILDING',N'CreationUserID'),
-    (N'BUILDING',N'DeletedInd'),
+    (N'BUILDING',N'DeleteInd'),
     (N'BUILDING',N'LastUpdateDate'),
     (N'BUILDING',N'LastUpdateUserID'),
     (N'BUILDING',N'StatusCode'),
@@ -193,7 +198,7 @@ INSERT @LoaderColumns(TableName,ColumnName) VALUES
     (N'COMPLEX',N'ComplexID'),
     (N'COMPLEX',N'CreationDate'),
     (N'COMPLEX',N'CreationUserID'),
-    (N'COMPLEX',N'DeletedInd'),
+    (N'COMPLEX',N'DeleteInd'),
     (N'COMPLEX',N'LastUpdateDate'),
     (N'COMPLEX',N'LastUpdateUserID'),
     (N'COMPLEX',N'PropertyTypeID'),
@@ -202,7 +207,7 @@ INSERT @LoaderColumns(TableName,ColumnName) VALUES
     (N'CONDO',N'CondoID'),
     (N'CONDO',N'CreationDate'),
     (N'CONDO',N'CreationUserID'),
-    (N'CONDO',N'DeletedInd'),
+    (N'CONDO',N'DeleteInd'),
     (N'CONDO',N'LastUpdateDate'),
     (N'CONDO',N'LastUpdateUserID'),
     (N'CONDO',N'OwnerName'),
@@ -246,7 +251,7 @@ INSERT @LoaderColumns(TableName,ColumnName) VALUES
     (N'MAIncomingTableX1',N'ZipCode'),
     (N'PROPERTY',N'CreationDate'),
     (N'PROPERTY',N'CreationUserID'),
-    (N'PROPERTY',N'DeletedInd'),
+    (N'PROPERTY',N'DeleteInd'),
     (N'PROPERTY',N'LastUpdateDate'),
     (N'PROPERTY',N'LastUpdateUserID'),
     (N'PROPERTY',N'OwnerName'),
@@ -274,7 +279,7 @@ INSERT @LoaderColumns(TableName,ColumnName) VALUES
     (N'REF_PROPERTYTYPE',N'AllowsUnits'),
     (N'REF_PROPERTYTYPE',N'CreationDate'),
     (N'REF_PROPERTYTYPE',N'CreationUserID'),
-    (N'REF_PROPERTYTYPE',N'DeletedInd'),
+    (N'REF_PROPERTYTYPE',N'DeleteInd'),
     (N'REF_PROPERTYTYPE',N'LastUpdateDate'),
     (N'REF_PROPERTYTYPE',N'LastUpdateUserID'),
     (N'REF_PROPERTYTYPE',N'PropertyTypeCode'),
@@ -400,7 +405,7 @@ INSERT @SuppliedColumns(TableName,ColumnName) VALUES
     (N'BUILDING',N'BuildingName'),
     (N'BUILDING',N'CreationDate'),
     (N'BUILDING',N'CreationUserID'),
-    (N'BUILDING',N'DeletedInd'),
+    (N'BUILDING',N'DeleteInd'),
     (N'BUILDING',N'LastUpdateDate'),
     (N'BUILDING',N'LastUpdateUserID'),
     (N'BUILDING',N'StatusCode'),
@@ -409,7 +414,7 @@ INSERT @SuppliedColumns(TableName,ColumnName) VALUES
     (N'COMPLEX',N'CommunityName'),
     (N'COMPLEX',N'CreationDate'),
     (N'COMPLEX',N'CreationUserID'),
-    (N'COMPLEX',N'DeletedInd'),
+    (N'COMPLEX',N'DeleteInd'),
     (N'COMPLEX',N'LastUpdateDate'),
     (N'COMPLEX',N'LastUpdateUserID'),
     (N'COMPLEX',N'PropertyTypeID'),
@@ -417,7 +422,7 @@ INSERT @SuppliedColumns(TableName,ColumnName) VALUES
     (N'COMPLEX',N'UPRID'),
     (N'CONDO',N'CreationDate'),
     (N'CONDO',N'CreationUserID'),
-    (N'CONDO',N'DeletedInd'),
+    (N'CONDO',N'DeleteInd'),
     (N'CONDO',N'LastUpdateDate'),
     (N'CONDO',N'LastUpdateUserID'),
     (N'CONDO',N'OwnerName'),
@@ -436,7 +441,7 @@ INSERT @SuppliedColumns(TableName,ColumnName) VALUES
     (N'EXTERNAL_IDENTIFIER_XREF',N'UPRID'),
     (N'PROPERTY',N'CreationDate'),
     (N'PROPERTY',N'CreationUserID'),
-    (N'PROPERTY',N'DeletedInd'),
+    (N'PROPERTY',N'DeleteInd'),
     (N'PROPERTY',N'LastUpdateDate'),
     (N'PROPERTY',N'LastUpdateUserID'),
     (N'PROPERTY',N'OwnerName'),
@@ -454,7 +459,7 @@ INSERT @SuppliedColumns(TableName,ColumnName) VALUES
     (N'REF_PROPERTYTYPE',N'AllowsUnits'),
     (N'REF_PROPERTYTYPE',N'CreationDate'),
     (N'REF_PROPERTYTYPE',N'CreationUserID'),
-    (N'REF_PROPERTYTYPE',N'DeletedInd'),
+    (N'REF_PROPERTYTYPE',N'DeleteInd'),
     (N'REF_PROPERTYTYPE',N'LastUpdateDate'),
     (N'REF_PROPERTYTYPE',N'LastUpdateUserID'),
     (N'REF_PROPERTYTYPE',N'PropertyTypeCode'),
@@ -1039,7 +1044,7 @@ BEGIN
     DELETE FROM @DictionaryValueMap;
     INSERT @DictionaryValueMap(ColumnName,ParameterName) VALUES
         (N'EntityDescription',N'@description'),
-        (N'IsActive',N'@active'),(N'ActiveInd',N'@active'),(N'DeletedInd',N'@deleted'),
+        (N'IsActive',N'@active'),(N'ActiveInd',N'@active'),(N'DeleteInd',N'@deleted'),(N'DeletedInd',N'@deleted'),
         (N'CreatedDate',N'@created'),(N'CreationDate',N'@created'),(N'LastUpdateDate',N'@created'),
         (N'CreatedBy',N'@creator'),(N'CreationUserID',N'@creator'),(N'LastUpdateUserID',N'@creator');
     IF EXISTS(SELECT 1 FROM @DictionaryRequired r
@@ -1297,7 +1302,7 @@ INSERT INTO #SeedPT (Code, Name, AllowBldg, AllowUnit) VALUES
     (N'UNKNWN', N'Unknown / not supplied by source', 1, 1);
 
 INSERT INTO dbo.REF_PROPERTYTYPE
-    (PropertyTypeCode, PropertyTypeName, AllowsBuildings, AllowsUnits, DeletedInd,
+    (PropertyTypeCode, PropertyTypeName, AllowsBuildings, AllowsUnits, DeleteInd,
      CreationUserID, CreationDate, LastUpdateUserID, LastUpdateDate)
 
 OUTPUT N'REF_PROPERTYTYPE',CAST(NULL AS BIGINT),inserted.[PropertyTypeID],'INSERT',
@@ -1307,7 +1312,7 @@ OUTPUT N'REF_PROPERTYTYPE',CAST(NULL AS BIGINT),inserted.[PropertyTypeID],'INSER
         N'PropertyTypeName = ' + CASE WHEN inserted.[PropertyTypeName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[PropertyTypeName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'AllowsBuildings = ' + CASE WHEN inserted.[AllowsBuildings] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AllowsBuildings],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'AllowsUnits = ' + CASE WHEN inserted.[AllowsUnits] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AllowsUnits],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
-        N'DeletedInd = ' + CASE WHEN inserted.[DeletedInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DeletedInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'DeleteInd = ' + CASE WHEN inserted.[DeleteInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DeleteInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationUserID = ' + CASE WHEN inserted.[CreationUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationDate = ' + CASE WHEN inserted.[CreationDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'LastUpdateUserID = ' + CASE WHEN inserted.[LastUpdateUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[LastUpdateUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
@@ -1480,7 +1485,7 @@ WHERE NULLIF(LTRIM(RTRIM(PropertyType)), N'') IS NOT NULL
 GROUP BY PropertyType;
 
 INSERT INTO dbo.REF_PROPERTYTYPE
-    (PropertyTypeCode, PropertyTypeName, AllowsBuildings, AllowsUnits, DeletedInd,
+    (PropertyTypeCode, PropertyTypeName, AllowsBuildings, AllowsUnits, DeleteInd,
      CreationUserID, CreationDate, LastUpdateUserID, LastUpdateDate)
 
 OUTPUT N'REF_PROPERTYTYPE',CAST(NULL AS BIGINT),inserted.[PropertyTypeID],'INSERT',
@@ -1490,7 +1495,7 @@ OUTPUT N'REF_PROPERTYTYPE',CAST(NULL AS BIGINT),inserted.[PropertyTypeID],'INSER
         N'PropertyTypeName = ' + CASE WHEN inserted.[PropertyTypeName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[PropertyTypeName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'AllowsBuildings = ' + CASE WHEN inserted.[AllowsBuildings] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AllowsBuildings],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'AllowsUnits = ' + CASE WHEN inserted.[AllowsUnits] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[AllowsUnits],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
-        N'DeletedInd = ' + CASE WHEN inserted.[DeletedInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DeletedInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'DeleteInd = ' + CASE WHEN inserted.[DeleteInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DeleteInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationUserID = ' + CASE WHEN inserted.[CreationUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationDate = ' + CASE WHEN inserted.[CreationDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'LastUpdateUserID = ' + CASE WHEN inserted.[LastUpdateUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[LastUpdateUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
@@ -2251,7 +2256,7 @@ OUTPUT N'CONDO',deleted.[UPRID],deleted.[CondoID],'DELETE',
         N'OwnerName = ' + CASE WHEN deleted.[OwnerName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[OwnerName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'StatusCode = ' + CASE WHEN deleted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationDate = ' + CASE WHEN deleted.[CreationDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[CreationDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
-        N'DeletedInd = ' + CASE WHEN deleted.[DeletedInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[DeletedInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'DeleteInd = ' + CASE WHEN deleted.[DeleteInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[DeleteInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationUserID = ' + CASE WHEN deleted.[CreationUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[CreationUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'LastUpdateUserID = ' + CASE WHEN deleted.[LastUpdateUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[LastUpdateUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'LastUpdateDate = ' + CASE WHEN deleted.[LastUpdateDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[LastUpdateDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
@@ -2414,7 +2419,7 @@ SET @ParentInserted = (
 );
 
 INSERT INTO dbo.COMPLEX (UPRID, CommunityName, PropertyTypeID, StatusCode,
-    CreationDate, DeletedInd, CreationUserID, LastUpdateUserID, LastUpdateDate)
+    CreationDate, DeleteInd, CreationUserID, LastUpdateUserID, LastUpdateDate)
 
 OUTPUT N'COMPLEX',inserted.[UPRID],inserted.[ComplexID],'INSERT',
     CAST(NULL AS NVARCHAR(MAX)),
@@ -2424,7 +2429,7 @@ OUTPUT N'COMPLEX',inserted.[UPRID],inserted.[ComplexID],'INSERT',
         N'PropertyTypeID = ' + CASE WHEN inserted.[PropertyTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[PropertyTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationDate = ' + CASE WHEN inserted.[CreationDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
-        N'DeletedInd = ' + CASE WHEN inserted.[DeletedInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DeletedInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'DeleteInd = ' + CASE WHEN inserted.[DeleteInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DeleteInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationUserID = ' + CASE WHEN inserted.[CreationUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'LastUpdateUserID = ' + CASE WHEN inserted.[LastUpdateUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[LastUpdateUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'LastUpdateDate = ' + CASE WHEN inserted.[LastUpdateDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[LastUpdateDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
@@ -2442,7 +2447,7 @@ WHERE pm.PathType = N'COMPLEX'
 SET @ComplexInserted = @@ROWCOUNT;
 
 INSERT INTO dbo.PROPERTY (UPRID, PropertyTypeID, PropertyName, OwnerName, Parcel, StatusCode,
-    CreationDate, DeletedInd, CreationUserID, LastUpdateUserID, LastUpdateDate)
+    CreationDate, DeleteInd, CreationUserID, LastUpdateUserID, LastUpdateDate)
 
 OUTPUT N'PROPERTY',inserted.[UPRID],inserted.[PropertyID],'INSERT',
     CAST(NULL AS NVARCHAR(MAX)),
@@ -2454,7 +2459,7 @@ OUTPUT N'PROPERTY',inserted.[UPRID],inserted.[PropertyID],'INSERT',
         N'Parcel = ' + CASE WHEN inserted.[Parcel] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[Parcel],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationDate = ' + CASE WHEN inserted.[CreationDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
-        N'DeletedInd = ' + CASE WHEN inserted.[DeletedInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DeletedInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'DeleteInd = ' + CASE WHEN inserted.[DeleteInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DeleteInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationUserID = ' + CASE WHEN inserted.[CreationUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'LastUpdateUserID = ' + CASE WHEN inserted.[LastUpdateUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[LastUpdateUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'LastUpdateDate = ' + CASE WHEN inserted.[LastUpdateDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[LastUpdateDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
@@ -2474,7 +2479,7 @@ WHERE pm.PathType = N'PROPERTY'
 SET @PropertyInserted = @@ROWCOUNT;
 
 INSERT INTO dbo.CONDO (UPRID, OwnerName, StatusCode,
-    CreationDate, DeletedInd, CreationUserID, LastUpdateUserID, LastUpdateDate)
+    CreationDate, DeleteInd, CreationUserID, LastUpdateUserID, LastUpdateDate)
 
 OUTPUT N'CONDO',inserted.[UPRID],inserted.[CondoID],'INSERT',
     CAST(NULL AS NVARCHAR(MAX)),
@@ -2483,7 +2488,7 @@ OUTPUT N'CONDO',inserted.[UPRID],inserted.[CondoID],'INSERT',
         N'OwnerName = ' + CASE WHEN inserted.[OwnerName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[OwnerName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationDate = ' + CASE WHEN inserted.[CreationDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
-        N'DeletedInd = ' + CASE WHEN inserted.[DeletedInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DeletedInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'DeleteInd = ' + CASE WHEN inserted.[DeleteInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DeleteInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationUserID = ' + CASE WHEN inserted.[CreationUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'LastUpdateUserID = ' + CASE WHEN inserted.[LastUpdateUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[LastUpdateUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'LastUpdateDate = ' + CASE WHEN inserted.[LastUpdateDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[LastUpdateDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END
@@ -2859,7 +2864,7 @@ OUTPUT N'BUILDING',inserted.[UPRID],inserted.[BuildingID],'UPDATE',
         N'BuildingName = ' + CASE WHEN deleted.[BuildingName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[BuildingName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'YearBuilt = ' + CASE WHEN deleted.[YearBuilt] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[YearBuilt],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'StatusCode = ' + CASE WHEN deleted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
-        N'DeletedInd = ' + CASE WHEN deleted.[DeletedInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[DeletedInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'DeleteInd = ' + CASE WHEN deleted.[DeleteInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[DeleteInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationUserID = ' + CASE WHEN deleted.[CreationUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[CreationUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationDate = ' + CASE WHEN deleted.[CreationDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[CreationDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'LastUpdateUserID = ' + CASE WHEN deleted.[LastUpdateUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[LastUpdateUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
@@ -2869,7 +2874,7 @@ OUTPUT N'BUILDING',inserted.[UPRID],inserted.[BuildingID],'UPDATE',
         N'BuildingName = ' + CASE WHEN inserted.[BuildingName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[BuildingName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'YearBuilt = ' + CASE WHEN inserted.[YearBuilt] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[YearBuilt],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
-        N'DeletedInd = ' + CASE WHEN inserted.[DeletedInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DeletedInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'DeleteInd = ' + CASE WHEN inserted.[DeleteInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DeleteInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationUserID = ' + CASE WHEN inserted.[CreationUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationDate = ' + CASE WHEN inserted.[CreationDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'LastUpdateUserID = ' + CASE WHEN inserted.[LastUpdateUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[LastUpdateUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
@@ -2927,7 +2932,7 @@ OUTPUT N'BUILDING',deleted.[UPRID],deleted.[BuildingID],'DELETE',
         N'BuildingName = ' + CASE WHEN deleted.[BuildingName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[BuildingName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'YearBuilt = ' + CASE WHEN deleted.[YearBuilt] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[YearBuilt],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'StatusCode = ' + CASE WHEN deleted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
-        N'DeletedInd = ' + CASE WHEN deleted.[DeletedInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[DeletedInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'DeleteInd = ' + CASE WHEN deleted.[DeleteInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[DeleteInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationUserID = ' + CASE WHEN deleted.[CreationUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[CreationUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationDate = ' + CASE WHEN deleted.[CreationDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[CreationDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'LastUpdateUserID = ' + CASE WHEN deleted.[LastUpdateUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[LastUpdateUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
@@ -3179,7 +3184,7 @@ FROM #BuildingMap m WHERE m.AuditNewValue IS NOT NULL;
 SET @BuildingInserted = @AuditDmlRows;
 
 INSERT INTO dbo.BUILDING (UPRID, BuildingName, YearBuilt, StatusCode,
-    DeletedInd, CreationUserID, CreationDate, LastUpdateUserID, LastUpdateDate)
+    DeleteInd, CreationUserID, CreationDate, LastUpdateUserID, LastUpdateDate)
 
 OUTPUT N'BUILDING',inserted.[UPRID],inserted.[BuildingID],'INSERT',
     CAST(NULL AS NVARCHAR(MAX)),
@@ -3188,7 +3193,7 @@ OUTPUT N'BUILDING',inserted.[UPRID],inserted.[BuildingID],'INSERT',
         N'BuildingName = ' + CASE WHEN inserted.[BuildingName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[BuildingName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'YearBuilt = ' + CASE WHEN inserted.[YearBuilt] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[YearBuilt],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
-        N'DeletedInd = ' + CASE WHEN inserted.[DeletedInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DeletedInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'DeleteInd = ' + CASE WHEN inserted.[DeleteInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DeleteInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationUserID = ' + CASE WHEN inserted.[CreationUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationDate = ' + CASE WHEN inserted.[CreationDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'LastUpdateUserID = ' + CASE WHEN inserted.[LastUpdateUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[LastUpdateUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
@@ -3212,7 +3217,7 @@ OUTPUT N'BUILDING',inserted.[UPRID],inserted.[BuildingID],'UPDATE',
         N'BuildingName = ' + CASE WHEN deleted.[BuildingName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[BuildingName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'YearBuilt = ' + CASE WHEN deleted.[YearBuilt] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[YearBuilt],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'StatusCode = ' + CASE WHEN deleted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
-        N'DeletedInd = ' + CASE WHEN deleted.[DeletedInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[DeletedInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'DeleteInd = ' + CASE WHEN deleted.[DeleteInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[DeleteInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationUserID = ' + CASE WHEN deleted.[CreationUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[CreationUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationDate = ' + CASE WHEN deleted.[CreationDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[CreationDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'LastUpdateUserID = ' + CASE WHEN deleted.[LastUpdateUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[LastUpdateUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
@@ -3222,7 +3227,7 @@ OUTPUT N'BUILDING',inserted.[UPRID],inserted.[BuildingID],'UPDATE',
         N'BuildingName = ' + CASE WHEN inserted.[BuildingName] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[BuildingName],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'YearBuilt = ' + CASE WHEN inserted.[YearBuilt] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[YearBuilt],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
-        N'DeletedInd = ' + CASE WHEN inserted.[DeletedInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DeletedInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'DeleteInd = ' + CASE WHEN inserted.[DeleteInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DeleteInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationUserID = ' + CASE WHEN inserted.[CreationUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationDate = ' + CASE WHEN inserted.[CreationDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'LastUpdateUserID = ' + CASE WHEN inserted.[LastUpdateUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[LastUpdateUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
@@ -3244,7 +3249,7 @@ OUTPUT N'COMPLEX',inserted.[UPRID],inserted.[ComplexID],'UPDATE',
         N'PropertyTypeID = ' + CASE WHEN deleted.[PropertyTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[PropertyTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'StatusCode = ' + CASE WHEN deleted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationDate = ' + CASE WHEN deleted.[CreationDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[CreationDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
-        N'DeletedInd = ' + CASE WHEN deleted.[DeletedInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[DeletedInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'DeleteInd = ' + CASE WHEN deleted.[DeleteInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[DeleteInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationUserID = ' + CASE WHEN deleted.[CreationUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[CreationUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'LastUpdateUserID = ' + CASE WHEN deleted.[LastUpdateUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[LastUpdateUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'LastUpdateDate = ' + CASE WHEN deleted.[LastUpdateDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),deleted.[LastUpdateDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END,
@@ -3254,7 +3259,7 @@ OUTPUT N'COMPLEX',inserted.[UPRID],inserted.[ComplexID],'UPDATE',
         N'PropertyTypeID = ' + CASE WHEN inserted.[PropertyTypeID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[PropertyTypeID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'StatusCode = ' + CASE WHEN inserted.[StatusCode] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[StatusCode],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationDate = ' + CASE WHEN inserted.[CreationDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
-        N'DeletedInd = ' + CASE WHEN inserted.[DeletedInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DeletedInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
+        N'DeleteInd = ' + CASE WHEN inserted.[DeleteInd] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[DeleteInd],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'CreationUserID = ' + CASE WHEN inserted.[CreationUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[CreationUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'LastUpdateUserID = ' + CASE WHEN inserted.[LastUpdateUserID] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[LastUpdateUserID],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END + NCHAR(10) +
         N'LastUpdateDate = ' + CASE WHEN inserted.[LastUpdateDate] IS NULL THEN N'<NULL>' ELSE N'"' + REPLACE(REPLACE(REPLACE(REPLACE(CONVERT(NVARCHAR(MAX),inserted.[LastUpdateDate],126),N'\',N'\\'),N'"',N'""'),NCHAR(13),N'\r'),NCHAR(10),N'\n') + N'"' END

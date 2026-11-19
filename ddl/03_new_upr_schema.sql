@@ -87,7 +87,7 @@ CREATE TABLE dbo.REF_PROPERTYTYPE
     PropertyTypeName  VARCHAR(128) NOT NULL,
     AllowsBuildings   BIT NOT NULL CONSTRAINT DF_REF_PROPERTYTYPE_AllowsBuildings DEFAULT (0),
     AllowsUnits       BIT NOT NULL CONSTRAINT DF_REF_PROPERTYTYPE_AllowsUnits DEFAULT (0),
-    DeletedInd        BIT NOT NULL CONSTRAINT DF_REF_PROPERTYTYPE_DeletedInd DEFAULT (0),
+    DeleteInd        BIT NOT NULL CONSTRAINT DF_REF_PROPERTYTYPE_DeletedInd DEFAULT (0),
     CreationUserID    VARCHAR(128) NOT NULL,
     CreationDate      DATETIME2(0) NOT NULL CONSTRAINT DF_REF_PROPERTYTYPE_CreationDate DEFAULT (SYSDATETIME()),
     LastUpdateUserID VARCHAR(128) NOT NULL,
@@ -96,7 +96,7 @@ CREATE TABLE dbo.REF_PROPERTYTYPE
     CONSTRAINT UQ_REF_PROPERTYTYPE_Code UNIQUE (PropertyTypeCode),
     CONSTRAINT CK_REF_PROPERTYTYPE_AllowsBuildings CHECK (AllowsBuildings IN (0,1)),
     CONSTRAINT CK_REF_PROPERTYTYPE_AllowsUnits CHECK (AllowsUnits IN (0,1)),
-    CONSTRAINT CK_REF_PROPERTYTYPE_DeletedInd CHECK (DeletedInd IN (0,1)),
+    CONSTRAINT CK_REF_PROPERTYTYPE_DeletedInd CHECK (DeleteInd IN (0,1)),
     CONSTRAINT CK_REF_PROPERTYTYPE_Dates CHECK (LastUpdateDate >= CreationDate)
 );
 GO
@@ -109,14 +109,14 @@ CREATE TABLE dbo.REF_PROPERTY_STATUSCODE
     PropertyStatusCodeID INT IDENTITY(1,1) NOT NULL,
     StatusCode           VARCHAR(30) NOT NULL,
     Description          VARCHAR(128) NOT NULL,
-    DeletedInd           BIT NOT NULL CONSTRAINT DF_REF_Property_STATUSCODE_DeletedInd DEFAULT (0),
+    DeleteInd           BIT NOT NULL CONSTRAINT DF_REF_Property_STATUSCODE_DeletedInd DEFAULT (0),
     CreationUserID       VARCHAR(128) NOT NULL,
     CreationDate         DATETIME2(0) NOT NULL CONSTRAINT DF_REF_Property_STATUSCODE_CreationDate DEFAULT (SYSDATETIME()),
     LastUpdateUserID    VARCHAR(128) NOT NULL,
     LastUpdateDate      DATETIME2(0) NOT NULL CONSTRAINT DF_REF_Property_STATUSCODE_LastUpdatedDate DEFAULT (SYSDATETIME()),
     CONSTRAINT PK_REF_PROPERTY_STATUSCODE PRIMARY KEY CLUSTERED (PropertyStatusCodeID),
     CONSTRAINT UQ_REF_Property_STATUSCODE_StatusCode UNIQUE (StatusCode),
-    CONSTRAINT CK_REF_Property_STATUSCODE_DeletedInd CHECK (DeletedInd IN (0,1)),
+    CONSTRAINT CK_REF_Property_STATUSCODE_DeletedInd CHECK (DeleteInd IN (0,1)),
     CONSTRAINT CK_REF_Property_STATUSCODE_Dates CHECK (LastUpdateDate >= CreationDate)
 );
 GO
@@ -173,7 +173,7 @@ CREATE TABLE dbo.REF_UNITTYPECODE
     UnitTypeName      VARCHAR(100) NOT NULL,
     Description       VARCHAR(128) NULL,
     ActiveInd          BIT NOT NULL CONSTRAINT DF_REF_UNITTYPECODE_ActiveInd DEFAULT (1),
-    DeletedInd        BIT NOT NULL CONSTRAINT DF_REF_UNITTYPECODE_DeletedInd DEFAULT (0),
+    DeleteInd        BIT NOT NULL CONSTRAINT DF_REF_UNITTYPECODE_DeletedInd DEFAULT (0),
     CreationUserID    VARCHAR(128) NOT NULL,
     CreationDate      DATETIME2(0) NOT NULL CONSTRAINT DF_REF_UNITTYPECODE_CreationDate DEFAULT (SYSDATETIME()),
     LastUpdateUserID VARCHAR(128) NOT NULL,
@@ -181,7 +181,7 @@ CREATE TABLE dbo.REF_UNITTYPECODE
     CONSTRAINT PK_REF_UNITTYPECODE PRIMARY KEY CLUSTERED (UnitTypeCodeID),
     CONSTRAINT UQ_REF_UNITTYPECODE_Code UNIQUE (UnitTypeCode),
     CONSTRAINT UQ_REF_UNITTYPECODE_Name UNIQUE (UnitTypeName),
-    CONSTRAINT CK_REF_UNITTYPECODE_DeletedInd CHECK (DeletedInd IN (0,1)),
+    CONSTRAINT CK_REF_UNITTYPECODE_DeletedInd CHECK (DeleteInd IN (0,1)),
     CONSTRAINT CK_REF_UNITTYPECODE_Dates CHECK (LastUpdateDate >= CreationDate)
 );
 GO
@@ -266,7 +266,7 @@ CREATE TABLE dbo.COMPLEX
     StatusCode      VARCHAR(20) NOT NULL CONSTRAINT DF_COMPLEX_StatusCode DEFAULT ('ACTIVE'),
     CreationDate     DATETIME2(0) NOT NULL CONSTRAINT DF_COMPLEX_CreationDate DEFAULT (SYSUTCDATETIME()),
     --CreatedBy       VARCHAR(100) NOT NULL CONSTRAINT DF_COMPLEX_CreatedBy DEFAULT (SUSER_SNAME()),
-    DeletedInd   BIT NOT NULL,
+    DeleteInd   BIT NOT NULL,
     CreationUserID VARCHAR (128) NOT NULL,
     LastUpdateUserID  VARCHAR(128) NOT NULL,
     LastUpdateDate    DATETIME2(0) NOT NULL,
@@ -291,7 +291,7 @@ CREATE TABLE dbo.PROPERTY
     Parcel         VARCHAR(20) NULL,
     StatusCode     VARCHAR(20) NOT NULL CONSTRAINT DF_PROPERTY_StatusCode DEFAULT ('ACTIVE'),
     CreationDate    DATETIME2(0) NOT NULL CONSTRAINT DF_PROPERTY_CreationDate DEFAULT (SYSUTCDATETIME()),
-    DeletedInd   BIT NOT NULL,
+    DeleteInd   BIT NOT NULL,
     CreationUserID VARCHAR (128) NOT NULL,
     LastUpdateUserID  VARCHAR(128) NOT NULL,
     LastUpdateDate    DATETIME2(0) NOT NULL,
@@ -316,7 +316,7 @@ CREATE TABLE dbo.CONDO
     OwnerName   VARCHAR(200) NULL,
     StatusCode  VARCHAR(20) NOT NULL CONSTRAINT DF_CONDO_StatusCode DEFAULT ('ACTIVE'),
     CreationDate DATETIME2(0) NOT NULL CONSTRAINT DF_CONDO_CreationDate DEFAULT (SYSUTCDATETIME()),
-    DeletedInd   BIT NOT NULL,
+    DeleteInd   BIT NOT NULL,
     CreationUserID VARCHAR (128) NOT NULL,
     LastUpdateUserID  VARCHAR(128) NOT NULL,
     LastUpdateDate    DATETIME2(0) NOT NULL,
@@ -337,7 +337,7 @@ CREATE TABLE dbo.BUILDING
     BuildingName VARCHAR(200) NULL,
     YearBuilt    SMALLINT NULL,
     StatusCode   VARCHAR(20) NOT NULL CONSTRAINT DF_BUILDING_StatusCode DEFAULT ('ACTIVE'),
-    DeletedInd   BIT NOT NULL,
+    DeleteInd   BIT NOT NULL,
     CreationUserID VARCHAR (128) NOT NULL,
     CreationDate  DATETIME2(0) NOT NULL CONSTRAINT DF_BUILDING_CreationDate DEFAULT (SYSUTCDATETIME()),
     LastUpdateUserID  VARCHAR(128) NOT NULL,
@@ -683,7 +683,7 @@ DECLARE @User NVARCHAR(128) = SUSER_SNAME();
 DECLARE @Now  DATETIME2(0) = SYSDATETIME();
 
 INSERT INTO dbo.REF_PROPERTYTYPE
-    (PropertyTypeCode, PropertyTypeName, AllowsBuildings, AllowsUnits, DeletedInd,
+    (PropertyTypeCode, PropertyTypeName, AllowsBuildings, AllowsUnits, DeleteInd,
      CreationUserID, CreationDate, LastUpdateUserID, LastUpdateDate)
 VALUES
     (N'SF',       N'Single Family',      1, 1, 0, @User, @Now, @User, @Now),
@@ -699,7 +699,7 @@ VALUES
 GO
 
 INSERT INTO dbo.REF_PROPERTY_STATUSCODE
-    (StatusCode, Description, DeletedInd, CreationUserID, CreationDate, LastUpdateUserID, LastUpdateDate)
+    (StatusCode, Description, DeleteInd, CreationUserID, CreationDate, LastUpdateUserID, LastUpdateDate)
 VALUES
     (N'ACTIVE',   N'Active',   0, SUSER_SNAME(), SYSDATETIME(), SUSER_SNAME(), SYSDATETIME()),
     (N'INACTIVE', N'Inactive', 0, SUSER_SNAME(), SYSDATETIME(), SUSER_SNAME(), SYSDATETIME()),

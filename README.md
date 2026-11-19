@@ -5,11 +5,11 @@ SQL Server integration that loads **AddressMaster** and **SDAT** into the **hier
 **Model:** `docs/NewUPRTABLEUSED.docx` + `docs/Response.docx` (COMPLEX).  
 **Old flat model** archived under `legacy/` for reference only - do not run it.
 
-Latest delivery: [November 6 R13 data structure changes](CLIENT_MAIN_LOADER_2026-11-06.md).
-Send `UPR_Main_Loader_2026-11-06_R13.zip`: complete loader, full-records listing,
-Search / Property 360 demo, read-only schema check and closure index report, all for
-the client's record layout of 11/6/2026 (now `ddl/03_new_upr_schema.sql`). The
-guide includes the requested index review.
+Latest delivery: [November 11 R14](CLIENT_MAIN_LOADER_2026-11-11.md) — DeleteInd on every
+table, full-records listing fixed for the 11/6/2026 indexes, corrected search by address
+(`scripts/search_upr_by_address.sql`). Send `UPR_Main_Loader_2026-11-11_R14.zip`.
+R13 [data structure changes and index review](CLIENT_MAIN_LOADER_2026-11-06.md) still applies;
+the client layout is `ddl/03_new_upr_schema.sql`.
 
 Earlier rules still in force: [R11 C Number Complex / Building / Unit](CLIENT_MAIN_LOADER_2026-11-02.md),
 [R12 layout check](CLIENT_MAIN_LOADER_2026-11-03.md). `UPR_Main_Loader_2026-10-14_R10.zip`
@@ -27,7 +27,8 @@ layout-check lists are regenerated from the DDL with `tools/regen_audit_images.p
 ```
 SQL/
 ├── DELIVERY.md                    # Delivery package overview
-├── CLIENT_MAIN_LOADER_2026-11-06.md # Current client run guide (R13)
+├── CLIENT_MAIN_LOADER_2026-11-11.md # Current client run guide (R14)
+├── CLIENT_MAIN_LOADER_2026-11-06.md # R13 data structure changes + index review
 ├── ddl/
 │   └── 03_new_upr_schema.sql      # Hierarchical schema (run first)
 ├── scripts/

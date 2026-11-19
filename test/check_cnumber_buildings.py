@@ -263,7 +263,7 @@ try:
     client_layout(db)
     cnumber_fixture(db)
     output = load(db)
-    assert 'UPR MAIN LOADER 2026-11-06 R13' in output and 'Record layout check passed.' in output and 'C Number: groups=' in output, output[-3000:]
+    assert 'UPR MAIN LOADER 2026-11-11 R14' in output and 'Record layout check passed.' in output and 'C Number: groups=' in output, output[-3000:]
     run_id = re.search(r'Audit RunID: ([0-9a-fA-F-]{36})', output)[1]
     audit = sql(db, (ROOT / 'scripts/check_upr_audit_result.sql').read_text().replace(
         'DECLARE @RunID UNIQUEIDENTIFIER=NULL;', f"DECLARE @RunID UNIQUEIDENTIFIER='{run_id}';"))
@@ -333,7 +333,7 @@ try:
                                 ('COMPLEX', ('CreationUserID',)), ('PROPERTY', ('CreationUserID',)),
                                 ('CONDO', ('CreationUserID',)), ('BUILDING', ('CreationUserID',)),
                                 ('UNIT', ('CreationUserID',)), ('CONTACT', ())):
-        deleted = 'DeleteInd' if table in ('ADDRESS', 'UNIT', 'CONTACT') else 'DeletedInd' if table != 'UPR' else None
+        deleted = 'DeleteInd' if table != 'UPR' else None
         conditions = ' OR '.join([f'{c} IS NULL' for c in user_columns + ('LastUpdateUserID',)]
                                  + ['LastUpdateDate IS NULL OR LastUpdateDate <> CreationDate']
                                  + ([f'{deleted} <> 0'] if deleted else []))
